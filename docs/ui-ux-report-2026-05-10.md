@@ -18,6 +18,21 @@
 
 ## Executive Summary
 
+## Runtime Layout Validation (Headless Textual)
+
+To verify this was not purely a static read, I also ran the TUI in Textual test mode and inspected live widget regions on a 120x40 terminal.
+
+Observed dashboard layout at runtime:
+
+- `#dashboard` occupies the full screen region `(0,0,120,40)`.
+- `#active` appears near the top at `(0,1,120,3)`.
+- `#recent` is directly below at `(0,4,120,3)`.
+- `#job-id` input follows at `(0,7,120,3)`.
+- Primary buttons are stacked vertically (`#new-job` `(0,10,16,3)`, `#view-logs` `(0,13,16,3)`, `#cancel` `(0,16,16,3)`).
+
+This confirms the practical interaction density concern: job tables are short, while form controls dominate vertical space even before history/detail flows.
+
+
 Dispatch has a strong operational core for expert users: explicit keyboard bindings, guardrails around invalid source/destination combinations, concurrency caps, and Kerberos TTL checks before launch. The architecture cleanly separates screens by task and supports rapid keyboard-driven workflows.
 
 The biggest UX gaps are around **affordance and recoverability**:
