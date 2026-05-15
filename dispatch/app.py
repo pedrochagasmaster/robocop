@@ -74,7 +74,7 @@ NavItem.nav-active {
 #stats-row {
     layout: horizontal;
     height: auto;
-    padding: 1 1;
+    padding: 1 0;
 }
 
 .stat-card {
@@ -84,7 +84,6 @@ NavItem.nav-active {
     padding: 0 1;
     margin: 0 1;
     content-align: center middle;
-    min-width: 16;
 }
 
 .stat-card .stat-label {
