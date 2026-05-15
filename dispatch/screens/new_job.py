@@ -6,21 +6,22 @@ import os
 from pathlib import Path
 
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 
 from .. import config, jobs, kerberos, manifest, process, sql
 from .preview import PreviewScreen
+from .sidebar import NavItem, Sidebar
 
 
 class NewJobScreen(Screen[None]):
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
-        ("e", "edit_sql", "Edit"),
+        ("e", "edit_sql", "Edit SQL"),
         ("k", "kinit", "kinit"),
         ("l", "launch", "Launch"),
-        ("p", "preview", "Preview"),
+        ("p", "preview", "Preview SQL"),
     ]
 
     def __init__(self, launch_cwd: Path) -> None:
@@ -31,25 +32,79 @@ class NewJobScreen(Screen[None]):
         self.kerberos_ttl: int | None = None
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="new-job"):
-            yield Static("New Job")
-            yield Static(self._matrix_text(), id="matrix")
-            yield Input(value=self._default_sql_file(), placeholder="SQL File", id="sql-file")
-            yield Input(value=self.source_type, placeholder="Source", id="source")
-            yield Input(value=self.destination_type, placeholder="Destination", id="destination")
-            yield Input(value="dw_settle", placeholder="Schema", id="schema")
-            yield Input(value="dispatch_result", placeholder="Table name", id="table-name")
-            yield Input(value="", placeholder="Existing table as schema.table", id="existing-table")
-            yield Input(value="", placeholder="Email", id="email")
-            yield Input(value="Dispatch Job", placeholder="Subject", id="subject")
-            yield Input(value="2026-01-01", placeholder="Start date YYYY-MM-DD", id="start-date")
-            yield Input(value="2026-01-31", placeholder="End date YYYY-MM-DD", id="end-date")
-            yield Static("Kerberos: checking", id="kerberos")
-            yield Static("", id="warning")
-            yield Button("Preview SQL", id="preview", variant="primary")
-            yield Button("Launch", id="launch", variant="success")
+        yield Header(show_clock=True)
+        sidebar = Sidebar()
+        sidebar.active_screen = "new_job"
+        yield sidebar
+        with Vertical(id="main-content"):
+            yield Static("", id="kerberos-status")
+            with Vertical(id="new-job-content"):
+                yield Static("New Job", classes="section-title")
+
+                with Vertical(id="matrix-panel"):
+                    yield Static("Source \u00d7 Destination legal cells", classes="section-title")
+                    yield DataTable(id="matrix-table")
+
+                with Vertical(id="info-panel"):
+                    yield Static(
+                        "[bold cyan]\u24d8[/] Auto-detected source type: [cyan]SqlFile \u2192 Table[/]",
+                        id="info-detected",
+                    )
+                    yield Static(
+                        "[yellow]\u26a0[/] Ensure the combination above matches your "
+                        "source and destination selection.",
+                        classes="warn-text",
+                    )
+
+                with Vertical(id="form-grid"):
+                    yield Static("SQL File", classes="field-label")
+                    yield Static("Existing Table", classes="field-label")
+                    yield Input(value=self._default_sql_file(), placeholder="SQL File", id="sql-file")
+                    yield Input(
+                        value="", placeholder="e.g. analytics.events_existing", id="existing-table"
+                    )
+
+                    yield Static("Source", classes="field-label")
+                    yield Static("Email (notifications)", classes="field-label")
+                    yield Input(value=self.source_type, placeholder="Source type", id="source")
+                    yield Input(value="", placeholder="dataops@company.com", id="email")
+
+                    yield Static("Destination", classes="field-label")
+                    yield Static("Subject (email)", classes="field-label")
+                    yield Input(value=self.destination_type, placeholder="Destination type", id="destination")
+                    yield Input(value="Dispatch Job", placeholder="Subject line", id="subject")
+
+                    yield Static("Schema", classes="field-label")
+                    yield Static("Start Date (YYYY-MM-DD)", classes="field-label")
+                    yield Input(value="dw_settle", placeholder="Schema", id="schema")
+                    yield Input(value="2026-01-01", placeholder="YYYY-MM-DD", id="start-date")
+
+                    yield Static("Table Name", classes="field-label")
+                    yield Static("End Date (YYYY-MM-DD)", classes="field-label")
+                    yield Input(value="dispatch_result", placeholder="Table name", id="table-name")
+                    yield Input(value="2026-01-31", placeholder="YYYY-MM-DD", id="end-date")
+
+                yield Static("", id="warning-text")
+
+                with Horizontal(classes="button-row"):
+                    yield Button("Preview SQL [P]", id="preview", variant="primary")
+                    yield Button("Launch [L]", id="launch", variant="success")
+
+                yield Static(
+                    "[dim]\u24d8 Use Preview SQL to validate the generated statement before launching.\n"
+                    "  Job will be submitted to Impala over SSH.[/]",
+                    id="launch-info",
+                )
+        yield Footer()
 
     async def on_mount(self) -> None:
+        matrix = self.query_one("#matrix-table", DataTable)
+        matrix.add_columns("SOURCE \\ DEST", "TABLE", "CSV", "TABLE+CSV")
+        matrix.add_row("SqlFile", "[green]\u2713[/]", "[green]\u2713[/]", "[green]\u2713[/]")
+        matrix.add_row("SqlTemplate", "[green]\u2713[/]", "[dim]\u2014[/]", "[dim]\u2014[/]")
+        matrix.add_row("ExistingTable", "[dim]\u2014[/]", "[green]\u2713[/]", "[dim]\u2014[/]")
+        matrix.show_cursor = False
+
         self.kerberos_ttl = await kerberos.ticket_ttl_seconds()
         self._refresh_kerberos()
         self._detect_sql()
@@ -58,24 +113,16 @@ class NewJobScreen(Screen[None]):
         matches = sorted(self.launch_cwd.glob("*.sql"))
         return str(matches[0]) if matches else str(self.launch_cwd / "query.sql")
 
-    def _matrix_text(self) -> str:
-        return (
-            "Source x Destination legal cells:\n"
-            "SqlFile: Table | Csv | Table+Csv\n"
-            "SqlTemplate: Table\n"
-            "ExistingTable: Csv"
-        )
-
     def _input_value(self, widget_id: str) -> str:
         return self.query_one(f"#{widget_id}", Input).value.strip()
 
     def _refresh_kerberos(self) -> None:
-        label = self.query_one("#kerberos", Static)
+        label = self.query_one("#kerberos-status", Static)
         if self.kerberos_ttl is None:
-            label.update("Kerberos ticket missing - press K to kinit")
+            label.update("[yellow]Kerberos ticket missing \u2014 press K to kinit[/]")
         else:
             minutes = self.kerberos_ttl // 60
-            label.update(f"Kerberos: {minutes}m remaining")
+            label.update(f"[dim]Kerberos: {minutes}m remaining[/]")
 
     def _read_sql(self) -> str:
         sql_path = Path(self._input_value("sql-file"))
@@ -86,7 +133,8 @@ class NewJobScreen(Screen[None]):
             detected = sql.detect_source(self._read_sql())
         except OSError:
             return
-        self.query_one("#warning", Static).update(f"Auto-detected: {detected}")
+        info = self.query_one("#info-detected", Static)
+        info.update(f"[bold cyan]\u24d8[/] Auto-detected source type: [cyan]{detected}[/]")
         self.query_one("#source", Input).value = detected
 
     def _validate(self) -> str | None:
@@ -102,9 +150,9 @@ class NewJobScreen(Screen[None]):
             return "Kerberos ticket TTL is under 5 minutes"
         sql_text = self._read_sql()
         if sql.is_malformed_template(sql_text):
-            return "SQL contains only one of {date_inicio}/{date_fim} - likely a typo"
+            return "SQL contains only one of {{date_inicio}}/{{date_fim}} \u2014 likely a typo"
         if source_type == "SqlTemplate" and not sql.template_is_complete(sql_text):
-            return "SqlTemplate requires both {date_inicio} and {date_fim}"
+            return "SqlTemplate requires both {{date_inicio}} and {{date_fim}}"
         return None
 
     def _source_destination(self) -> tuple[manifest.Source, manifest.Destination]:
@@ -145,23 +193,27 @@ class NewJobScreen(Screen[None]):
         source_type = self._input_value("source")
         schema = self._input_value("schema")
         table = self._input_value("table-name")
-        sql_text = self._read_sql()
+        try:
+            sql_text = self._read_sql()
+        except OSError as exc:
+            self.query_one("#warning-text", Static).update(f"[red]{exc}[/]")
+            return
         if source_type == "SqlTemplate":
             preview = sql.monthly_preview(
-                sql_text,
-                schema,
-                table,
+                sql_text, schema, table,
                 self._input_value("start-date"),
                 self._input_value("end-date"),
             )
         else:
             preview = sql.table_wrapper(sql_text, schema, table, config.current_user())
-        self.app.push_screen(PreviewScreen("SQL Preview", preview))
+        self.app.push_screen(
+            PreviewScreen("SQL Preview", preview, schema=schema, table=table)
+        )
 
     async def action_launch(self) -> None:
         error = self._validate()
         if error:
-            self.query_one("#warning", Static).update(error)
+            self.query_one("#warning-text", Static).update(f"[red]{error}[/]")
             return
         source, destination = self._source_destination()
         job_dir, _job_manifest = manifest.create_job(
@@ -172,7 +224,9 @@ class NewJobScreen(Screen[None]):
             sql_text=self._read_sql(),
         )
         await process.launch_runner(job_dir)
-        self.query_one("#warning", Static).update(f"Launched Job {job_dir.name}")
+        self.query_one("#warning-text", Static).update(
+            f"[green]\u2713 Launched Job {job_dir.name}[/]"
+        )
 
     def action_edit_sql(self) -> None:
         editor = os.environ.get("EDITOR", "vi")
@@ -185,3 +239,9 @@ class NewJobScreen(Screen[None]):
             process.run_interactive("kinit")
         self.kerberos_ttl = await kerberos.ticket_ttl_seconds()
         self._refresh_kerberos()
+
+    def on_nav_item_selected(self, event: NavItem.Selected) -> None:
+        if event.item_id == "overview":
+            self.app.pop_screen()
+        elif event.item_id != "new_job":
+            self.dismiss()
