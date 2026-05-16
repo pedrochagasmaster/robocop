@@ -46,14 +46,37 @@ def _handle_sigterm(_signum: int, _frame: FrameType | None) -> None:
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     _log("[runner] SIGTERM received; cancelling current orchestrator")
     _set_terminal_state("Cancelled", -signal.SIGTERM)
-    if CURRENT_PROC is not None and CURRENT_PROC.poll() is None:
-        CURRENT_PROC.terminate()
-        deadline = time.monotonic() + 10
-        while CURRENT_PROC.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.1)
-        if CURRENT_PROC.poll() is None:
-            CURRENT_PROC.kill()
-            CURRENT_PROC.wait()
+    if CURRENT_PROC is not None:
+        pid = CURRENT_PROC.pid
+        # Use OS-level primitives rather than Popen.poll()/wait().
+        # Popen.wait() holds _waitpid_lock while blocked; calling .poll() or
+        # .wait() from a signal handler that interrupts that same wait would
+        # attempt a non-reentrant lock acquire and deadlock.
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pid = None
+        if pid is not None:
+            deadline = time.monotonic() + 10
+            reaped = False
+            while not reaped and time.monotonic() < deadline:
+                try:
+                    wpid, _ = os.waitpid(pid, os.WNOHANG)
+                    if wpid == pid:
+                        reaped = True
+                except ChildProcessError:
+                    reaped = True
+                if not reaped:
+                    time.sleep(0.1)
+            if not reaped:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+                except OSError:
+                    pass
+            # Mark the Popen object as reaped so Popen.__exit__ → self.wait()
+            # returns immediately instead of blocking on _waitpid_lock.
+            CURRENT_PROC.returncode = -signal.SIGTERM
     raise SystemExit(0)
 
 

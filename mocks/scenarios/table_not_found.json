@@ -1,0 +1,4 @@
+{
+  "description": "An unknown table reference causes an immediate AnalysisException (TABLE_NOT_FOUND fatal error).",
+  "delay_seconds": 0
+}
