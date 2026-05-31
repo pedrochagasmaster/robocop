@@ -1,0 +1,152 @@
+================================================================================
+DISPATCH TEXTUAL TUI - UI/UX VALIDATION EVIDENCE
+Date: Saturday, May 30, 2026
+Environment: Linux VM, /workspace, tmux session
+================================================================================
+
+SCREEN 1: DASHBOARD - Unicode Icons and Status Bar
+================================================================================
+    ▕                            DispatchApp                           23:43:32
+ D  ▕  ● Running: 0/2  ✓ Finished: 0  ✗ Failed: 0  🔑 Kerberos: 7h 59m
+    ▕
+    ▕ Active Jobs newest first
+    ▕
+ ⌂  ▕  ┏╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍┓
+    ▕  ╏                                                                   ╏
+    ▕  ╏                                                                   ╏
+ ⊞  ▕  ╏                                 □                                 ╏
+    ▕  ╏    No active jobs                                                 ╏
+    ▕  ╏                       Press N to create one                       ╏
+ ▸  ▕  ╏                                                                   ╏
+    ▕  ╏                                                                   ╏
+    ▕  ┗╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍┛
+ ◷  ▕
+    ▕                                                                         ▂▂
+    ▕ Recently Finished (last 7 days) newest first
+ ☰ ▕
+    ▕  ┏╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍┓
+    ▕  ╏                                                                   ╏
+    ▕  ╏                                                                   ╏
+    ▕  ╏                                 □                                 ╏
+    ▕  ╏    No recently finished jobs                                      ╏
+ n New Job  v View Logs  c Cancel  h History  b Browse  j Down  k Up▏^p palette
+
+VALIDATION POINTS:
+✓ Unicode sidebar icons render correctly: D ⌂ ⊞ ▸ ◷ ☰
+✓ Status bar shows counters with symbols: ● ✓ ✗ 🔑
+✓ Box drawing characters render properly: ╍╏┓┛
+✓ Action bar shows keyboard shortcuts clearly
+✓ Kerberos timer displays: "7h 59m"
+
+
+SCREEN 2: NEW JOB WIZARD - Launch Button and Validation Summary
+================================================================================
+    ▕                            DispatchApp                           23:43:59
+ D  ▕                                                  Kerberos: 479m remaining
+    ▕
+    ▕  New Job
+    ▕ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+ ⌂  ▕   ▼ Source × Destination legal cells
+    ▕
+    ▕      SOURCE \ DEST  TABLE  CSV  TABLE+CSV
+ ⊞  ▕      SqlFile        ✓      ✓    ✓
+    ▕      SqlTemplate    ✓      —    —
+    ▕      ExistingTable  —      ✓    —
+ ▸  ▕
+    ▕  ╭───────────────────────────────────────────────────────────────────╮
+    ▕  │                                                                   │
+ ◷  ▕  │ ⓘ Auto-detected source type: SqlFile → Table                      │
+    ▕  │ ⚠ Ensure the combination above matches your source and            │
+    ▕  │ destination selection.                                            │
+ ☰ ▕────────────────────────────────────────────────────────────────────────────
+    ▕
+    ▕  ✗ 1 issue(s): SQL file not found      ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+    ▕                                          Preview SQL        Launch
+    ▕                                        ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+    ▕
+ esc Back  e Edit SQL  k kinit  l Launch  p Preview SQL  m Matrix  q▏^p palette
+
+VALIDATION POINTS:
+✓ Launch button visible in bottom action bar
+✓ Validation summary displays: "✗ 1 issue(s): SQL file not found"
+✓ Preview SQL button also visible
+✓ Source × Destination matrix table renders correctly with checkmarks
+✓ Info panel shows auto-detection with ⓘ and ⚠ symbols
+✓ Keyboard shortcuts in action bar
+
+
+SCREEN 3: HELP MODAL - Keyboard Shortcuts
+================================================================================
+
+
+          ╔══════════════════════════════════════════════════════════╗
+          ║                                                          ║
+          ║  Quick Reference  N New Job  V View Logs  H History  B   ║
+          ║  Browser  ? Help  Q Quit                                 ║
+          ║                                                          ║
+          ║  ─────────────────────────────────────────────────────▁  ║
+          ║                                                          ║
+          ║  Dispatch Keyboard Shortcuts                             ║
+          ║                                                          ║
+          ║  Global                                                  ║
+          ║    Q       Quit Dispatch                                 ║
+          ║    ?       Toggle this help screen                       ║
+          ║                                                          ║
+          ║  ───────────────                                         ║
+          ║                                                          ║
+          ║  Dashboard                                               ║
+          ║    N       New Job wizard                                ║
+          ║                                                          ║
+          ╚══════════════════════════════════════════════════════════╝
+
+
+
+
+VALIDATION POINTS:
+✓ Help modal renders with box drawing borders: ╔══╗ ║ ╚══╝
+✓ Content structure visible with sections
+✓ Quick Reference section lists main functions
+✓ Keyboard shortcuts organized by category (Global, Dashboard)
+✓ Modal can be dismissed with Escape
+
+
+SCREEN 4: BROWSER - Auto-Loaded Tables
+================================================================================
+    ▕                            DispatchApp                           23:45:07
+ D  ▕
+    ▕ Browse Impala Metadata
+    ▕                                             ▏
+    ▕   ▊▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▎ ▊▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▎   ▏ dw_settle.dispatch_result
+ ⌂  ▕   ▊  dw_settle      ▎ ▊  *              ▎   ▏
+    ▕   ▊▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▎ ▊▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▎   ▏
+    ▕                                             ▏ Impala Table · 3 columns ·
+ ⊞  ▕ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔                            ▏ Schema: dw_settle
+    ▕   SHOW TABLES                               ▏
+    ▕ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁                            ▏ ╭────────────────────────╮
+ ▸  ▕   Name                       Type           ▏ │  Column  Type    Comme │
+    ▕   dispatch_result            table          ▏ │  name    type    comme │
+    ▕   dispatch_monthly_fulljoin  table          ▏ │  id      int     mock  │
+ ◷  ▕  Selected:                        2 tables  ▏ │  value   string  mock  │
+    ▕  dw_settle.dispatch_r                       ▏ │               ▊        │
+    ▕  esult                                      ▏ ╰────────────────────────╯
+ ☰ ▕
+    ▕            ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+    ▕               DESCRIBE           DROP             Back
+    ▕            ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+    ▕
+    ▕ Use arrow keys to navigate, Enter to describe, D to drop
+ esc Back  ^b Sidebar                                               ▏^p palette
+
+VALIDATION POINTS:
+✓ Tables auto-loaded immediately upon opening Browser (SHOW TABLES button visible but not pressed)
+✓ Database dropdown shows selected database: "dw_settle"
+✓ Table list displays 2 tables: dispatch_result, dispatch_monthly_fulljoin
+✓ Table count shown: "Selected: 2 tables"
+✓ Right panel displays table detail with columns (id: int, value: string)
+✓ Action buttons visible: DESCRIBE, DROP, Back
+✓ Three-pane layout renders correctly
+
+
+================================================================================
+END OF VALIDATION EVIDENCE
+================================================================================
