@@ -114,3 +114,12 @@ explicitly asks.
 ## Domain docs
 
 Use the single-context layout when present: optional root `CONTEXT.md` and `docs/adr/`. Read them before deep implementation work.
+
+## Cursor Cloud specific instructions
+
+Standard commands live in `README.md`, this file's `## Local development` / `## Validation` sections, and `pyproject.toml`. The notes below are the non-obvious cloud caveats.
+
+- **Interpreter / venv.** Use the prebuilt virtualenv at `/workspace/.venv` (Python 3.12, satisfies `requires-python >=3.10`). The cloud update script creates it and installs runtime deps from the offline `vendor/` wheels plus `pytest`/`pytest-asyncio`. Run things as `/workspace/.venv/bin/python -m dispatch` / `... -m pytest`. The system `python3` has no `venv`/`pip` configured for project deps, so don't invoke `dispatch` outside this venv.
+- **Always source `mocks/dev-env.sh` in the SAME shell before running the TUI or tests.** It puts the mock `klist`/`kinit`/`impala-shell` on `PATH`, starts the fake SMTP catcher, and exports `DISPATCH_*`. The detached job **runner inherits this environment from the TUI process**, so launching `python -m dispatch` without sourcing it first means launched jobs cannot find `impala-shell` and fail. The mock `klist` returns a valid ~8h Kerberos ticket by default, so no `kinit` is needed for happy-path launches.
+- **Data root.** `dev-env.sh` sets `DISPATCH_DATA_ROOT=/tmp/ads_storage/$USER` (not `/ads_storage/...`). `install.sh` requires that dir to exist and be writable and needs `klist`/`impala-shell` on `PATH`, so only run it after sourcing `dev-env.sh` and with `DISPATCH_PYTHON_BIN=$(command -v python3)`. Run `install.sh` from the repo root; under `dash` it prints a harmless `Bad substitution` line but still completes.
+- **Driving the TUI for tests.** It is a full-screen interactive Textual app; demo it through a desktop terminal + computer use. For deterministic, scripted launches the app honors `DISPATCH_TEST_PREFILL=<path-to-json>` to open the New Job form pre-filled. The full test suite (`/workspace/.venv/bin/python -m pytest`) takes ~50s.

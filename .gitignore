@@ -6,6 +6,7 @@ tools/prod_tui/logs/
 tools/prod_tui/*.log
 tools/prod_tui/_remote_*.py
 .understand-anything/
+.venv/
 *.pyc
 __pycache__/
 .pytest_cache/
