@@ -98,3 +98,34 @@ def monthly_preview(sql_template: str, schema: str, table_name: str, start_iso: 
 def to_orchestrator_date(iso_date: str) -> str:
     parsed = datetime.strptime(iso_date, "%Y-%m-%d")
     return parsed.strftime("%m/%d/%Y")
+
+
+def from_orchestrator_date(orchestrator_date: str) -> str:
+    """Inverse of :func:`to_orchestrator_date`: ``MM/DD/YYYY`` -> ``YYYY-MM-DD``.
+
+    Returns the input unchanged when it is not in the expected orchestrator
+    format, so clone prefill degrades gracefully on hand-edited manifests.
+    """
+    try:
+        return datetime.strptime(orchestrator_date, "%m/%d/%Y").strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        return orchestrator_date
+
+
+def validate_date_range(start_iso: str, end_iso: str) -> str | None:
+    """Return an error message for a bad template date range, else ``None``.
+
+    Guards the ``SqlTemplate`` launch/preview path, where unchecked input is
+    fed to ``datetime.strptime`` and would otherwise raise mid-flight.
+    """
+    try:
+        start = datetime.strptime(start_iso, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return "Start date must be YYYY-MM-DD"
+    try:
+        end = datetime.strptime(end_iso, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return "End date must be YYYY-MM-DD"
+    if start > end:
+        return "Start date must not be after end date"
+    return None

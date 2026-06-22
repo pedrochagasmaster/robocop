@@ -25,6 +25,11 @@ from ..formatting import (
 from .confirm import ConfirmScreen
 from .sidebar import Sidebar
 
+# The live log view keeps only a bounded tail in memory and on screen so very
+# chatty jobs cannot grow the UI without limit. The RichLog widget and the
+# in-memory deque share this window so the truncation hint stays truthful.
+LOG_VIEW_LINES = 200
+
 
 class JobDetailScreen(Screen[None]):
     BINDINGS = [
@@ -47,7 +52,7 @@ class JobDetailScreen(Screen[None]):
         self.job_id = job_id
         self.cancel_on_mount = cancel_on_mount
         self._tail_offset = 0
-        self._tail_lines: deque[str] = deque(maxlen=200)
+        self._tail_lines: deque[str] = deque(maxlen=LOG_VIEW_LINES)
         self._evicted_line_count = 0
         self._search_query = ""
         self._error_code: str | None = None
@@ -106,7 +111,12 @@ class JobDetailScreen(Screen[None]):
                 yield Static("", id="truncation-hint")
 
                 with Vertical(id="log-panel"):
-                    yield RichLog(id="log-display", highlight=True, markup=True)
+                    yield RichLog(
+                        id="log-display",
+                        highlight=True,
+                        markup=True,
+                        max_lines=LOG_VIEW_LINES,
+                    )
                     yield Input(placeholder="Search log\u2026", id="log-search-input")
 
             with Horizontal(classes="action-bar"):
@@ -150,7 +160,11 @@ class JobDetailScreen(Screen[None]):
             except OSError:
                 size = self._tail_offset
             offset = self._tail_offset
-            if size < offset:
+            # The log shrank: it was rotated or truncated. Re-read from the
+            # start and signal the UI to drop the now-stale buffered lines so
+            # they are not duplicated below the fresh content.
+            reset = size < offset
+            if reset:
                 offset = 0
             if size > offset:
                 with log_path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -170,6 +184,7 @@ class JobDetailScreen(Screen[None]):
                 "new_offset": new_offset,
                 "error_code": error_code,
                 "error_line": error_line,
+                "reset": reset,
             }
 
         snapshot = await asyncio.to_thread(_read)
@@ -240,7 +255,9 @@ class JobDetailScreen(Screen[None]):
         clone_btn.display = state in ("Succeeded", "Failed", "Cancelled")
 
         self._update_error_banner(state)
-        self._append_log_lines(snapshot["new_lines"], snapshot["new_offset"])
+        self._append_log_lines(
+            snapshot["new_lines"], snapshot["new_offset"], reset=snapshot.get("reset", False)
+        )
 
         status_parts = [format_state(state, self._error_code)]
         if state == "Failed":
@@ -276,19 +293,41 @@ class JobDetailScreen(Screen[None]):
         if not banner.display:
             banner.display = True
 
-    def _append_log_lines(self, new_lines: list[str], new_offset: int) -> None:
-        if not new_lines and new_offset == self._tail_offset:
-            return
+    def _styled_log_line(self, line: str) -> str:
+        styled = self._style_log_line(line)
+        if self._search_query and self._search_query.lower() in line.lower():
+            return f"[reverse]{styled}[/]"
+        return styled
+
+    def _rebuild_log(self) -> None:
+        """Repaint the whole visible window from ``_tail_lines``.
+
+        Used when the search query changes (so already-visible lines pick up or
+        drop highlight) rather than only styling freshly appended lines.
+        """
         log_widget = self.query_one("#log-display", RichLog)
+        log_widget.clear()
+        for line in self._tail_lines:
+            log_widget.write(self._styled_log_line(line))
+        if self.follow_mode:
+            log_widget.scroll_end(animate=False)
+
+    def _append_log_lines(
+        self, new_lines: list[str], new_offset: int, *, reset: bool = False
+    ) -> None:
+        log_widget = self.query_one("#log-display", RichLog)
+        if reset:
+            self._tail_lines.clear()
+            self._evicted_line_count = 0
+            log_widget.clear()
+        elif not new_lines and new_offset == self._tail_offset:
+            return
         for line in new_lines:
             before = len(self._tail_lines)
             self._tail_lines.append(line)
             if len(self._tail_lines) == before and before == self._tail_lines.maxlen:
                 self._evicted_line_count += 1
-            styled = self._style_log_line(line)
-            if self._search_query and self._search_query.lower() in line.lower():
-                styled = f"[reverse]{styled}[/]"
-            log_widget.write(styled)
+            log_widget.write(self._styled_log_line(line))
         self._tail_offset = new_offset
         hint = self.query_one("#truncation-hint", Static)
         if self._evicted_line_count:
@@ -323,11 +362,13 @@ class JobDetailScreen(Screen[None]):
         else:
             self._search_query = ""
             search.value = ""
+            self._rebuild_log()
             self.query_one("#log-display", RichLog).focus()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "log-search-input":
             self._search_query = event.value.strip()
+            self._rebuild_log()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "log-search-input":
@@ -354,8 +395,13 @@ class JobDetailScreen(Screen[None]):
 
     @staticmethod
     def _prefill_from_manifest(item: dict) -> dict:
+        from .. import sql
+
         source = item.get("source", {})
         dest = item.get("destination", {})
+        params = item.get("params", {}) or {}
+        # Email, subject, and template dates live under ``params`` (dates as the
+        # orchestrator's MM/DD/YYYY); convert dates back to the form's ISO input.
         return {
             "source_type": source.get("type", "SqlFile"),
             "sql_file": source.get("sql_path_at_launch", ""),
@@ -363,10 +409,10 @@ class JobDetailScreen(Screen[None]):
             "schema": dest.get("schema", ""),
             "table_name": dest.get("table_name", ""),
             "dest_type": dest.get("type", "Table"),
-            "email": item.get("email", ""),
-            "subject": item.get("subject", "Dispatch Job"),
-            "start_date": source.get("start_date", ""),
-            "end_date": source.get("end_date", ""),
+            "email": params.get("to_email", ""),
+            "subject": params.get("subject", "Dispatch Job"),
+            "start_date": sql.from_orchestrator_date(params.get("start_date", "")),
+            "end_date": sql.from_orchestrator_date(params.get("end_date", "")),
         }
 
     @staticmethod

@@ -80,6 +80,10 @@ class Sidebar(Widget):
 
     active_screen = reactive("overview")
     collapsed = reactive(False)
+    # User's explicit Ctrl+B preference, honored at widths >= 100. ``None`` means
+    # no manual choice yet, so width drives the state. Narrow widths (< 100)
+    # always force-collapse regardless of this preference.
+    _manual_override: bool | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="sidebar-inner"):
@@ -111,11 +115,17 @@ class Sidebar(Widget):
     def _sync_collapse_from_app(self) -> None:
         if self.app is None:
             return
-        auto_collapsed = self.app.size.width < 100
-        if auto_collapsed != self.collapsed:
-            self.collapsed = auto_collapsed
+        if self.app.size.width < 100:
+            target = True  # too narrow to fit labels; always collapse
+        elif self._manual_override is not None:
+            target = self._manual_override  # respect the user's Ctrl+B choice
+        else:
+            target = False
+        if target != self.collapsed:
+            self.collapsed = target
 
     def toggle_collapsed(self) -> None:
+        self._manual_override = not self.collapsed
         self.collapsed = not self.collapsed
 
     def watch_collapsed(self, value: bool) -> None:

@@ -8,7 +8,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 QUICK_HELP = """\
-[bold]Quick Reference[/]   [b]N[/] New Job   [b]V[/] View Logs   [b]H[/] History   [b]B[/] Browse   [b]Q[/] Quit\
+[bold]Quick Reference[/]   [b]N[/] New Job   [b]V[/] View Logs   [b]C[/] Cancel   [b]/[/] Filter   [b]H[/] History   [b]B[/] Browse   [b]Q[/] Quit\
 """
 
 HELP_TEXT = """\
@@ -17,7 +17,7 @@ HELP_TEXT = """\
   [b]?[/]         Toggle this help screen
   [b]Ctrl+P[/]    Command palette (all destinations + kinit)
   [b]Ctrl+B[/]    Collapse / expand the sidebar
-  [b]Tab[/]       Move focus between panels
+  [b]Tab[/]       Move focus between controls
 
 [bold]Overview (jobs cockpit)[/]
   [b]N[/]         New Job wizard

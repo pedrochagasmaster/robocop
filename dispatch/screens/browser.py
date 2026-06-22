@@ -16,6 +16,9 @@ from .confirm import ConfirmScreen
 from .sidebar import Sidebar
 
 
+NO_TABLES_PLACEHOLDER = "(no tables)"
+
+
 class BrowserScreen(Screen[None]):
     BINDINGS = [
         ("b", "app.pop_screen", "Back"),
@@ -127,12 +130,19 @@ class BrowserScreen(Screen[None]):
 
     def _full_table(self) -> str:
         selected = self._selected_table()
-        if not selected:
+        # The empty-schema placeholder row is not a real table; never qualify or
+        # act on it, otherwise DESCRIBE/DROP would target "schema.(no tables)".
+        if not selected or selected == NO_TABLES_PLACEHOLDER:
             return ""
         return selected if "." in selected else f"{self._schema()}.{selected}"
 
     def _update_action_state(self) -> None:
-        """Enable/disable DESCRIBE and DROP based on whether a table is selected."""
+        """Enable/disable DESCRIBE and DROP based on whether a real table is selected.
+
+        When a schema has no tables the list shows a single ``(no tables)``
+        placeholder row; actions must stay disabled so DESCRIBE/DROP are never
+        run against the placeholder.
+        """
         has_selection = bool(self._full_table())
         self.query_one("#describe", Button).disabled = not has_selection
         self.query_one("#drop", Button).disabled = not has_selection
@@ -166,7 +176,7 @@ class BrowserScreen(Screen[None]):
             f"[dim]{len(self._tables)} tables[/]"
         )
         if not self._tables:
-            table.add_row("(no tables)", "")
+            table.add_row(NO_TABLES_PLACEHOLDER, "")
             self._show_detail_placeholder()
         elif describe_selection:
             table.cursor_coordinate = (0, 0)
