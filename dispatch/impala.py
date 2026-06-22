@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from . import process
+
+QUERY_TIMEOUT_SECONDS = 30
 
 IMPALA_BASE_ARGV = (
     "impala-shell",
@@ -17,7 +21,16 @@ IMPALA_BASE_ARGV = (
 
 
 async def query(sql: str) -> str:
-    rc, stdout, stderr = await process.run_exec(*IMPALA_BASE_ARGV, "-q", sql, timeout=30)
+    try:
+        rc, stdout, stderr = await process.run_exec(
+            *IMPALA_BASE_ARGV, "-q", sql, timeout=QUERY_TIMEOUT_SECONDS
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        # str(TimeoutError()) is empty, which would surface as a blank error in
+        # the Browser; give the user an actionable message instead.
+        raise RuntimeError(
+            f"impala-shell timed out after {QUERY_TIMEOUT_SECONDS}s"
+        ) from None
     if rc != 0:
         raise RuntimeError(stderr or stdout or f"impala-shell exited {rc}")
     return stdout

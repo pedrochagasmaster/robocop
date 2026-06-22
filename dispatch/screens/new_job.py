@@ -317,11 +317,23 @@ class NewJobScreen(Screen[None]):
         if (source, destination) not in manifest.LEGAL_CELLS:
             issues.append(f"Illegal combination: {source} \u2192 {destination}")
         if source in ("SqlFile", "SqlTemplate"):
-            if self._input_value("sql-file") and not self._sql_file_exists():
+            if not self._input_value("sql-file"):
+                issues.append("SQL file path is required")
+            elif not self._sql_file_exists():
                 issues.append("SQL file not found")
+        if source == "SqlTemplate":
+            date_error = sql.validate_date_range(
+                self._input_value("start-date"), self._input_value("end-date")
+            )
+            if date_error:
+                issues.append(date_error)
+        if source == "ExistingTable" and not self._input_value("existing-table"):
+            issues.append("Existing table name is required")
         email = self._input_value("email")
         if email and ("@" not in email or "." not in email.split("@")[-1]):
             issues.append("Invalid email format")
+        if not jobs.can_launch():
+            issues.append(f"At the {jobs.RUNNING_CAP}-Job concurrency cap")
         if self.kerberos_ttl is None:
             issues.append("Kerberos missing \u2014 press K to kinit")
         elif self.kerberos_ttl < 300:
@@ -457,6 +469,9 @@ class NewJobScreen(Screen[None]):
             return "Kerberos ticket missing"
         if self.kerberos_ttl < 300:
             return "Kerberos ticket TTL is under 5 minutes"
+        email = self._input_value("email")
+        if email and ("@" not in email or "." not in email.split("@")[-1]):
+            return "Invalid email format"
         if source_type == "ExistingTable":
             if not self._input_value("existing-table"):
                 return "Existing table name is required"
@@ -466,8 +481,14 @@ class NewJobScreen(Screen[None]):
             return "SQL file is unreadable"
         if sql.is_malformed_template(sql_text):
             return "SQL contains only one of {date_inicio}/{date_fim} \u2014 likely a typo"
-        if source_type == "SqlTemplate" and not sql.template_is_complete(sql_text):
-            return "SqlTemplate requires both {date_inicio} and {date_fim}"
+        if source_type == "SqlTemplate":
+            if not sql.template_is_complete(sql_text):
+                return "SqlTemplate requires both {date_inicio} and {date_fim}"
+            date_error = sql.validate_date_range(
+                self._input_value("start-date"), self._input_value("end-date")
+            )
+            if date_error:
+                return date_error
         return None
 
     def _source_destination(self) -> tuple[manifest.Source, manifest.Destination]:
@@ -506,6 +527,7 @@ class NewJobScreen(Screen[None]):
 
     def action_preview(self) -> None:
         source_type = self._selected_source()
+        destination_type = self._selected_destination()
         schema = self._input_value("schema")
         table = self._input_value("table-name")
         if source_type == "ExistingTable":
@@ -515,17 +537,26 @@ class NewJobScreen(Screen[None]):
         if sql_text is None:
             return
         if source_type == "SqlTemplate":
+            date_error = sql.validate_date_range(
+                self._input_value("start-date"), self._input_value("end-date")
+            )
+            if date_error:
+                self._show_message(date_error, "error")
+                return
             preview = sql.monthly_preview(
                 sql_text, schema, table,
                 self._input_value("start-date"),
                 self._input_value("end-date"),
             )
-        elif sql.is_self_contained_ddl(sql_text):
-            # The file already carries its own DDL; show it as-is so the preview
-            # matches what the launched job will run (no double-wrapping).
-            preview = sql_text
-        else:
+        elif destination_type in ("Table", "Table+Csv") and not sql.is_self_contained_ddl(sql_text):
+            # Only table destinations are wrapped in DROP/CREATE ... AS, matching
+            # manifest._effective_job_sql. A Csv-only job runs the raw SELECT, so
+            # previewing the wrapper would misrepresent what executes.
             preview = sql.table_wrapper(sql_text, schema, table, config.current_user())
+        else:
+            # Csv destination, or a SqlFile that already carries its own DDL:
+            # show the SQL verbatim (no double-wrapping).
+            preview = sql_text
         self.app.push_screen(
             PreviewScreen(
                 "SQL Preview", preview,
@@ -621,6 +652,7 @@ class NewJobScreen(Screen[None]):
             process.run_interactive("kinit")
         self.kerberos_ttl = await kerberos.ticket_ttl_seconds()
         self._refresh_kerberos()
+        self._inline_validate()
         await self.app.refresh_kerberos()
         if self.kerberos_ttl is not None:
             self.notify(f"Kerberos refreshed: {self.kerberos_ttl // 60}m", severity="information")

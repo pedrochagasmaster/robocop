@@ -82,6 +82,10 @@ class DashboardScreen(Screen[None]):
         self._filter_needle = ""
         self._detail_job_id: str | None = None
         self._detail_visible = True
+        # IDs currently rendered in the table (post-filter); selection and
+        # actions are restricted to these so a filtered-out job is never the
+        # silent target of View Logs / Cancel.
+        self._visible_job_ids: set[str] = set()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -99,7 +103,10 @@ class DashboardScreen(Screen[None]):
                 yield Input(placeholder="Filter: id, file, table, or state\u2026", id="jobs-filter")
                 yield DataTable(id="jobs-table")
                 with Vertical(id="jobs-empty", classes="empty-state"):
-                    yield Static("[dim]No jobs in the last 7 days \u2014 press [/][bold]N[/][dim] to launch one[/]")
+                    yield Static(
+                        "[dim]No jobs in the last 7 days \u2014 press [/][bold]N[/][dim] to launch one[/]",
+                        id="jobs-empty-text",
+                    )
                 with Vertical(id="detail-pane"):
                     yield Static("[dim]Select a job to preview its log[/]", id="detail-title")
                     yield Static("", id="detail-log")
@@ -242,6 +249,10 @@ class DashboardScreen(Screen[None]):
         merged = running + [j for j in active if j["state"] != "Running"]
         merged = self._apply_filter(merged)[:JOBS_ROW_LIMIT]
         self._populate_table(merged)
+        # If the previewed job is filtered out of view, clear the detail pane so
+        # it does not show a log for a row the user can no longer see/select.
+        if self._detail_visible and self._detail_job_id not in self._visible_job_ids:
+            self._update_detail_pane(None, None, active)
 
     def _update_status_strip_from_cache(self) -> None:
         active = self._active_cache
@@ -261,12 +272,14 @@ class DashboardScreen(Screen[None]):
             krb_text = f"[green]{format_kerberos_ttl(krb_ttl)}[/]"
         finished_text = f"[green]{finished}[/]" if finished else "[dim]0[/]"
         failed_text = f"[red]{failed}[/]" if failed else "[dim]0[/]"
+        # KERBEROS leads so it survives ellipsis truncation first on narrow SSH
+        # terminals: a missing/expiring ticket is the most actionable state.
         self._set_static(
             "#status-strip",
+            f"[dim]KERBEROS[/] {krb_text}    "
             f"[dim]RUNNING[/] {running} / {jobs.RUNNING_CAP}    "
             f"[dim]FINISHED 7D[/] {finished_text}    "
-            f"[dim]FAILED 7D[/] {failed_text}    "
-            f"[dim]KERBEROS[/] {krb_text}",
+            f"[dim]FAILED 7D[/] {failed_text}",
         )
 
     def _apply_filter(self, items: list[dict]) -> list[dict]:
@@ -295,6 +308,7 @@ class DashboardScreen(Screen[None]):
         steady-state path updates just the Elapsed cells that actually moved.
         """
         table = self.query_one("#jobs-table", DataTable)
+        self._visible_job_ids = {item["id"] for item in items}
         signature = tuple(
             (item["id"], item["state"], self._error_cache.get(item["id"]))
             for item in items
@@ -340,6 +354,18 @@ class DashboardScreen(Screen[None]):
         has_rows = bool(items)
         table.display = has_rows
         self.query_one("#jobs-empty").display = not has_rows
+        if not has_rows:
+            if self._filter_needle.strip():
+                empty_text = (
+                    f"[dim]No jobs match [/][bold]{self._filter_needle.strip()}[/]"
+                    f"[dim] \u2014 press [/][bold]Esc[/][dim] to clear the filter[/]"
+                )
+            else:
+                empty_text = (
+                    "[dim]No jobs in the last 7 days \u2014 press [/][bold]N[/]"
+                    "[dim] to launch one[/]"
+                )
+            self.query_one("#jobs-empty-text", Static).update(empty_text)
 
     def _update_detail_pane(
         self,
@@ -349,6 +375,10 @@ class DashboardScreen(Screen[None]):
     ) -> None:
         if not self._detail_visible:
             return
+        if job_id is not None and job_id not in self._visible_job_ids:
+            # The previewed job is not in the current (filtered) view; show the
+            # placeholder rather than a log the user cannot select.
+            job_id = None
         item = next((j for j in active if j["id"] == job_id), None) if job_id else None
         if item is None:
             self._set_static("#detail-title", "[dim]Select a job to preview its log[/]")
@@ -375,9 +405,13 @@ class DashboardScreen(Screen[None]):
             if prev == "Running" and state in ("Succeeded", "Failed", "Cancelled"):
                 severity = {"Succeeded": "success", "Failed": "error"}.get(state, "warning")
                 self._add_event(f"Job {format_job_id(job_id)} {state.lower()}", severity)
+                notify_severity = {
+                    "Succeeded": "information",
+                    "Failed": "error",
+                }.get(state, "warning")
                 self.app.notify(
                     f"Job {format_job_id(job_id)} {state.lower()}",
-                    severity="information" if state == "Succeeded" else "warning",
+                    severity=notify_severity,
                 )
         self._last_states = current
 
@@ -454,8 +488,7 @@ class DashboardScreen(Screen[None]):
                 return candidate
 
         if self._selected_job_id_cache:
-            all_job_ids = {job["id"] for job in self._active_cache}
-            if self._selected_job_id_cache in all_job_ids:
+            if self._selected_job_id_cache in self._visible_job_ids:
                 return self._selected_job_id_cache
             self._selected_job_id_cache = None
 
@@ -469,13 +502,23 @@ class DashboardScreen(Screen[None]):
 
     def action_view_logs(self) -> None:
         job_id = self._selected_job_id()
-        if job_id:
-            self._dispatch_app().open_job_detail(job_id)
+        if not job_id:
+            self.notify("Select a job first.", severity="warning")
+            return
+        self._dispatch_app().open_job_detail(job_id)
 
     def action_cancel(self) -> None:
         job_id = self._selected_job_id()
-        if job_id:
-            self._dispatch_app().open_job_detail(job_id, cancel_on_mount=True)
+        if not job_id:
+            self.notify("Select a job first.", severity="warning")
+            return
+        state = next(
+            (item["state"] for item in self._active_cache if item["id"] == job_id), None
+        )
+        if state != "Running":
+            self.notify("Only Running jobs can be cancelled.", severity="warning")
+            return
+        self._dispatch_app().open_job_detail(job_id, cancel_on_mount=True)
 
     def action_history(self) -> None:
         self._dispatch_app().open_top_level("history")
