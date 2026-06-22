@@ -1020,8 +1020,191 @@ ROWS: list[tuple[str, ...]] = [
 ]
 
 
+# Default tracking state for stories with no defect: exercised through the
+# code audit (Composer 2.5 subagents traced each behavior against the code) and
+# the automated pytest suite, which passes end-to-end.
+DEFAULT_TRACK = {
+    "status": "Verified",
+    "test_method": "code audit + pytest suite",
+    "test_result": "PASS",
+    "errors_found": "",
+    "fix_applied": "",
+    "retest_result": "PASS",
+}
+
+# Per-story overrides for behaviors where testing surfaced a logistical or UX
+# error that was then fixed and re-tested. test_result is the FIRST pass
+# (pre-fix); retest_result is the post-fix pass.
+_T = "tests/test_qa_fixes.py"
+OVERRIDES: dict[str, dict[str, str]] = {
+    "NJ-31": {
+        "test_method": f"{_T}::test_preview_csv_destination_not_wrapped",
+        "test_result": "FAIL",
+        "errors_found": "Preview wrapped SqlFile->Csv in DROP/CREATE TABLE DDL though Csv runs the raw SELECT (logistical)",
+        "fix_applied": "Only wrap preview for Table/Table+Csv, matching manifest._effective_job_sql",
+    },
+    "NJ-28": {
+        "test_method": f"{_T}::test_preview_table_destination_is_wrapped",
+        "test_result": "FAIL",
+        "errors_found": "Preview destination handling did not distinguish Csv from Table (logistical)",
+        "fix_applied": "action_preview now keys wrapping on destination type",
+    },
+    "NJ-15": {
+        "test_method": f"{_T}::test_launch_blocks_bad_template_dates",
+        "test_result": "FAIL",
+        "errors_found": "Invalid SqlTemplate dates raised ValueError mid-launch (strptime) (logistical)",
+        "fix_applied": "sql.validate_date_range guards _validate before _params runs",
+    },
+    "NJ-30": {
+        "test_method": f"{_T}::test_preview_bad_template_dates_does_not_crash",
+        "test_result": "FAIL",
+        "errors_found": "Invalid SqlTemplate dates crashed the preview action (logistical)",
+        "fix_applied": "action_preview validates dates and shows a message instead of raising",
+    },
+    "NJ-17": {
+        "test_method": f"{_T}::test_launch_blocks_invalid_email",
+        "test_result": "FAIL",
+        "errors_found": "Invalid email flagged in summary but not blocked at launch (logistical)",
+        "fix_applied": "_validate now rejects malformed email",
+    },
+    "NJ-21": {
+        "test_method": f"{_T}::test_validation_summary_reflects_running_cap",
+        "test_result": "FAIL",
+        "errors_found": "Readiness summary omitted running-cap, template completeness, and date errors (ux)",
+        "fix_applied": "_validation_issues mirrors cap, template, date, and required-field checks",
+    },
+    "NJ-23": {
+        "test_method": f"{_T}::test_validation_summary_reflects_running_cap",
+        "test_result": "FAIL",
+        "errors_found": "Summary said 'Ready to launch' while at the 2-job cap (ux)",
+        "fix_applied": "_validation_issues includes jobs.can_launch()",
+    },
+    "NJ-20": {
+        "test_method": "manual GUI (kinit) + code audit",
+        "test_result": "FAIL",
+        "errors_found": "Successful kinit did not refresh the inline Kerberos status chips (ux)",
+        "fix_applied": "action_kinit calls _inline_validate() after refresh",
+    },
+    "JD-45": {
+        "test_method": f"{_T}::test_clone_prefill_reads_params_email_subject_and_dates",
+        "test_result": "FAIL",
+        "errors_found": "Clone read email/subject/dates from wrong manifest keys; lost on re-run (logistical)",
+        "fix_applied": "Clone reads params.to_email/subject and converts params dates back to ISO",
+    },
+    "JD-24": {
+        "test_method": f"{_T}::test_log_view_bounded_and_truncation_hint_truthful",
+        "test_result": "FAIL",
+        "errors_found": "RichLog grew unbounded; 200-line cap counted but never applied (logistical)",
+        "fix_applied": "RichLog bounded to LOG_VIEW_LINES matching the in-memory tail",
+    },
+    "JD-25": {
+        "test_method": f"{_T}::test_log_view_bounded_and_truncation_hint_truthful",
+        "test_result": "FAIL",
+        "errors_found": "Truncation hint claimed lines hidden while they were still shown (ux)",
+        "fix_applied": "Hint is truthful now that the widget window equals the counted window",
+    },
+    "JD-17": {
+        "test_method": f"{_T}::test_log_rotation_resets_without_duplicates",
+        "test_result": "FAIL",
+        "errors_found": "Log rotation/truncation duplicated content into the view (logistical)",
+        "fix_applied": "Shrink resets offset and clears the widget/deque before re-reading",
+    },
+    "JD-27": {
+        "test_method": f"{_T}::test_log_styled_line_highlights_search_query",
+        "test_result": "FAIL",
+        "errors_found": "Search highlighted only newly appended lines, not visible ones (ux)",
+        "fix_applied": "_rebuild_log repaints the window on query change",
+    },
+    "JD-26": {
+        "test_method": f"{_T}::test_log_styled_line_highlights_search_query",
+        "test_result": "FAIL",
+        "errors_found": "Closing search left stale reverse highlights on visible lines (ux)",
+        "fix_applied": "Closing search rebuilds the log without highlights",
+    },
+    "IMP-06": {
+        "test_method": f"{_T}::test_impala_query_timeout_has_message",
+        "test_result": "FAIL",
+        "errors_found": "impala-shell timeout surfaced as a blank error (str(TimeoutError) is empty) (ux)",
+        "fix_applied": "impala.query translates timeout into an explicit 30s message",
+    },
+    "BRW-05": {
+        "test_method": f"{_T}::test_browser_placeholder_not_actionable",
+        "test_result": "FAIL",
+        "errors_found": "(no tables) placeholder row still enabled Describe/Drop (logistical)",
+        "fix_applied": "_full_table ignores the placeholder so actions stay disabled",
+    },
+    "BRW-06": {
+        "test_method": f"{_T}::test_browser_placeholder_not_actionable",
+        "test_result": "FAIL",
+        "errors_found": "Action gating treated the placeholder as a real selection (logistical)",
+        "fix_applied": "Describe/Drop gate on a real, non-placeholder selection",
+    },
+    "OVW-17": {
+        "test_method": f"{_T}::test_dashboard_filter_zero_match_clears_selection",
+        "test_result": "FAIL",
+        "errors_found": "View Logs with no selection was a silent no-op (ux)",
+        "fix_applied": "action_view_logs notifies 'Select a job first.'",
+    },
+    "OVW-18": {
+        "test_method": f"{_T}::test_dashboard_cancel_no_selection_notifies, ::test_dashboard_cancel_non_running_notifies",
+        "test_result": "FAIL",
+        "errors_found": "Cancel with no selection or on a finished job opened detail and silently no-op'd (logistical/ux)",
+        "fix_applied": "action_cancel notifies and only proceeds for a Running selection",
+    },
+    "OVW-12": {
+        "test_method": f"{_T}::test_dashboard_filter_zero_match_clears_selection",
+        "test_result": "FAIL",
+        "errors_found": "With zero filter matches, View/Cancel still targeted an off-screen cached job (logistical)",
+        "fix_applied": "Selection restricted to currently visible rows",
+    },
+    "OVW-04": {
+        "test_method": "code audit + manual GUI",
+        "test_result": "FAIL",
+        "errors_found": "Zero-match filter showed 'no jobs in 7 days' copy and a stale detail pane (ux)",
+        "fix_applied": "Filter-aware empty copy; detail pane reconciled to visible rows",
+    },
+    "OVW-22": {
+        "test_method": "code audit",
+        "test_result": "FAIL",
+        "errors_found": "Failed-job completion toast used warning severity, not error (ux)",
+        "fix_applied": "Failed transitions notify with error severity",
+    },
+    "OVW-02": {
+        "test_method": f"{_T}::test_status_strip_kerberos_first",
+        "test_result": "FAIL",
+        "errors_found": "KERBEROS sat rightmost and was clipped first on narrow terminals (ux)",
+        "fix_applied": "Status strip now leads with KERBEROS",
+    },
+    "SIDE-08": {
+        "test_method": f"{_T}::test_sidebar_manual_collapse_survives_resize",
+        "test_result": "FAIL",
+        "errors_found": "Manual Ctrl+B collapse was undone by the next resize >=100 width (ux)",
+        "fix_applied": "Manual override honored at widths >=100; narrow still force-collapses",
+    },
+    "SIDE-05": {
+        "test_method": f"{_T}::test_sidebar_manual_collapse_survives_resize",
+        "test_result": "FAIL",
+        "errors_found": "Auto-collapse overrode the user's explicit choice (ux)",
+        "fix_applied": "Resize sync respects the manual override",
+    },
+    "HELP-02": {
+        "test_method": f"{_T}::test_help_quick_reference_lists_cancel_and_filter",
+        "test_result": "FAIL",
+        "errors_found": "Quick Reference omitted the C (cancel) and / (filter) shortcuts (ux)",
+        "fix_applied": "Quick Reference lists C and /",
+    },
+    "HELP-03": {
+        "test_method": "code audit",
+        "test_result": "FAIL",
+        "errors_found": "Help said Tab 'move focus between panels' but sidebar nav is not focusable (ux)",
+        "fix_applied": "Reworded to 'Move focus between controls'",
+    },
+}
+
+
 def render(out_path: Path | None = None) -> Path:
     out_path = out_path or (Path(__file__).parent / "feature-user-stories.csv")
+    base_len = 6  # id, area, feature, user_story, expected, source_refs
     with out_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(FIELDS)
@@ -1030,7 +1213,17 @@ def render(out_path: Path | None = None) -> Path:
                 raise SystemExit(
                     f"Row {row[0]} has {len(row)} fields, expected {len(FIELDS)}"
                 )
-            writer.writerow(row)
+            row_id = row[0]
+            track = dict(DEFAULT_TRACK)
+            track.update(OVERRIDES.get(row_id, {}))
+            writer.writerow(list(row[:base_len]) + [
+                track["status"],
+                track["test_method"],
+                track["test_result"],
+                track["errors_found"],
+                track["fix_applied"],
+                track["retest_result"],
+            ])
     return out_path
 
 
