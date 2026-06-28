@@ -7,7 +7,7 @@
 > `plans/README.md`.
 >
 > **Drift check (run first)**:
-> `git diff --stat a50c81d..HEAD -- dispatch/screens/new_job.py dispatch/manifest.py dispatch/sql.py dispatch/impala.py scr/download_to_csv.py scr/monthly_query_processor.py tests`
+> `git diff --stat a50c81d..HEAD -- dispatch/screens/new_job.py dispatch/manifest.py dispatch/sql.py dispatch/impala.py scr/_common.py scr/download_to_csv.py scr/monthly_query_processor.py tests`
 > If any in-scope file changed since this plan was written, compare the
 > "Current state" excerpts against the live code before proceeding; on a
 > mismatch, treat it as a STOP condition.
@@ -44,6 +44,18 @@ that are not plain Impala identifiers or safe filename stems.
   - `L53-L63`: `DROP/CREATE TABLE {schema}.{table_name}` and `LOCATION '/das/{prefix}/enc/{user}/{table_name}'`.
 - `scr/download_to_csv.py` builds export SQL from argv:
   - `L101-L105`: `query_to_run = f"select * from {args.table_name};"`.
+- `scr/monthly_query_processor.py` interpolates argv values into DDL:
+  - `L101-L109`: builds `{args.schema}.{args.table_name}_temp_...` and an
+    HDFS `LOCATION` using `args.user` and `args.table_name`.
+- Key excerpts for drift comparison:
+  - `dispatch/screens/new_job.py:497-506`:
+    `schema = self._input_value("schema")`; `table = self._input_value("table-name")`;
+    `existing = self._input_value("existing-table") or f"{schema}.{table}"`;
+    `csv_path = str(self.launch_cwd / f"{table}.csv")`.
+  - `dispatch/impala.py:39-61`: `show_tables`, `describe_table`, and
+    `drop_table` pass formatted SQL strings to `query(...)`.
+  - `scr/download_to_csv.py:101-105`: when `args.table_name` is present, it
+    sets `query_to_run = f"select * from {args.table_name};"`.
 - Product vocabulary to preserve:
   - `CONTEXT.md` defines `Source`, `Destination`, and `Job`; do not rename them.
   - ADR-0003 requires CSV files to be uncompressed and land in the launch-time CWD.
@@ -54,8 +66,15 @@ that are not plain Impala identifiers or safe filename stems.
 | Purpose | Command | Expected on success |
 |---|---|---|
 | Focused tests | `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_pure_logic.py tests/test_runner_integration.py -q` | exit 0 |
+| Orchestrator boundary tests | `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_scr_common.py tests/test_runner_integration.py -q` | exit 0 |
 | Package syntax | `/workspace/.venv/bin/python -m compileall dispatch scr` | exit 0 |
 | CLI smoke | `source mocks/dev-env.sh && /workspace/.venv/bin/python -m dispatch --help` | exit 0 and prints help |
+
+## Suggested executor toolkit
+
+- Read `.agents/skills/dispatch-textual-tui/SKILL.md` before editing
+  `dispatch/screens/new_job.py`; the form must remain keyboard-first and must
+  not add blocking work to Textual callbacks.
 
 ## Scope
 
@@ -64,6 +83,7 @@ that are not plain Impala identifiers or safe filename stems.
 - `dispatch/impala.py`
 - `dispatch/manifest.py`
 - `dispatch/screens/new_job.py`
+- `scr/_common.py` only for a tiny stdlib identifier validator
 - `scr/download_to_csv.py`
 - `scr/monthly_query_processor.py` only for argv-boundary validation
 - tests under `tests/`
@@ -103,23 +123,37 @@ Update `_validation_issues()` and `_validate()` in `dispatch/screens/new_job.py`
 
 Update `_source_destination()` to call `sql.safe_csv_path(self.launch_cwd, table)` and store its string result. Do not use string concatenation for CSV paths.
 
-**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_pure_logic.py -q` -> pass.
+Add a focused test for `_source_destination()` or `_validation_issues()` so the
+UI form path is covered without requiring a brittle terminal-output assertion.
+
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_new_features.py tests/test_pure_logic.py -q` -> pass.
 
 ### Step 3: Re-check boundaries in manifest and metadata helpers
 
-In `dispatch/manifest.py`, validate `schema`, `table`, `full_table`, and fallback `csv_path` before constructing argv. In `dispatch/impala.py`, validate `schema` for `show_tables`, `full_table` for `describe_table` and `drop_table`, and escape or reject single quotes in `pattern`.
+In `dispatch/manifest.py`, validate `schema`, `table`, `full_table`, and
+fallback `csv_path` before constructing argv. In `dispatch/impala.py`, validate
+`schema` for `show_tables`, `full_table` for `describe_table` and `drop_table`,
+and reject `pattern` if it contains a single quote. Do not implement escaping in
+this plan; rejection keeps the Browser contract simple and testable.
 
 Validation here is defense-in-depth for hand-edited manifests and direct helper calls; keep error messages clear.
 
 **Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_pure_logic.py -q` -> pass.
 
-### Step 4: Add orchestrator-entry validation for CSV exports
+### Step 4: Add orchestrator-entry validation for CSV exports and monthly DDL
 
-In `scr/download_to_csv.py`, validate `--table-name` before building `select * from ...`. Keep this stdlib-only. Do not import `dispatch.sql` from `scr/`; either duplicate a tiny regex or add a stdlib-only helper under `scr/_common.py` if it stays narrow.
+In `scr/_common.py`, add a tiny stdlib-only `validate_full_table(value: str) ->
+bool` and `validate_identifier(value: str) -> bool`. Import them from:
 
-Only validate `--table-name`. Do not inspect SQL from `--query-file`, because user-authored SQL is intentional.
+- `scr/download_to_csv.py` to validate `--table-name` before building
+  `select * from ...`.
+- `scr/monthly_query_processor.py` to validate `--schema`, `--table-name`, and
+  `--user` before building temp/final DDL and HDFS `LOCATION` strings.
 
-**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_runner_integration.py -q` -> pass.
+Only validate `--table-name` for the CSV export table mode. Do not inspect SQL
+from `--query-file`, because user-authored SQL is intentional.
+
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_scr_common.py tests/test_runner_integration.py -q` -> pass.
 
 ### Step 5: Add regression tests
 
@@ -132,22 +166,24 @@ Add table-driven tests that assert:
 
 Use existing `tests/test_pure_logic.py` patterns for manifest helpers. If async tests are needed for `impala.py`, follow existing pytest-asyncio style in the suite.
 
-**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_pure_logic.py tests/test_runner_integration.py -q` -> all pass and new cases fail without the implementation.
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_pure_logic.py tests/test_new_features.py tests/test_scr_common.py tests/test_runner_integration.py -q` -> all pass.
 
 ## Test plan
 
 - Unit tests for new validators in `tests/test_pure_logic.py` or a new `tests/test_sql.py`.
 - Manifest argv tests beside `TestBuildOrchestratorCalls`.
 - Runner integration smoke for a normal safe `SqlFile -> Csv` job to prove valid launches still work.
-- Optional focused TUI pilot only if existing New Job validation tests already cover field messages; otherwise keep this plan at helper/manifest level.
+- Focused New Job test for `_source_destination()` or `_validation_issues()` so
+  the form path rejects unsafe values before manifest creation.
 
 ## Done criteria
 
-- [ ] Unsafe identifiers and path traversal table names are rejected before manifest creation.
-- [ ] `manifest.build_orchestrator_calls()` never creates a CSV output path outside `launch_cwd`.
-- [ ] `scr/download_to_csv.py --table-name` rejects invalid full table identifiers.
-- [ ] Focused tests and compileall commands in this plan exit 0.
-- [ ] No broad `scr/` behavior changed beyond validating `--table-name`.
+- [ ] `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_pure_logic.py tests/test_new_features.py tests/test_scr_common.py tests/test_runner_integration.py -q` exits 0.
+- [ ] `/workspace/.venv/bin/python -m compileall dispatch scr` exits 0.
+- [ ] `rg 'f\"\\{table\\}\\.csv\"' dispatch` returns no matches.
+- [ ] `manifest.build_orchestrator_calls()` tests prove CSV output paths stay inside `launch_cwd`.
+- [ ] `scr/download_to_csv.py` and `scr/monthly_query_processor.py` reject invalid argv identifiers in tests.
+- [ ] No broad `scr/` behavior changed beyond narrow argv-boundary validation.
 - [ ] `plans/README.md` row for Plan 001 is updated.
 
 ## STOP conditions
@@ -157,6 +193,7 @@ Stop and report if:
 - The fix requires changing `scr/` public flag names, email formats, retry timing, or queue lists.
 - Tests reveal existing manifests in fixtures rely on unsafe names.
 - Any in-scope file changed since `a50c81d` and the excerpts no longer match.
+- A step's verification fails twice after a reasonable fix attempt.
 
 ## Maintenance notes
 

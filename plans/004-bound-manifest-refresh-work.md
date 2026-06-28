@@ -17,7 +17,7 @@
 - **Priority**: P2
 - **Effort**: M
 - **Risk**: MED
-- **Depends on**: plans/003-reconcile-stale-and-pending-jobs.md
+- **Depends on**: plans/002-make-launch-preflight-atomic-and-live.md; plans/003-reconcile-stale-and-pending-jobs.md
 - **Category**: perf
 - **Planned at**: commit `a50c81d`, 2026-06-28
 
@@ -35,6 +35,12 @@ with total history rather than with the active seven-day supervision window.
   - `L38-L46`: `base.glob("*/manifest.json")` and loads each manifest.
   - `L67-L74`: `active_jobs()` filters to running/recent only after loading all manifests.
   - `L77-L84`: `history_jobs()` also loads all manifests.
+- Expected state after Plans 002 and 003:
+  - `jobs.launch_slot_jobs()` exists and counts `Pending` + `Running`, stopping
+    once it reaches `RUNNING_CAP`.
+  - `jobs.reconciled_list_manifests()` exists and is used by hot paths that
+    must not count dead `Running` processes.
+  - If either symbol is absent, stop and execute the prerequisite plan first.
 - `dispatch/screens/dashboard.py` runs the hot path every two seconds:
   - `L162-L165`: `_refresh_jobs_async()` calls `await asyncio.to_thread(jobs.active_jobs)`.
   - `L182-L185`: then reads a log tail for the detail pane.
@@ -47,6 +53,14 @@ with total history rather than with the active seven-day supervision window.
   - `dispatch/screens/dashboard.py:L135` sets an interval; there is no `on_hide` pause.
 - TUI skill rules say:
   - `dispatch-textual-tui/SKILL.md:L246-L250`: do not re-read every manifest on every paint; keep dashboard refresh work bounded and cancellable.
+- Key excerpts for drift comparison:
+  - `dispatch/jobs.py:38-46`: `list_manifests()` sorts every
+    `*/manifest.json` path and calls `_load_manifest_cached(path)` for each.
+  - `dispatch/screens/dashboard.py:162-196`: `_refresh_jobs_async()` performs
+    `jobs.active_jobs`, error classification, optional log tail, then applies
+    the snapshot with no in-flight guard.
+  - `dispatch/screens/job_detail.py:143-156`: the thread worker updates
+    `self._manifest_mtime` and `self._manifest_item`.
 
 ## Commands you will need
 
@@ -55,6 +69,12 @@ with total history rather than with the active seven-day supervision window.
 | Focused tests | `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_cockpit.py tests/test_new_features.py tests/test_pure_logic.py -q` | exit 0 |
 | Full local gate | `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests tools/prod_tui/tests -q` | exit 0 |
 | Package syntax | `/workspace/.venv/bin/python -m compileall dispatch scr` | exit 0 |
+
+## Suggested executor toolkit
+
+- Read `.agents/skills/dispatch-textual-tui/SKILL.md` before editing
+  dashboard, job detail, or New Job refresh behavior. This plan is specifically
+  about the skill's SSH/VPN performance and worker-safety rules.
 
 ## Scope
 
@@ -82,12 +102,22 @@ with total history rather than with the active seven-day supervision window.
 
 In `dispatch/jobs.py`, add purpose-specific helpers:
 - `launch_slot_jobs()` should stop after it knows the cap is reached.
-- `active_jobs()` should avoid parsing ancient terminal manifests when their mtime/finished time proves they are outside the seven-day active window.
+- `active_jobs()` should avoid reparsing cached terminal manifests that are
+  already known to be outside the seven-day active window.
 - Keep `history_jobs()` able to load old terminal manifests because history needs them.
 
-If finished time cannot be known without parsing, use the existing manifest cache but add an early-stop path for cap checks first. Do not introduce a sidecar index in the first pass unless measurement proves it is needed.
+Algorithm:
+- `launch_slot_jobs()` uses `reconciled_list_manifests()` from Plan 003 but
+  short-circuits once `RUNNING_CAP` `Pending`/`Running` manifests are found.
+- For active dashboard reads, use the existing `_manifest_cache` metadata. If a
+  cached manifest is terminal and its parsed `finished_at` is older than
+  `ACTIVE_WINDOW`, skip returning it while still checking whether the file mtime
+  changed. If the file mtime changed, reload and re-evaluate.
+- Do not infer terminal state from file mtime alone. If no cached parsed
+  manifest exists, load the manifest once.
+- Do not introduce a sidecar index in the first pass.
 
-**Verify**: unit tests seed many terminal manifests and assert `can_launch()` does not load more than necessary. Use monkeypatching around `manifest.load` if needed.
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_pure_logic.py -k 'launch_slot_short_circuit or active_jobs_cache' -q` -> exit 0.
 
 ### Step 2: Debounce New Job validation summary
 
@@ -95,7 +125,7 @@ Change `NewJobScreen.on_input_changed()` so expensive validation summary work is
 
 Keep final `_validate()` synchronous/authoritative on launch; Plan 002 ensures the final preflight cannot rely on stale debounce state.
 
-**Verify**: focused test that typing still updates the summary after a pause and launch validation still blocks invalid input.
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_new_features.py -k 'validation_summary' -q` -> exit 0.
 
 ### Step 3: Prevent overlapping refreshes
 
@@ -105,25 +135,26 @@ Add `_refresh_in_flight` guards or use Textual workers with `exclusive=True` for
 
 If a tick fires while the previous refresh is still running, skip it and let the next interval catch up.
 
-**Verify**: async test with a slow monkeypatched `jobs.active_jobs` proves only one refresh body runs at a time.
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_cockpit.py -k 'refresh_in_flight' -q` -> exit 0.
 
 ### Step 4: Pause dashboard polling when hidden
 
-Store the dashboard interval/timer handle if Textual exposes one for this version, or gate `_refresh_jobs_async()` with `if self.app.screen is not self: return`.
+Use this default: gate `_refresh_jobs_async()` with `if self.app.screen is not
+self: return`. Do not add an app-level transition watcher in this plan; that is
+the separate direction item recorded in `plans/README.md`.
 
-Because dashboard currently owns job-completion notifications, choose one:
-- Keep a slow app-level transition watcher, or
-- accept that cross-screen notifications remain a separate direction item and document that dashboard notifications resume on return.
+Document the behavior in Maintenance notes: completion toasts remain
+Overview-driven until the app-wide notification plan is executed.
 
 Do not leave both dashboard polling and job-detail polling active at full speed for the same selected Job.
 
-**Verify**: pilot test navigates from Overview to New Job and asserts dashboard refresh body is not called repeatedly.
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_cockpit.py -k 'hidden_dashboard_refresh' -q` -> exit 0.
 
 ### Step 5: Move worker-thread cache mutations to the main loop
 
 In `JobDetailScreen._refresh_detail_async()`, the `_read()` function currently mutates `self._manifest_mtime` and `self._manifest_item` from a thread. Change `_read()` to return immutable cache data and update those fields in `_apply_detail_snapshot()` on the main loop.
 
-**Verify**: existing job-detail tests pass; add a regression test if there is one for log refresh.
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_new_features.py tests/test_cockpit.py -q` -> exit 0.
 
 ## Test plan
 
@@ -134,12 +165,13 @@ In `JobDetailScreen._refresh_detail_async()`, the `_read()` function currently m
 
 ## Done criteria
 
-- [ ] Launch cap checks no longer parse every historical manifest.
-- [ ] New Job typing no longer performs a full jobs-dir scan per character.
-- [ ] Dashboard and Job Detail refreshes cannot overlap under slow I/O.
-- [ ] Dashboard full-speed polling does not continue behind other top-level screens.
-- [ ] Thread workers do not mutate `JobDetailScreen` cache fields directly.
-- [ ] Focused tests and full local gate exit 0.
+- [ ] `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_cockpit.py tests/test_new_features.py tests/test_pure_logic.py -q` exits 0.
+- [ ] `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests tools/prod_tui/tests -q` exits 0.
+- [ ] Tests prove `launch_slot_jobs()` short-circuits once `RUNNING_CAP` occupied slots are found.
+- [ ] Tests prove New Job validation summary is debounced but final launch validation remains authoritative.
+- [ ] Tests prove Dashboard and Job Detail refresh bodies do not overlap under slow I/O.
+- [ ] Tests prove hidden Dashboard refresh returns without calling `jobs.active_jobs`.
+- [ ] `rg 'self\\._manifest_(mtime|item) =' dispatch/screens/job_detail.py` shows assignments only on the main async path, not inside the `_read()` thread function.
 - [ ] `plans/README.md` row for Plan 004 is updated.
 
 ## STOP conditions
@@ -149,9 +181,14 @@ Stop and report if:
 - Textual 8.2.5 lacks a safe timer cancellation/gating API and no simple screen check works.
 - Performance tests become timing-flaky rather than deterministic through monkeypatching.
 - Any in-scope file changed since `a50c81d` and the excerpts no longer match.
+- Plan 002 or Plan 003 has not landed and required helper symbols are absent.
+- The desired fix requires editing `dispatch/app.py` for app-wide completion notifications; stop and split that into a separate direction plan.
+- A step's verification fails twice after a reasonable fix attempt.
 
 ## Maintenance notes
 
 - Keep correctness ahead of speed: terminal Jobs must not disappear from history and Running Jobs must not be missed.
 - Reviewers should check that optimization does not make completion notifications stale or duplicate.
+- Completion toasts remain Overview-driven after this plan. App-wide completion
+  notifications are intentionally deferred as a separate product direction.
 - If this plan is insufficient for users with thousands of Jobs, the follow-up is a manifest index/active directory design, not more UI-level caching.

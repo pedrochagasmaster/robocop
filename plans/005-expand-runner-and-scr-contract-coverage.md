@@ -45,6 +45,17 @@ work.
 - Mock scenarios exist for a subset:
   - `mocks/scenarios/` includes `happy_path`, `syntax_error`, `auth_error`, `table_not_found`, `memory_exceeded`, `all_queues_full`, and `slow`.
   - There are no scenarios for several classifier categories such as timeout, connection, backpressure, duplicate column, disk/space errors.
+- Legal-cell manifest examples already exist at the unit level:
+  - `tests/test_pure_logic.py:245-275` calls `manifest.build_orchestrator_calls(...)`
+    for `SqlFile -> Csv`, `SqlFile -> Table`, `SqlFile -> Table+Csv`,
+    `SqlTemplate -> Table`, and `ExistingTable -> Csv`.
+- Category literals in `scr/_common.py` that must be characterized exactly:
+  - Fatal set: `TABLE_NOT_FOUND`, `SYNTAX_ERROR`, `DUPLICATE_COLUMN`,
+    `AUTH_ERROR`, `GENERIC_ERROR`.
+  - Retriable/non-fatal classifier returns include `MEMORY_EXCEEDED`,
+    `TIMEOUT`, `QUEUE_FULL`, `CONNECTION_ERROR`, `BACKPRESSURE`,
+    `HOST_RESOLUTION_ERROR`, `HOST_UNREACHABLE`, `DISK_FULL`,
+    `MEMORY_AVAILABLE`, and `SPACE_LIMIT`.
 - ADR requirements:
   - ADR-0004 `L64-L70`: fake `impala-shell` argv drift is an integration bug; new classifications require matching scenarios.
   - ADR-0005 `L47-L53`: `scr/` changes require all mock scenarios and side-by-side behavioral proof.
@@ -89,7 +100,20 @@ In `tests/test_runner_integration.py`, add helpers mirroring `_create_csv_job()`
 
 Use safe simple SQL and table names. Keep `MAILHOST=127.0.0.1:9` from the fixture so email attempts fail fast.
 
-**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_runner_integration.py -q` -> existing tests still pass before adding assertions.
+Factory shapes:
+- `SqlFile -> Table`: `source={"type": "SqlFile", "sql_path_at_launch": str(sql_file)}`,
+  `destination={"type": "Table", "schema": "aa_enc", "table_name": "dispatch_smoke_table"}`,
+  `sql_text="SELECT 1 AS smoke_test_value"`.
+- `SqlFile -> Table+Csv`: same source; destination type `Table+Csv` with
+  `csv_path=str(tmp_path / "dispatch_smoke_table.csv")`.
+- `SqlTemplate -> Table`: SQL text contains both `{date_inicio}` and
+  `{date_fim}`; params include `start_date="01/01/2026"` and
+  `end_date="01/31/2026"`.
+- `ExistingTable -> Csv`: `source={"type": "ExistingTable", "table_name": "aa_enc.dispatch_smoke_existing"}`,
+  destination type `Csv`, schema/table matching the full table, and explicit
+  `csv_path`.
+
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_runner_integration.py -q` -> exit 0 after factories are added.
 
 ### Step 2: Exercise legal cells through the real runner
 
@@ -97,9 +121,12 @@ Add runner subprocess tests:
 - `SqlFile -> Table` reaches `Succeeded` under `happy_path` and uses `Query_Impala_Parametrized.py`.
 - `SqlFile -> Table+Csv` reaches `Succeeded`, has two orchestrator calls in order, and writes a plain CSV in `launch_cwd`.
 - `ExistingTable -> Csv` reaches `Succeeded` and uses `--table-name`, not `--query-file`.
-- `SqlTemplate -> Table` at least reaches the monthly processor path. If current mock behavior cannot support the full monthly join, STOP and report the mock gap rather than weakening the test.
+- `SqlTemplate -> Table` should run under `happy_path` for a one-month range.
+  If current mock behavior cannot support the full monthly join, add a single
+  `pytest.mark.skip` named `test_sqltemplate_table_runner_contract` with a TODO
+  issue URL in the skip reason; do not silently omit the legal cell.
 
-**Verify**: runner integration command exits 0 and each new test fails when the corresponding orchestrator call is intentionally miswired.
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_runner_integration.py -q` -> exit 0.
 
 ### Step 3: Add direct classifier characterization tests
 
@@ -109,7 +136,9 @@ matching how orchestrators import it.
 
 Cover at least:
 - each `FATAL_ERRORS` member maps to fatal behavior,
-- `MEMORY_EXCEEDED`, `TIMEOUT`, `QUEUE_FULL`, `CONNECTION_ERROR`, `BACKPRESSURE`, `HOST_RESOLUTION_ERROR`, `DISK_FULL`, `SPACE_LIMIT`,
+- `MEMORY_EXCEEDED`, `TIMEOUT`, `QUEUE_FULL`, `CONNECTION_ERROR`,
+  `BACKPRESSURE`, `HOST_RESOLUTION_ERROR`, `HOST_UNREACHABLE`, `DISK_FULL`,
+  `MEMORY_AVAILABLE`, and `SPACE_LIMIT`,
 - unmatched stderr maps to `GENERIC_ERROR` exactly as current behavior.
 
 These are characterization tests; do not change behavior in this plan.
@@ -118,7 +147,27 @@ These are characterization tests; do not change behavior in this plan.
 
 ### Step 4: Add missing mock scenario files for classifier branches
 
-For each category not represented in `mocks/scenarios/`, add a minimal JSON scenario following existing files. Keep delays at zero/default for CI. If `all_queues_full` is intentionally infinite, avoid a runner test that waits forever; test it at mock-contract or bounded subprocess level instead.
+For each category not represented in `mocks/scenarios/`, add a minimal JSON
+scenario following existing files. Keep delays at zero/default for CI. Use this
+matrix unless the live scenario schema proves it impossible, in which case STOP
+and report the specific schema mismatch:
+
+| Category | Scenario file | Status |
+|---|---|---|
+| `SYNTAX_ERROR` | `syntax_error.json` | existing |
+| `AUTH_ERROR` | `auth_error.json` | existing |
+| `TABLE_NOT_FOUND` | `table_not_found.json` | existing |
+| `MEMORY_EXCEEDED` | `memory_exceeded.json` | existing |
+| `QUEUE_FULL` | `all_queues_full.json` | existing, test only with bounded/mock-contract path |
+| `TIMEOUT` | `timeout.json` | add |
+| `CONNECTION_ERROR` | `connection_error.json` | add |
+| `BACKPRESSURE` | `backpressure.json` | add |
+| `HOST_RESOLUTION_ERROR` | `host_resolution_error.json` | add |
+| `HOST_UNREACHABLE` | `host_unreachable.json` | add |
+| `DISK_FULL` | `disk_full.json` | add |
+| `SPACE_LIMIT` | `space_limit.json` | add |
+| `DUPLICATE_COLUMN` | `duplicate_column.json` | add |
+| `GENERIC_ERROR` | `generic_error.json` | add |
 
 Update `tests/test_mock_contract.py` so every scenario can be loaded and produces the expected stderr/category path.
 
@@ -139,10 +188,12 @@ Add a concise comment/table in `tests/test_runner_integration.py` listing legal 
 
 ## Done criteria
 
-- [ ] Runner integration covers all five legal `(Source, Destination)` cells or explicitly skips one with a documented mock limitation.
+- [ ] `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_runner_integration.py -q` exits 0.
+- [ ] `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_mock_contract.py tests/test_scr_common.py -q` exits 0.
+- [ ] `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests tools/prod_tui/tests -q` exits 0.
+- [ ] Runner integration covers all five legal `(Source, Destination)` cells, or the single `SqlTemplate -> Table` test is explicitly skipped with a GitHub issue URL.
 - [ ] `scr/_common.py` classifier behavior is characterized without changing production behavior.
-- [ ] Mock scenarios exist for every classifier category that ADR-0004 expects to be scenario-backed, or the gaps are documented with TODO issue references.
-- [ ] Full test suite exits 0.
+- [ ] Mock scenarios exist for every classifier category in the matrix above, except any gap with a TODO issue URL.
 - [ ] No production `scr/` behavior changed.
 - [ ] `plans/README.md` row for Plan 005 is updated.
 
@@ -153,6 +204,7 @@ Stop and report if:
 - Adding scenario coverage requires changing production orchestrator behavior.
 - A test would need to wait for the intentionally infinite `all_queues_full` loop.
 - Any in-scope file changed since `a50c81d` and the excerpts no longer match.
+- A step's verification fails twice after a reasonable fix attempt.
 
 ## Maintenance notes
 

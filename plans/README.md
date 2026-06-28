@@ -10,9 +10,9 @@ conditions, run every verification command, and update the row status when done.
 | Plan | Title | Priority | Effort | Depends on | Status |
 |---|---|---|---|---|---|
 | 001 | Harden launch identifiers and CSV output paths | P1 | M | - | TODO |
-| 002 | Make launch preflight live and enforce the Job cap at creation | P1 | M | - | TODO |
+| 002 | Make launch preflight live and enforce the Job cap at creation | P1 | M | 001 | TODO |
 | 003 | Reconcile stale Running and orphan Pending Jobs | P1 | M | 002 | TODO |
-| 004 | Bound manifest refresh work for SSH-scale supervision | P2 | M | 003 | TODO |
+| 004 | Bound manifest refresh work for SSH-scale supervision | P2 | M | 002, 003 | TODO |
 | 005 | Expand runner and scr contract coverage before deeper orchestrator work | P2 | M | - | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) |
@@ -20,12 +20,15 @@ REJECTED (with one-line rationale).
 
 ## Dependency notes
 
+- 001 and 002 both edit `dispatch/screens/new_job.py`; execute them serially
+  in that order rather than dispatching them in parallel.
 - 003 should follow 002 because the launch-slot semantics and cap helper from
   002 define which manifests consume capacity.
-- 004 should follow 003 because refresh optimization must not bypass stale-job
-  reconciliation.
-- 005 can run independently and should land before any high-risk `scr/`
-  behavioral changes.
+- 004 should follow 002 and 003 because refresh optimization must use the
+  launch-slot helper from 002 and must not bypass stale-job reconciliation from
+  003.
+- 005 can run independently from production code changes, but coordinate
+  `tests/test_pure_logic.py` edits with 001.
 
 ## Vetted findings that drove these plans
 

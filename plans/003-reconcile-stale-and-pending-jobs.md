@@ -46,6 +46,20 @@ reconciliation so the TUI can recover from edge-node restarts, SIGKILL, missing
   - `L432-L443`: `_cancel_flow()` only acts when state is `Running` and `pid`.
 - `dispatch/screens/new_job.py` creates before launching:
   - `L594-L601`: `manifest.create_job(...)` then `await process.launch_runner(job_dir)` with no rollback on spawn failure.
+- Expected state after Plan 002:
+  - Real launches should call `jobs.create_job_if_slot_available(...)` rather
+    than `manifest.create_job(...)` directly.
+  - Launch-slot counting should treat `Pending` and `Running` Jobs as occupying
+    capacity.
+  - If those symbols do not exist, stop and execute Plan 002 first.
+- Key excerpts for drift comparison:
+  - `dispatch/process.py:44-45`: `cancel_process_group(pid)` calls
+    `os.killpg(pid, signal.SIGTERM)` with no error handling.
+  - `dispatch/screens/job_detail.py:432-443`: `_cancel_flow()` only confirms and
+    calls `process.cancel_process_group(pid)` when `item["state"] == "Running"`
+    and `pid` is present.
+  - `dispatch/runner.py:117-132`: normal runner paths set terminal state, but
+    SIGKILL/host reboot cannot execute those paths.
 
 ## Commands you will need
 
@@ -54,6 +68,12 @@ reconciliation so the TUI can recover from edge-node restarts, SIGKILL, missing
 | Focused lifecycle tests | `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_runner_integration.py tests/test_process.py tests/test_new_features.py -q` | exit 0 |
 | Full local gate | `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests tools/prod_tui/tests -q` | exit 0 |
 | Package syntax | `/workspace/.venv/bin/python -m compileall dispatch scr` | exit 0 |
+
+## Suggested executor toolkit
+
+- Read `.agents/skills/dispatch-textual-tui/SKILL.md` before editing
+  `dispatch/screens/job_detail.py` or `dispatch/screens/new_job.py`; cancel and
+  launch error handling must stay async-safe and worker-friendly.
 
 ## Scope
 
@@ -84,18 +104,28 @@ In `dispatch/jobs.py`, add helpers such as:
 
 Rules:
 - Only reconcile `Running` with a non-null `pid` when `pid_is_alive(pid)` is false.
-- Mark it `Failed`, set `exit_code=-1`, set `finished_at=manifest.now_utc()`, and leave a short reason in `run.log` if possible.
+- Mark it `Failed`, set `exit_code=-1`, set `finished_at=manifest.now_utc()`.
+- Append one `[dispatch] stale runner pid ...` line to `run.log` only if the
+  log file exists or can be opened safely. If no log exists, skip the log write;
+  do not add a manifest sidecar in this plan.
 - Do not declare `Pending` stale solely by age in the first implementation unless product agrees on an age threshold.
 
-**Verify**: unit test with a `Running` manifest and impossible PID becomes `Failed`.
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_jobs_reconcile.py -k 'stale_running' -q` -> exit 0.
 
 ### Step 2: Reconcile during hot reads without hiding corrupt manifests
 
-Call reconciliation from `list_manifests()` after loading each manifest, or from a new explicit `jobs.reconciled_list_manifests()`. Prefer an explicit helper if broad side effects in `list_manifests()` make tests harder.
+Add `jobs.reconciled_list_manifests(root=None)` and use it from:
+- `running_jobs`
+- `can_launch`
+- `launch_slot_jobs` from Plan 002
+- `active_jobs`
+
+Do not mutate inside bare `list_manifests()`; keep it as the low-level read
+primitive for callers that explicitly want raw manifests.
 
 The dashboard, history, and launch cap paths should see reconciled state before counting or rendering.
 
-**Verify**: a stale `Running` manifest no longer appears in `running_jobs()` after reconciliation.
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_jobs_reconcile.py -k 'running_jobs_reconcile' -q` -> exit 0.
 
 ### Step 3: Handle dead PIDs in cancel
 
@@ -107,28 +137,31 @@ Update `JobDetailScreen._cancel_flow()`:
 - If `Running` and PID is dead, reconcile and notify "Job process is no longer running; manifest marked Failed".
 - If `PermissionError` occurs, notify an error and do not mutate the manifest.
 
-**Verify**: focused test for canceling a stale PID does not crash and updates/notifies as expected.
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_jobs_reconcile.py -k 'cancel_dead_pid' -q` -> exit 0 and asserts manifest `state == "Failed"` with no uncaught exception.
 
 ### Step 4: Make Pending cancel explicit
 
 For `Pending` Jobs:
 - If there is no `pid`, prompt with "Remove Pending Job" rather than "Cancel Job".
-- On confirm, mark the manifest `Cancelled` with `exit_code=0` and `finished_at`, or remove the job directory only if product already has a deletion convention. Prefer terminal `Cancelled` to preserve auditability.
+- On confirm, mark the manifest `Cancelled` with `exit_code=0` and `finished_at`.
+- Never delete the job directory in this plan; preserving the manifest keeps the
+  audit trail intact.
 - If `Pending` has a `pid`, send SIGTERM to that process group.
 - Always notify on no-op paths.
 
-**Verify**: test that a Pending/no-pid manifest can be cancelled to terminal state from Job Detail.
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_jobs_reconcile.py -k 'pending_cancel' -q` -> exit 0.
 
 ### Step 5: Roll back or fail manifest on runner spawn failure
 
-Wrap `await process.launch_runner(job_dir)` in `NewJobScreen._launch_flow()`:
+After `NewJobScreen._launch_flow()` successfully creates a Job through
+`jobs.create_job_if_slot_available(...)`, wrap `await process.launch_runner(job_dir)`:
 - On `OSError` or subprocess creation failure, mark the manifest `Failed` with `exit_code=-1` and `finished_at`.
 - Notify the user with the spawn error.
 - Do not leave a bare `Pending` Job.
 
 Do not delete the job directory; preserving `job.sql` and manifest makes the failure diagnosable.
 
-**Verify**: monkeypatch `process.launch_runner` to raise; assert manifest exists with `Failed`, not `Pending`.
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_new_features.py -k 'launch_runner_failure' -q` -> exit 0.
 
 ## Test plan
 
@@ -139,11 +172,12 @@ Do not delete the job directory; preserving `job.sql` and manifest makes the fai
 
 ## Done criteria
 
-- [ ] Dead `Running` PID manifests are reconciled to terminal state before they consume the cap.
-- [ ] Canceling a dead PID does not crash the worker.
-- [ ] Pending/no-pid Jobs have a visible, working cancel/remove path.
+- [ ] `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_jobs_reconcile.py tests/test_runner_integration.py tests/test_process.py tests/test_new_features.py -q` exits 0.
+- [ ] `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests tools/prod_tui/tests -q` exits 0.
+- [ ] Dead `Running` PID manifests reconcile to `Failed` before `running_jobs()`/`can_launch()` count them.
+- [ ] Pending/no-pid Jobs transition to `Cancelled` through Job Detail; no job directory is deleted.
 - [ ] Runner spawn failure leaves a diagnosable `Failed` manifest, not `Pending`.
-- [ ] Focused lifecycle tests and full local gate exit 0.
+- [ ] `rg 'manifest\\.create_job\\(' dispatch/screens/new_job.py` still returns no direct call after Plan 002.
 - [ ] `plans/README.md` row for Plan 003 is updated.
 
 ## STOP conditions
@@ -154,9 +188,14 @@ Stop and report if:
 - Tests need to kill real unrelated processes to prove behavior.
 - The fix requires changing runner process-group creation semantics.
 - Any in-scope file changed since `a50c81d` and the excerpts no longer match.
+- Plan 002 has not landed and `jobs.create_job_if_slot_available(...)` is absent.
+- A step's verification fails twice after a reasonable fix attempt.
 
 ## Maintenance notes
 
 - Reconciliation should be noisy enough for support: append a small `[dispatch]` log line when a stale manifest is marked terminal.
 - Reviewers should check that the code never kills by process name and never targets anything except the stored PID/process group.
 - A future resume feature should treat reconciled `Failed` Jobs the same as any other failed Job.
+- Stale `Pending` Jobs without a PID are handled only by the explicit manual
+  cancel path in this plan; automatic age-based Pending reconciliation is
+  intentionally deferred until product chooses an age threshold.

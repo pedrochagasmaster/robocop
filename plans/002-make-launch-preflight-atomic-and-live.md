@@ -17,7 +17,7 @@
 - **Priority**: P1
 - **Effort**: M
 - **Risk**: MED
-- **Depends on**: none
+- **Depends on**: plans/001-harden-launch-identifiers-and-csv-paths.md
 - **Category**: bug
 - **Planned at**: commit `a50c81d`, 2026-06-28
 
@@ -28,7 +28,9 @@ tickets and more than two simultaneous `Running` Jobs. Today the New Job screen
 uses a local Kerberos TTL snapshot, checks the cap before the user confirms,
 and creates the manifest later without an atomic cap check. Two sessions, a
 long confirmation pause, or a slow runner can exceed the cap or launch with an
-expired ticket.
+expired ticket. This plan treats `Pending` as accepted work for launch-slot
+purposes; Step 5 updates ADR-0001 so the documented invariant remains
+unambiguous.
 
 ## Current state
 
@@ -36,6 +38,7 @@ expired ticket.
   - `L94-L95`: `await self.refresh_kerberos()` then `self.set_interval(60.0, self.refresh_kerberos)`.
   - `L132-L134`: `self.kerberos_ttl = await kerberos.ticket_ttl_seconds()`.
 - `dispatch/screens/new_job.py` uses a local snapshot:
+  - `L155-L156`: `self.kerberos_ttl = await kerberos.ticket_ttl_seconds()`.
   - `L423-L426`: `_refresh_kerberos()` only disables the launch button from `self.kerberos_ttl`.
   - `L461-L474`: `_validate()` checks `jobs.can_launch()` and local `self.kerberos_ttl`.
   - `L577-L601`: `_validate()` runs before confirmation; after confirm, code calls `manifest.create_job()` and `process.launch_runner()` with no second preflight.
@@ -45,6 +48,14 @@ expired ticket.
   - `L195-L210`: state is `"Pending"` then `write(...)`.
 - ADR-0001 currently says:
   - `L41-L42`: concurrency enforcement is just a count over `manifest.state == "Running"` and "no locks needed".
+- Key excerpts for drift comparison:
+  - `dispatch/screens/dashboard.py:129-133`: Dashboard mirrors app TTL with
+    `self.watch(self.app, "kerberos_ttl", self._on_kerberos_change, init=True)`.
+  - `dispatch/screens/new_job.py:577-601`: `_launch_flow()` validates, awaits
+    `_confirm_launch(...)`, then creates the Job and launches the runner without
+    a second validation.
+  - `dispatch/jobs.py:59-64`: `running_jobs()` filters only `state == "Running"`;
+    `can_launch()` checks `len(running_jobs(root)) < RUNNING_CAP`.
 
 ## Commands you will need
 
@@ -53,6 +64,12 @@ expired ticket.
 | Focused tests | `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_pure_logic.py tests/test_new_features.py tests/test_runner_integration.py -q` | exit 0 |
 | Full local gate | `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests tools/prod_tui/tests -q` | exit 0 |
 | Package syntax | `/workspace/.venv/bin/python -m compileall dispatch scr` | exit 0 |
+
+## Suggested executor toolkit
+
+- Read `.agents/skills/dispatch-textual-tui/SKILL.md` before editing
+  `dispatch/screens/new_job.py`; launch validation must stay async-safe and
+  must not block the Textual event loop.
 
 ## Scope
 
@@ -81,7 +98,8 @@ expired ticket.
 In `NewJobScreen.on_mount`, follow the pattern already used by `DashboardScreen`:
 - Watch `self.app.kerberos_ttl` with `init=True`.
 - In the watcher, copy the value into `self.kerberos_ttl`, call `_refresh_kerberos()`, `_inline_validate()`, and `_update_validation_summary()`.
-- Remove any redundant one-shot `klist` call if present in `NewJobScreen`.
+- Remove the direct `kerberos.ticket_ttl_seconds()` call from `NewJobScreen.on_mount`;
+  the app-level TTL refresh is the single source of truth.
 
 **Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_new_features.py -q` -> pass.
 
@@ -96,7 +114,14 @@ In `_launch_flow()`, after `confirmed` is true and immediately before
 This catches a ticket expiring or a second session launching while the confirm
 dialog was open.
 
-**Verify**: add/adjust a test that simulates a confirm delay and changed TTL/cap -> launch aborts before manifest creation.
+Add or adjust a focused New Job test in `tests/test_phase1_safety.py`:
+- Open a prefilled New Job screen.
+- Monkeypatch the confirmation callback so the form waits long enough to flip
+  `app.kerberos_ttl` to `299` before confirm returns true.
+- Assert no new `manifest.json` is created and the screen shows/notifies a TTL
+  error.
+
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_phase1_safety.py -k 'confirm' -q` -> exit 0.
 
 ### Step 3: Treat `Pending` as occupying a launch slot
 
@@ -114,7 +139,7 @@ two-Job cap.
 Add a small creation helper around `manifest.create_job()` rather than putting
 TUI-only policy into the raw manifest writer. A suggested shape:
 - In `dispatch/jobs.py`, add `create_job_if_slot_available(...)`.
-- Acquire a lock file under `config.jobs_dir()` using `fcntl.flock` on POSIX.
+- Acquire `config.jobs_dir() / ".dispatch-launch.lock"` using `fcntl.flock` on POSIX.
 - Re-count `Pending` + `Running` while holding the lock.
 - If at cap, raise a clear domain exception.
 - Otherwise call `manifest.create_job(...)`.
@@ -123,7 +148,12 @@ Use this helper from `NewJobScreen._launch_flow()`. Keep `manifest.create_job()`
 available for tests and low-level callers, but prefer the cap-enforcing helper
 for real launches.
 
-**Verify**: add a test that starts two concurrent helper calls with one slot left and asserts only one manifest is created.
+Add `tests/test_pure_logic.py::test_create_job_if_slot_available_serializes_one_remaining_slot`
+or a similarly named test. Use two Python threads with one existing
+`Running`/`Pending` slot consumed; assert exactly one of the two calls returns a
+new job directory and exactly one new `manifest.json` appears.
+
+**Verify**: `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_pure_logic.py -k 'slot_available' -q` -> exit 0.
 
 ### Step 5: Update ADR-0001 narrowly
 
@@ -143,22 +173,24 @@ acceptance decision.
 
 ## Done criteria
 
-- [ ] New Job validation updates when `app.kerberos_ttl` changes.
-- [ ] `_launch_flow()` re-runs Kerberos/cap validation after confirmation.
-- [ ] `Pending` + `Running` Jobs consume the two-Job launch cap.
-- [ ] Real launch code creates manifests through the cap-enforcing helper.
+- [ ] `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests/test_pure_logic.py tests/test_phase1_safety.py tests/test_new_features.py tests/test_runner_integration.py -q` exits 0.
+- [ ] `source mocks/dev-env.sh && /workspace/.venv/bin/python -m pytest tests tools/prod_tui/tests -q` exits 0.
+- [ ] New Job validation test proves `app.kerberos_ttl=299` disables/refuses launch without creating a manifest.
 - [ ] Race test proves two concurrent launches cannot both consume one remaining slot.
-- [ ] ADR text no longer claims no locking is needed if locking was introduced.
+- [ ] `rg 'manifest\\.create_job\\(' dispatch/screens/new_job.py` returns no direct call; real launches go through `jobs.create_job_if_slot_available(...)`.
+- [ ] ADR text no longer claims no locking is needed.
 - [ ] `plans/README.md` row for Plan 002 is updated.
 
 ## STOP conditions
 
 Stop and report if:
 - The target Edge Node filesystem does not support the lock primitive you plan to use.
+- `fcntl.flock` is advisory/no-op on the target `/ads_storage` filesystem; do not ship a silent no-op lock.
 - The fix would queue jobs instead of hard-refusing them.
 - You need to change the manifest schema version to enforce the cap.
 - A second validation would require blocking the Textual event loop.
 - Any in-scope file changed since `a50c81d` and the excerpts no longer match.
+- A step's verification fails twice after a reasonable fix attempt.
 
 ## Maintenance notes
 
