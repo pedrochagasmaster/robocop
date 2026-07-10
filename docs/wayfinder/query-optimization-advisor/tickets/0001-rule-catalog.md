@@ -14,10 +14,13 @@ rules the advisor actually checks, and at what severity?
 
 Grill through the manual's checklist with the sponsor, sorting each guideline
 into: **rule** (statically checkable against the SQL text of a Job),
-**needs-metadata rule** (checkable only with table stats / EXPLAIN — park
-until the metadata-availability research resolves), or **not a rule** (already
-out of scope on the map, or unverifiable). For each accepted rule, record
-severity (error / warning / info) and the exact detection condition.
+**needs-metadata rule** (checkable only with table stats / EXPLAIN — the
+metadata-availability research resolved these to **out of v1**; record them
+as parked, not as catalog entries), or **not a rule** (already out of scope
+on the map, or unverifiable). For each accepted rule, record severity
+(error / warning / info) and the exact detection condition. The known-table
+join-strategy rule stays static: it reads the manual's recommended table,
+embedded as data per the metadata research.
 
 Candidate rules visible from a first read, to seed the grilling:
 

@@ -32,8 +32,10 @@ The spec must cover, with nothing left open:
 - the TUI surface and interaction flow, referencing the accepted prototype
 - scoring/aggregation model, SqlTemplate/ExistingTable handling, config and
   suppression (all graduating from the map's fog before this ticket unblocks)
-- testing expectations: pytest coverage, new `mocks/scenarios/` entries,
-  Edge-Node smoke items reviewers must check manually
+- testing expectations: pytest coverage for the analyzer and its syntax
+  corpus, plus Edge-Node smoke items reviewers must check manually — no new
+  `mocks/scenarios/` entries per the
+  [metadata availability research](0003-metadata-availability-research.md)
 - new `CONTEXT.md` glossary entries (Advisor, Finding, and whatever else the
   effort coined)
 

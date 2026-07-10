@@ -1,8 +1,8 @@
 ---
 title: "Research: what Impala metadata is available at pre-launch analysis time"
 labels: [wayfinder:research]
-status: open
-assignee: none
+status: closed
+assignee: cursor-agent
 blocked-by: []
 ---
 
@@ -35,3 +35,17 @@ Investigate:
 The answer decides whether the rule catalog's "needs-metadata" rules are in
 or out of the v1 spec, and whether `EXPLAIN`-based verification is a v1
 feature or fog for a later effort.
+
+## Resolution
+
+[The metadata research](../assets/metadata-availability-research.md) makes v1
+**static-only**: needs-metadata rules are out of the v1 spec, and
+`EXPLAIN`-based verification is deferred to a future effort. The existing
+`impala.query()` plumbing could technically run `EXPLAIN` and
+`SHOW TABLE STATS`, but the mock layer has no routing for either (probed —
+they fall through to scenario dispatch), a 30-second-timeout call has no
+place in the New Job screen's live validation loop, and composition must
+never block on Kerberos or pool failures. The manual's fixed join-strategy
+table is embedded as data instead, which covers the known-table hint rule
+with zero metadata calls. If live metadata returns later, it belongs behind
+an explicit Analyze action with worker/spinner/cancel treatment.
