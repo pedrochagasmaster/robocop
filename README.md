@@ -48,6 +48,19 @@ dispatch
 
 Dispatch captures the launch-time CWD once. CSV destinations are resolved relative to that directory for the entire session.
 
+## Usage telemetry
+
+Dispatch records offline usage events (sessions, screens, Job launches, refusals)
+so operators can see who is using it and how. Events are JSONL under each user's
+`~/.dispatch/telemetry/` and, when writable, the shared rollup at
+`/ads_storage/dispatch/telemetry/users/<user>.jsonl`. No network calls; opt out
+with `DISPATCH_TELEMETRY=0`.
+
+```bash
+dispatch telemetry who --days 30
+dispatch telemetry summary --days 30
+```
+
 ## Jobs
 
 A Job combines exactly one Source and one Destination.

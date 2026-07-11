@@ -52,6 +52,13 @@ $CHANGED_FILES
 EOF
 chmod a+rx . update.sh install.sh 2>/dev/null || true
 
+# Shared usage telemetry rollup (append-only per-user JSONL). Sticky bit so
+# analysts can create their own file without deleting others'.
+TELEMETRY_USERS="$ROOT_DIR/telemetry/users"
+mkdir -p "$TELEMETRY_USERS"
+chmod 755 "$ROOT_DIR/telemetry" 2>/dev/null || true
+chmod 1777 "$TELEMETRY_USERS" 2>/dev/null || true
+
 echo "Dispatch shared tree updated:"
 echo "  path:   $ROOT_DIR"
 echo "  remote: $REMOTE_NAME"
