@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from textual.app import App, SystemCommand
 from textual.reactive import reactive
 
-from . import config, kerberos, process, setup_logging
+from . import config, kerberos, process, setup_logging, telemetry
 
 if TYPE_CHECKING:
     from textual.screen import Screen
@@ -45,6 +45,7 @@ class DispatchApp(App[None]):
     kerberos_ttl: reactive[int | None] = reactive(None)
 
     def action_help(self) -> None:
+        telemetry.emit("screen_view", {"screen": "help"})
         self.push_screen(HelpScreen())
 
     def action_toggle_sidebar(self) -> None:
@@ -92,10 +93,15 @@ class DispatchApp(App[None]):
             )
 
         self._check_terminal_size()
+        telemetry.note_session_start(cwd=self.launch_cwd)
+        telemetry.emit("screen_view", {"screen": "overview"})
         self.push_screen(DashboardScreen())
         await self.refresh_kerberos()
         self.set_interval(60.0, self.refresh_kerberos)
         self._maybe_open_test_prefill()
+
+    def on_unmount(self) -> None:
+        telemetry.note_session_end()
 
     def _maybe_open_test_prefill(self) -> None:
         """Opt-in test seam: when ``DISPATCH_TEST_PREFILL`` names a JSON file,
@@ -214,14 +220,23 @@ class DispatchApp(App[None]):
         self._pop_to_dashboard()
 
         if item_id == "overview":
+            telemetry.emit("screen_view", {"screen": "overview"})
             return
+        screen_name = {
+            "new_job": "new_job",
+            "history": "history",
+            "browse": "browser",
+        }.get(item_id, item_id)
+        telemetry.emit("screen_view", {"screen": screen_name})
         self.push_screen(self._build_top_level_screen(item_id))
 
     def open_job_detail(self, job_id: str, *, cancel_on_mount: bool = False) -> None:
+        telemetry.emit("screen_view", {"screen": "job_detail"})
         self.push_screen(JobDetailScreen(job_id, cancel_on_mount=cancel_on_mount))
 
     def open_new_job_prefill(self, prefill: dict) -> None:
         self._pop_to_dashboard()
+        telemetry.emit("screen_view", {"screen": "new_job"})
         self.push_screen(NewJobScreen(self.launch_cwd, prefill=prefill))
 
     def _open_job_detail_from_sidebar(self, job_id: str) -> None:

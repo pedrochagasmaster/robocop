@@ -14,7 +14,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, RichLog, Static
 from textual.worker import Worker
 
-from .. import config, errors, jobs, manifest, process
+from .. import config, errors, jobs, manifest, process, telemetry
 from ..formatting import (
     format_elapsed,
     format_job_id,
@@ -475,6 +475,7 @@ class JobDetailScreen(Screen[None]):
                 exit_code=0,
                 finished_at=manifest.now_utc(),
             )
+            telemetry.emit("job_cancelled", {"job_id": item["id"]})
             self.notify(f"Pending Job {item['id']} removed", severity="warning")
             self._set_static("#job-status-line", "[yellow]Pending Job cancelled[/]")
             return
@@ -500,6 +501,7 @@ class JobDetailScreen(Screen[None]):
                 )
                 self._set_static("#job-status-line", "[red]Process missing; marked Failed[/]")
                 return
+            telemetry.emit("job_cancelled", {"job_id": item["id"]})
             self.notify(f"Cancellation requested for Job {item['id']}", severity="warning")
             self._set_static("#job-status-line", "[yellow]Cancellation requested\u2026[/]")
             return
