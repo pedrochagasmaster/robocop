@@ -28,6 +28,13 @@ inside `dispatch/`. Pin down that data file:
   recommendation list; document how a revision lands (edit the data file in a
   normal PR) and how users see which list version their findings used.
 
+The locked
+[rule catalog](../assets/rule-catalog.md) broadened this file beyond join
+strategies (see its "Data file requirements" section): it must also carry the
+monitored-schema list (`core`, `gco`, `mrs` initially) and per-table
+partition column(s), with `dw_process_date` as the default for unlisted
+monitored-schema tables.
+
 Blocked by the rule catalog because the file's shape follows from the exact
 detection condition of the known-table join-strategy rule — and if grilling
 drops that rule, this file is not needed at all.
