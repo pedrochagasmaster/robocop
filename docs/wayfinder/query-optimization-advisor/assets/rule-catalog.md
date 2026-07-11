@@ -40,11 +40,31 @@ not this catalog's.
   comment-form (`/* +BROADCAST */`) hints with source spans; a join hint binds
   to the table reference immediately following the `JOIN` keyword.
 
-## Rules
+## Remediation guidance
 
-The quoted finding wordings under each rule are **provisional drafts**: the
-[remediation guidance ticket](../tickets/0004-advisory-vs-rewrite.md) decides
-final remediation content and imperative-versus-diagnostic phrasing.
+Locked by the
+[remediation guidance ticket](../tickets/0004-advisory-vs-rewrite.md)
+(2026-07-10). Every finding has a fixed two-part shape, plus its rule id and
+guideline reference (e.g. `R02 · Guideline #1`):
+
+1. **Detection line — always diagnostic and factual.** States exactly what
+   the analyzer did or didn't find, named to the table/block/span ("No
+   `dw_process_date` predicate found for `core.cut_clear_dtl_enc` in this
+   query block"). Diagnostic phrasing stays true even when the analyzer is
+   wrong; a command would not.
+2. **Remediation line — typed per rule.** **Imperative step** where the fix
+   is deterministic without guessing intent (the data file or username
+   supplies the content): R02, R03, R04, R06, R07, R16, R17, R18.
+   **Alternative-naming** where the fix is the author's call — name the
+   alternative and why, never a hedged command: R01, R05, R08, R09, R10,
+   R11, R12, R13, R14, R15. The quoted wording angles under each rule below
+   are that alternative-naming content.
+
+Full manual excerpts stay out of finding text (80x24 terminals); whether a
+detail view shows them is the
+[surface prototype ticket](../tickets/0006-tui-surface-prototype.md)'s call.
+
+## Rules
 
 | Id | Rule | Guideline | Severity |
 |---|---|---|---|

@@ -3,7 +3,8 @@ title: "Prototype: where the advisor lives in the TUI"
 labels: [wayfinder:prototype]
 status: open
 assignee: none
-blocked-by: [0004-advisory-vs-rewrite, 0005-enforcement-policy]
+blocked-by:
+  [0004-advisory-vs-rewrite, 0005-enforcement-policy, 0009-scoring-model]
 ---
 
 ## Question

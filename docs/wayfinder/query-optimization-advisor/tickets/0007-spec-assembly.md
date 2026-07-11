@@ -11,6 +11,8 @@ blocked-by:
     0004-advisory-vs-rewrite,
     0005-enforcement-policy,
     0006-tui-surface-prototype,
+    0008-join-strategy-data-file,
+    0009-scoring-model,
   ]
 ---
 
@@ -30,8 +32,9 @@ The spec must cover, with nothing left open:
   unchanged
 - launch enforcement policy and override paths
 - the TUI surface and interaction flow, referencing the accepted prototype
-- scoring/aggregation model, SqlTemplate/ExistingTable handling, config and
-  suppression (all graduating from the map's fog before this ticket unblocks)
+- scoring/aggregation model (ticket 0009), SqlTemplate/ExistingTable handling
+  (locked in the rule catalog), config and suppression (still fog; graduates
+  before this ticket unblocks)
 - testing expectations: pytest coverage for the analyzer and its syntax
   corpus, plus Edge-Node smoke items reviewers must check manually — no new
   `mocks/scenarios/` entries per the

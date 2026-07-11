@@ -72,12 +72,13 @@ nothing is left to decide before implementation starts.
   — eighteen rules locked (4 error / 6 warning / 8 info) with exact detection
   conditions; schemas, partition columns, and join strategies ship as data;
   SqlTemplate analyzed once, ExistingTable not analyzed.
+- [Decide: remediation guidance for flag-only findings](tickets/0004-advisory-vs-rewrite.md)
+  — rule-specific mix: diagnostic detection line always, imperative step only
+  where deterministic, alternative-naming for author's-call rules; rule id +
+  guideline reference on every finding.
 
 ## Not yet specified
 
-- **Scoring/aggregation model** — how individual findings roll up into a
-  rating (A–F? 0–100? worst-severity?). The rule catalog is locked; this now
-  waits only on the remediation-guidance decision.
 - **Testing plan and mock scenarios** — pytest coverage for the analyzer and
   its Impala syntax corpus. Analysis is static-only, so no new `impala-shell`
   mock routing is needed; the corpus must cover the locked catalog's
