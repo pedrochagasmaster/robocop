@@ -1,8 +1,8 @@
 ---
 title: "Prototype: where the advisor lives in the TUI"
 labels: [wayfinder:prototype]
-status: open
-assignee: none
+status: closed
+assignee: cursor-agent
 blocked-by:
   [0004-advisory-vs-rewrite, 0005-enforcement-policy, 0009-scoring-model]
 ---
@@ -38,3 +38,35 @@ three-panel conventions.
 
 Link the prototype branch/screenshots as assets. The answer records the
 chosen surface(s) and interaction flow.
+
+## Resolution
+
+Prototyped and approved by the sponsor on 2026-07-11. The advisor surfaces
+on **three composed surfaces** — candidates 1, 2, and 4 — with the dedicated
+Analyze screen (candidate 3) left as future-proofing for the deferred
+metadata effort:
+
+1. **New Job validation summary**: the worst-severity badge with severity
+   counts (`Advisor: error (1 error · 1 warning · 2 infos)`) sits beside
+   "Ready to launch" in the action bar, updating live as the form changes.
+2. **Preview SQL screen**: a findings panel below the highlighted SQL shows
+   every finding in the locked two-part shape (diagnostic detection line,
+   then the typed remediation), each with rule id + guideline reference;
+   the badge repeats in the action bar.
+3. **Launch gate**: a modal listing only error findings with explicit
+   proceed/cancel, stating that the SQL launches exactly as written.
+
+Interaction flow: static analysis runs automatically on form changes (fast
+enough to need no worker/spinner), the badge updates live, `P` opens the
+full findings in Preview, `L` gates only when error findings exist.
+Severity is always conveyed label-first, never color alone; the layout
+holds at 80x24.
+
+Prototype:
+[prototype_advisor_surface.py](../assets/prototype_advisor_surface.py)
+(throwaway, runnable standalone). Screenshots:
+[New Job badge, errors](../assets/prototype_newjob_badge_errors.svg) ·
+[New Job badge, clean](../assets/prototype_newjob_badge_clean.svg) ·
+[Preview findings panel](../assets/prototype_preview_findings.svg) ·
+[launch gate](../assets/prototype_launch_gate.svg) ·
+[Preview at 80x24](../assets/prototype_preview_80x24.svg).

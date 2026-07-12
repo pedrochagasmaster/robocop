@@ -87,6 +87,10 @@ nothing is left to decide before implementation starts.
 - [Decide: scoring/aggregation model for findings](tickets/0009-scoring-model.md)
   — worst-severity badge (`error`/`warning`/`info`/`clean`), pure display; no
   letter grades or numeric scores.
+- [Prototype: where the advisor lives in the TUI](tickets/0006-tui-surface-prototype.md)
+  — three composed surfaces approved: badge in the New Job validation
+  summary, findings panel in Preview SQL, error-only launch gate; analysis
+  runs inline, no worker needed.
 
 ## Not yet specified
 
