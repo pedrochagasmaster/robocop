@@ -1,8 +1,8 @@
 ---
 title: "Decide: scoring/aggregation model for findings"
 labels: [wayfinder:grilling]
-status: open
-assignee: none
+status: closed
+assignee: cursor-agent
 blocked-by: []
 ---
 
@@ -29,3 +29,19 @@ Enforcement hooks stay with the
 
 The catalog's severity semantics (confidence × impact) were not designed as
 score weights; treat any numeric mapping with suspicion during grilling.
+
+## Resolution
+
+Grilled with the sponsor on 2026-07-10. v1 ships the **worst-severity
+badge** (option 2): a Job's analysis result is labeled by its worst finding
+— `error` / `warning` / `info` / `clean`. No arithmetic, trivially
+explainable, and it composes with the locked enforcement policy: an `error`
+badge means the confirm modal will appear at launch. Letter grades and
+numeric scores were rejected — the catalog's severity semantics encode
+confidence × impact, not point weights, and a scalar invites gaming while
+hiding what actually fired.
+
+The badge is **pure display**: it changes no behavior anywhere. Where it
+appears, its color treatment (label + color, never color alone), and
+whether severity counts accompany it (`1 error · 3 warnings`) are the
+[surface prototype ticket](0006-tui-surface-prototype.md)'s calls.

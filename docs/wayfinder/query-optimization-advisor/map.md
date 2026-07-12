@@ -84,6 +84,9 @@ nothing is left to decide before implementation starts.
   — a Python module (`dispatch/advisor_data.py`) of plain literals keyed by
   exact lowercase `schema.table`, expanded verbatim from Guideline #3, with
   monitored schemas, partition-column overrides, and a dated version string.
+- [Decide: scoring/aggregation model for findings](tickets/0009-scoring-model.md)
+  — worst-severity badge (`error`/`warning`/`info`/`clean`), pure display; no
+  letter grades or numeric scores.
 
 ## Not yet specified
 
