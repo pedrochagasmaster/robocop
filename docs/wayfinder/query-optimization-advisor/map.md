@@ -76,6 +76,10 @@ nothing is left to decide before implementation starts.
   — rule-specific mix: diagnostic detection line always, imperative step only
   where deterministic, alternative-naming for author's-call rules; rule id +
   guideline reference on every finding.
+- [Decide: can findings block a launch, or only inform](tickets/0005-enforcement-policy.md)
+  — confirm is the ceiling: errors pause on an explicit proceed/cancel modal,
+  warnings and info never gate, a broken analyzer never breaks launching;
+  per-launch confirm is the only override in v1.
 
 ## Not yet specified
 
@@ -84,12 +88,14 @@ nothing is left to decide before implementation starts.
   mock routing is needed; the corpus must cover the locked catalog's
   SQL-analysis rules (R01–R15, plus DDL entries for R17/R18 — R16 is a
   form-field check needing no SQL corpus).
-- **Configuration and suppression UX** — per-user opt-out and per-rule
-  suppression. Depends on catalog and surface decisions. (The join-strategy
-  data file and its update procedure are now the
-  [embedded join-strategy data file ticket](tickets/0008-join-strategy-data-file.md).)
-
 ## Out of scope
+
+- **Per-rule suppression and config opt-outs** — the
+  [enforcement policy](tickets/0005-enforcement-policy.md) locked the
+  per-launch confirm as v1's only override; suppression returns as its own
+  designed feature in a fresh effort only if real false-positive data
+  demands it. (The join-strategy data file and its update procedure are the
+  [embedded join-strategy data file ticket](tickets/0008-join-strategy-data-file.md).)
 
 - **Live metadata checks (EXPLAIN, SHOW TABLE STATS) during composition** —
   the

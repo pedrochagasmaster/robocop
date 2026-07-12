@@ -1,8 +1,8 @@
 ---
 title: "Decide: can findings block a launch, or only inform"
 labels: [wayfinder:grilling]
-status: open
-assignee: none
+status: closed
+assignee: cursor-agent
 blocked-by: [0001-rule-catalog]
 ---
 
@@ -29,3 +29,29 @@ Grill through the severity tiers the rule catalog produces:
 
 The answer is a policy table: severity tier -> launch behavior (block /
 confirm / warn / info) plus the override mechanism.
+
+## Resolution
+
+Grilled with the sponsor on 2026-07-10. **Confirm is the enforcement
+ceiling — no advisor finding ever hard-blocks a launch.** Dispatch's
+existing hard-refusals are certainties; a static analyzer is not, and a
+false positive must never strand a legitimate Job on a production edge
+node.
+
+| Severity tier | Launch behavior |
+|---|---|
+| error | Launch pauses on a modal listing the error findings; the user explicitly proceeds or cancels. The friction is the enforcement. |
+| warning | Surfaced wherever the surface prototype puts findings; never gates the launch flow. |
+| info | Displayed only. |
+| analysis unavailable (parse failure, unsupported syntax) | Never gates; at most an info note. A broken analyzer must never break launching. |
+
+Override machinery: the per-launch confirm is the **only** override in v1.
+Per-rule suppression comments and config opt-outs are ruled **out of scope**
+for this destination — suppression pressure is low (only errors gate, and
+they are the high-confidence set), suppression syntax invites stale ignore
+comments, and a wholesale opt-out defeats the effort. If real false-positive
+data proves the friction unacceptable, suppression returns as its own
+designed feature in a fresh effort.
+
+Per Source: `ExistingTable` produces no findings, so nothing gates it;
+`SqlFile` and `SqlTemplate` receive identical treatment.
