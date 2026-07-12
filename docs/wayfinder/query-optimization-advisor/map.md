@@ -80,6 +80,10 @@ nothing is left to decide before implementation starts.
   — confirm is the ceiling: errors pause on an explicit proceed/cancel modal,
   warnings and info never gate, a broken analyzer never breaks launching;
   per-launch confirm is the only override in v1.
+- [Decide: the embedded join-strategy data file](tickets/0008-join-strategy-data-file.md)
+  — a Python module (`dispatch/advisor_data.py`) of plain literals keyed by
+  exact lowercase `schema.table`, expanded verbatim from Guideline #3, with
+  monitored schemas, partition-column overrides, and a dated version string.
 
 ## Not yet specified
 
