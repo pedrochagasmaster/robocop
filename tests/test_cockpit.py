@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import time
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -185,23 +185,34 @@ def test_dashboard_refresh_in_flight_skips_overlapping_tick(
     mock_env_with_config, monkeypatch
 ) -> None:
     calls = 0
+    hold = False
+    entered = threading.Event()
+    release = threading.Event()
 
     def slow_active_jobs() -> list[dict]:
         nonlocal calls
         calls += 1
-        time.sleep(0.05)
+        if hold:
+            entered.set()
+            assert release.wait(timeout=2.0), "refresh held the in-flight lock too long"
         return []
 
     monkeypatch.setattr(jobs, "active_jobs", slow_active_jobs)
 
     async def run() -> None:
+        nonlocal hold
         app = DispatchApp()
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.2)
             calls_at_mount = calls
+            hold = True
+            entered.clear()
             first = asyncio.create_task(app.screen._refresh_jobs_async())  # type: ignore[attr-defined]
-            await pilot.pause(0.01)
+            await asyncio.to_thread(entered.wait, 2.0)
+            assert entered.is_set(), "first refresh never entered active_jobs"
             second = asyncio.create_task(app.screen._refresh_jobs_async())  # type: ignore[attr-defined]
+            await asyncio.sleep(0)
+            release.set()
             await asyncio.gather(first, second)
 
             assert calls - calls_at_mount == 1
@@ -243,17 +254,23 @@ def test_job_detail_refresh_in_flight_skips_overlapping_tick(
     jobs_dir = data_root / ".dispatch" / "jobs"
     job_id = _seed_job(jobs_dir, "20260520T120000Z_detail", "Running", pid=4242)
     calls = 0
+    hold = False
+    entered = threading.Event()
+    release = threading.Event()
     original_load = manifest.load
 
     def slow_load(path: Path) -> manifest.JobManifest:
         nonlocal calls
         calls += 1
-        time.sleep(0.05)
+        if hold:
+            entered.set()
+            assert release.wait(timeout=2.0), "refresh held the in-flight lock too long"
         return original_load(path)
 
     monkeypatch.setattr(manifest, "load", slow_load)
 
     async def run() -> None:
+        nonlocal hold
         app = DispatchApp()
         async with app.run_test(size=(120, 40)) as pilot:
             screen = JobDetailScreen(job_id)
@@ -262,9 +279,14 @@ def test_job_detail_refresh_in_flight_skips_overlapping_tick(
             calls_at_mount = calls
             screen._manifest_item = None
             screen._manifest_mtime = None
+            hold = True
+            entered.clear()
             first = asyncio.create_task(screen._refresh_detail_async())
-            await pilot.pause(0.01)
+            await asyncio.to_thread(entered.wait, 2.0)
+            assert entered.is_set(), "first refresh never entered manifest.load"
             second = asyncio.create_task(screen._refresh_detail_async())
+            await asyncio.sleep(0)
+            release.set()
             await asyncio.gather(first, second)
 
             assert calls - calls_at_mount == 1
