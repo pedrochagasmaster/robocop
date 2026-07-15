@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 
-from textual.widgets import Input, RadioButton
+from textual.widgets import Input, RadioButton, RadioSet
 
 from dispatch.app import DispatchApp
 from dispatch.screens.new_job import NewJobScreen
@@ -124,9 +124,57 @@ def test_test_prefill_seam_opens_new_job(mock_env_with_config, monkeypatch) -> N
     async def run() -> None:
         app = DispatchApp()
         async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause(0.8)
+            # Prefill radios are re-asserted on timers (0.05 / 0.25s) because
+            # Textual RadioSet mount can lag on Windows under xdist load.
+            destination = None
+            screen = None
+            for _ in range(40):
+                await pilot.pause(0.05)
+                screen = app.screen
+                if not isinstance(screen, NewJobScreen):
+                    continue
+                try:
+                    destination = screen._selected_destination()
+                except Exception:
+                    # Screen pushed but compose/mount not finished yet.
+                    continue
+                if destination == "Table":
+                    break
+            assert isinstance(screen, NewJobScreen)
+            assert destination == "Table"
+
+    asyncio.run(run())
+
+
+def test_selected_destination_prefers_button_value_over_pressed(
+    mock_env_with_config,
+) -> None:
+    """Regression: RadioSet.pressed_button can desync from button.value.
+
+    When compose-time Table is on but ``_pressed_button`` is still unset (or
+    stuck on the Csv default), selection helpers must trust ``button.value``.
+    """
+    data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+    sql_path = _write_sql(data_root)
+    prefill = {
+        "source_type": "SqlFile",
+        "dest_type": "Table",
+        "sql_file": str(sql_path),
+        "schema": "aa_enc",
+        "table_name": "smoke_tbl",
+    }
+
+    async def run() -> None:
+        app = DispatchApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.5)
+            app.push_screen(NewJobScreen(app.launch_cwd, prefill=prefill))
+            await pilot.pause(0.5)
             screen = app.screen
             assert isinstance(screen, NewJobScreen)
+            dest = screen.query_one("#destination", RadioSet)
+            # Simulate the Windows mount desync: values say Table, pressed says none.
+            dest._pressed_button = None
             assert screen._selected_destination() == "Table"
 
     asyncio.run(run())

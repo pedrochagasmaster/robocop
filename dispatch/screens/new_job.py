@@ -443,22 +443,42 @@ class NewJobScreen(Screen[None]):
     def _normalize_table_name_suffix(self, raw: str) -> str:
         return sql.split_eid_table_suffix(raw, self._eid).strip()
 
+    @staticmethod
+    def _pressed_radio_id(radio_set: RadioSet) -> str | None:
+        """Return the on button id, preferring ``value`` over ``pressed_button``.
+
+        Textual 8.2.5 ``RadioSet._on_mount`` can leave ``_pressed_button`` unset
+        (or briefly desynced) when children are composed with an initial
+        ``value=True``. Reading ``button.value`` is the durable source of truth
+        for which option is on; ``pressed_button`` is consulted only as a
+        fallback.
+        """
+        for btn in radio_set.query(RadioButton):
+            if btn.value and btn.id:
+                return btn.id
+        if radio_set.pressed_button is not None and radio_set.pressed_button.id:
+            return radio_set.pressed_button.id
+        return None
+
     def _selected_source(self) -> str:
         radio_set = self.query_one("#source", RadioSet)
-        if radio_set.pressed_button is not None:
-            return _SOURCE_IDS.get(radio_set.pressed_button.id or "", "SqlFile")
+        button_id = self._pressed_radio_id(radio_set)
+        if button_id is not None:
+            return _SOURCE_IDS.get(button_id, "SqlFile")
         return "SqlFile"
 
     def _selected_destination(self) -> str:
         radio_set = self.query_one("#destination", RadioSet)
-        if radio_set.pressed_button is not None:
-            return _DEST_IDS.get(radio_set.pressed_button.id or "", "Csv")
+        button_id = self._pressed_radio_id(radio_set)
+        if button_id is not None:
+            return _DEST_IDS.get(button_id, "Csv")
         return "Csv"
 
     def _selected_existing_schema_choice(self) -> str:
         radio_set = self.query_one("#existing-schema", RadioSet)
-        if radio_set.pressed_button is not None:
-            return _EXISTING_SCHEMA_IDS.get(radio_set.pressed_button.id or "", "aa_enc")
+        button_id = self._pressed_radio_id(radio_set)
+        if button_id is not None:
+            return _EXISTING_SCHEMA_IDS.get(button_id, "aa_enc")
         return "aa_enc"
 
     def _existing_table_schema(self) -> str:
@@ -1141,8 +1161,24 @@ class NewJobScreen(Screen[None]):
         if existing_table:
             self._apply_existing_table_prefill(str(existing_table))
         self._apply_queue_value(self.prefill.get("queue", ""))
-        # The radio values are selected during composition so RadioSet mounts
-        # with one authoritative choice instead of racing deferred messages.
+        # Compose-time ``value=`` is the first line of defence, but Textual
+        # 8.2.5 ``RadioSet._on_mount`` can still leave ``_pressed_button``
+        # unset on slower Windows event loops. Re-assert the intended choice
+        # after mount settles so DISPATCH_TEST_PREFILL / re-run stay reliable.
+        source_btn = {
+            "SqlFile": "src-sqlfile",
+            "SqlTemplate": "src-sqltemplate",
+            "ExistingTable": "src-existingtable",
+        }.get(self._prefill_source)
+        dest_btn = {
+            "Table": "dst-table",
+            "Csv": "dst-csv",
+            "Table+Csv": "dst-table-csv",
+        }.get(self._prefill_destination)
+        if source_btn:
+            self._schedule_force_radio("#source", source_btn)
+        if dest_btn:
+            self._schedule_force_radio("#destination", dest_btn)
         self.call_after_refresh(self._scroll_prefill_fields)
 
     def _apply_existing_table_prefill(self, existing_table: str) -> None:
@@ -1153,8 +1189,42 @@ class NewJobScreen(Screen[None]):
         schema_part, table_part = existing_table.split(".", 1)
         self.query_one("#existing-table", Input).value = table_part
         if schema_part in _KNOWN_EXISTING_SCHEMAS:
+            schema_btn = {
+                "coe_enc": "esc-coe-enc",
+                "aa_enc": "esc-aa-enc",
+            }[schema_part]
+            self._schedule_force_radio("#existing-schema", schema_btn)
             return
+        self._schedule_force_radio("#existing-schema", "esc-other")
         self.query_one("#existing-schema-custom", Input).value = schema_part
+
+    def _schedule_force_radio(self, radio_set_id: str, button_id: str) -> None:
+        self.call_after_refresh(self._force_radio, radio_set_id, button_id)
+        self.set_timer(0.05, lambda: self._force_radio(radio_set_id, button_id))
+        self.set_timer(0.25, lambda: self._force_radio(radio_set_id, button_id))
+
+    def _force_radio(self, radio_set_id: str, button_id: str) -> None:
+        try:
+            radio_set = self.query_one(radio_set_id, RadioSet)
+            target = self.query_one(f"#{button_id}", RadioButton)
+        except Exception:  # noqa: BLE001
+            return
+        with self.prevent(RadioButton.Changed):
+            for btn in radio_set.query(RadioButton):
+                btn.value = btn is target
+        radio_set._pressed_button = target
+        nodes = list(radio_set._nodes)
+        if target in nodes:
+            radio_set._selected = nodes.index(target)
+        logger.info(
+            "prefill applied %s -> %s (pressed=%s)",
+            radio_set_id,
+            button_id,
+            radio_set.pressed_button.id if radio_set.pressed_button else None,
+        )
+        self._update_field_visibility()
+        self._inline_validate()
+        self._update_validation_summary()
 
     def _scroll_prefill_fields(self) -> None:
         """Bring the destination-dependent rows into the viewport for a
