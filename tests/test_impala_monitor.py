@@ -256,6 +256,25 @@ def test_parse_query_detail_never_raises_on_deeply_nested_json() -> None:
     assert observation.availability_error is not None
 
 
+def test_parse_query_detail_never_downgrades_to_http() -> None:
+    # Regression for the TLS-downgrade finding: an identity carrying an
+    # http:// coordinator_base_url (e.g. from a spoofed/misconfigured
+    # discovery source) must not silently produce a plaintext http://
+    # detail_url. parse_query_detail has no config/dev-flag to consult, so
+    # it must reject rather than inherit a self-authorizing decision.
+    identity = im.QueryIdentity(
+        coordinator_base_url="http://coordinator-1.internal.example:25443",
+        query_id="1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+        shell_execution_id="shell-exec-1",
+        relation="initial",
+        discovered_at="2026-07-15T10:00:00Z",
+    )
+    observation = im.parse_query_detail(fixture_bytes("query_stmt_running.json"), identity)
+    assert observation.availability_error is not None
+    assert not observation.detail_url.startswith("http://")
+    assert "http://" not in observation.detail_url
+
+
 # =============================================================================
 # Field-deletion robustness — every optional field removed still parses
 # =============================================================================
@@ -453,6 +472,39 @@ def test_build_detail_url_rejects_arbitrary_endpoint() -> None:
 def test_build_detail_url_rejects_bad_query_id() -> None:
     with pytest.raises(im.IdentityValidationError):
         im.build_detail_url(BASE_URL, "query_stmt", "not-a-valid-id")
+
+
+def test_build_detail_url_rejects_http_base_without_dev_flag() -> None:
+    # This is the TLS-downgrade regression: build_detail_url must not infer
+    # the http-allow decision from the base URL string itself. An http://
+    # base is only usable when the caller explicitly opts in via allow_http.
+    with pytest.raises(im.IdentityValidationError):
+        im.build_detail_url(
+            "http://coordinator-1.internal.example:25443",
+            "query_stmt",
+            "1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+        )
+
+
+def test_build_detail_url_accepts_http_base_with_explicit_dev_flag() -> None:
+    url = im.build_detail_url(
+        "http://coordinator-1.internal.example:25443",
+        "query_stmt",
+        "1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+        allow_http=True,
+    )
+    assert url.startswith("http://coordinator-1.internal.example:25443/query_stmt")
+
+
+def test_build_detail_url_defaults_to_no_http_allowance() -> None:
+    # allow_http must default to False, not to "whatever scheme base uses".
+    with pytest.raises(im.IdentityValidationError):
+        im.build_detail_url(
+            "http://coordinator-1.internal.example:25443",
+            "query_stmt",
+            "1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+            allow_http=False,
+        )
 
 
 def test_no_function_can_produce_cancel_query_url() -> None:

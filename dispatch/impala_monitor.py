@@ -212,17 +212,24 @@ def validate_coordinator_url(url: str, *, allow_http: bool = False) -> str:
     return f"{parts.scheme}://{hostname}:{port}"
 
 
-def build_detail_url(base: str, endpoint: str, query_id: str) -> str:
+def build_detail_url(base: str, endpoint: str, query_id: str, *, allow_http: bool = False) -> str:
     """Build a detail URL for one of the fixed, read-only endpoints.
 
     ``endpoint`` must be one of ``query_stmt``, ``query_summary``,
     ``query_plan_text``, ``query_plan``. There is deliberately no function
     that fetches or builds an arbitrary path: any other endpoint (including
     ``cancel_query``) raises ``ValueError`` before the URL is assembled.
+
+    ``allow_http`` defaults to ``False`` and is never inferred from ``base``
+    itself — accepting an ``http://`` scheme is a caller-supplied, config-
+    controlled dev/mock opt-in (see ``validate_coordinator_url``), not a
+    property of the untrusted base URL string. A ``base`` carrying an
+    ``http://`` scheme is rejected unless the caller explicitly passes
+    ``allow_http=True``.
     """
     if endpoint not in _ALLOWED_DETAIL_ENDPOINTS:
         raise ValueError(f"endpoint not permitted: {endpoint!r}")
-    validated_base = validate_coordinator_url(base, allow_http=base.startswith("http://"))
+    validated_base = validate_coordinator_url(base, allow_http=allow_http)
     validated_qid = validate_query_id(query_id)
     return f"{validated_base}/{endpoint}?query_id={quote(validated_qid, safe='')}&json"
 
@@ -265,15 +272,36 @@ def parse_query_detail(payload: bytes, identity: QueryIdentity) -> ImpalaObserva
 
     Never raises: every failure (oversized body, invalid JSON, non-object
     JSON, top-level ``error``, ``plan_metadata_unavailable``, missing
-    ``record_json``) is mapped to an observation carrying
-    ``availability_error`` instead of an exception escaping to callers. The
-    "phase preserved from prior knowledge" behavior mentioned in the plan for
-    an evicted/unknown-id response is the *service* layer's job (later
-    slices); this function only reports what today's payload says, which for
-    an unknown-id response is "unknown".
+    ``record_json``, or an ``identity.coordinator_base_url`` that fails
+    validation — e.g. an ``http://`` URL with no dev/mock opt-in) is mapped
+    to an observation carrying ``availability_error`` instead of an
+    exception escaping to callers. The "phase preserved from prior
+    knowledge" behavior mentioned in the plan for an evicted/unknown-id
+    response is the *service* layer's job (later slices); this function only
+    reports what today's payload says, which for an unknown-id response is
+    "unknown".
+
+    ``build_detail_url`` is always called with ``allow_http=False`` here:
+    this pure layer has no config to consult, so it never self-authorizes an
+    ``http://`` coordinator URL. A coordinator base URL that requires the
+    dev/mock HTTP opt-in must already have been validated with that opt-in
+    by the caller that produced ``identity`` (see
+    ``validate_coordinator_url``); this function will not silently downgrade
+    to HTTP on its own, and will not silently upgrade an already-invalid
+    identity into a working detail URL either — it reports
+    ``availability_error`` instead.
     """
-    detail_url = build_detail_url(identity.coordinator_base_url, "query_stmt", identity.query_id)
     observed_at = identity.discovered_at
+    try:
+        detail_url = build_detail_url(
+            identity.coordinator_base_url, "query_stmt", identity.query_id
+        )
+    except IdentityValidationError:
+        return _availability_observation(
+            availability_error="invalid coordinator URL or query id",
+            detail_url="",
+            observed_at=observed_at,
+        )
 
     if len(payload) > MAX_BODY_BYTES:
         return _availability_observation(
