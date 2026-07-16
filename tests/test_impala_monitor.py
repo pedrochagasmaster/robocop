@@ -243,6 +243,19 @@ def test_parse_query_detail_never_raises_on_garbage() -> None:
         assert observation.availability_error is not None
 
 
+def test_parse_query_detail_never_raises_on_deeply_nested_json() -> None:
+    # CPython's json.loads raises RecursionError (not JSONDecodeError) on
+    # sufficiently deep nesting, well under MAX_BODY_BYTES and well under the
+    # ~80 KB the plan cites for real detail pages. Must still be mapped to an
+    # availability_error, never escape as an exception.
+    depth = 3000
+    deeply_nested = b'{"a": ' * depth + b"1" + b"}" * depth
+    identity = make_identity()
+    observation = im.parse_query_detail(deeply_nested, identity)
+    assert observation.phase == "unknown"
+    assert observation.availability_error is not None
+
+
 # =============================================================================
 # Field-deletion robustness — every optional field removed still parses
 # =============================================================================
@@ -361,6 +374,17 @@ def test_validate_coordinator_url_allows_trailing_slash_only() -> None:
         im.validate_coordinator_url("https://coordinator-1.internal.example:25443/")
         == "https://coordinator-1.internal.example:25443"
     )
+
+
+def test_validate_coordinator_url_rejects_ipv6_literal() -> None:
+    # Coordinators are documented as DNS hostnames only. An IPv6 literal
+    # must be rejected outright rather than accepted-and-mangled: urlsplit()
+    # strips the required "[...]" brackets from .hostname, so naively
+    # re-assembling "scheme://host:port" would silently produce a URL that
+    # cannot round-trip through an HTTP client (RFC 3986 requires brackets
+    # around an IPv6 literal in a URL authority).
+    with pytest.raises(im.IdentityValidationError):
+        im.validate_coordinator_url("https://[::1]:25443")
 
 
 # =============================================================================

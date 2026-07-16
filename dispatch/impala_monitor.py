@@ -151,10 +151,16 @@ def _is_valid_hostname(host: str) -> bool:
     if not host or len(host) > 253:
         return False
     try:
-        ip_address(host)
-        return True
+        address = ip_address(host)
     except ValueError:
         pass
+    else:
+        # Coordinators are documented as DNS hostnames only (see the
+        # research note); IPv4 literals are accepted for local/dev use, but
+        # IPv6 literals are rejected rather than accepted-and-mangled, since
+        # ``urlsplit().hostname`` strips the ``[...]`` brackets an IPv6
+        # literal needs to round-trip through an HTTP client (Slice 3).
+        return address.version == 4
     if host.endswith("."):
         host = host[:-1]
     labels = host.split(".")
@@ -278,7 +284,7 @@ def parse_query_detail(payload: bytes, identity: QueryIdentity) -> ImpalaObserva
 
     try:
         data = json.loads(payload)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return _availability_observation(
             availability_error="malformed response body",
             detail_url=detail_url,
