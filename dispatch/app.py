@@ -14,6 +14,8 @@ from textual.app import App, SystemCommand
 from textual.reactive import reactive
 
 from . import config, kerberos, process, runtime, setup_logging, telemetry
+from .impala_monitor_http import ImpalaMonitorClient, UrllibTransport
+from .monitor_service import MonitorService
 
 if TYPE_CHECKING:
     from textual.screen import Screen
@@ -68,6 +70,15 @@ class DispatchApp(App[None]):
         self.title = "Dispatch"
         self.sub_title = f"Impala jobs \u00b7 {self._short_cwd()}"
         self._too_small_warned = False
+        # Slice 5: one MonitorService per app, mirroring how the app owns
+        # other cross-screen singletons (e.g. Kerberos TTL state). Built here
+        # (not per-screen) so pollers and cached coordinator discovery are
+        # shared across every Job Detail visit for the process lifetime.
+        transport = UrllibTransport(ca_bundle=config.impala_monitor_ca_bundle())
+        monitor_client = ImpalaMonitorClient(
+            transport, allow_http=config.impala_monitor_allow_http()
+        )
+        self.monitor_service = MonitorService(monitor_client)
         logger.info(
             "Dispatch %s starting, cwd=%s, data_root=%s",
             __version__,
@@ -96,6 +107,7 @@ class DispatchApp(App[None]):
             )
 
         self._check_terminal_size()
+        self.monitor_service.start()
         self.run_worker(self._startup_flow(), name="startup-flow", exclusive=True)
 
     async def _startup_flow(self) -> None:
@@ -110,6 +122,7 @@ class DispatchApp(App[None]):
         await self._maybe_open_test_prefill()
 
     def on_unmount(self) -> None:
+        self.monitor_service.stop()
         telemetry.note_session_end()
 
     async def _maybe_open_test_prefill(self) -> None:
@@ -262,7 +275,11 @@ class DispatchApp(App[None]):
 
     def open_job_detail(self, job_id: str, *, cancel_on_mount: bool = False) -> None:
         telemetry.note_screen_view("job_detail")
-        self.push_screen(JobDetailScreen(job_id, cancel_on_mount=cancel_on_mount))
+        self.push_screen(
+            JobDetailScreen(
+                job_id, cancel_on_mount=cancel_on_mount, monitor_service=self.monitor_service
+            )
+        )
 
     def open_new_job_prefill(self, prefill: dict) -> None:
         self._pop_to_dashboard()

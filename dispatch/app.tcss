@@ -541,6 +541,20 @@ Input:focus {
     height: auto;
 }
 
+#monitor-panel {
+    height: auto;
+    max-height: 8;
+    padding: 0 1;
+    margin: 0 1 1 1;
+    background: $surface-darken-1;
+    border: round $primary-background-darken-2;
+    overflow-y: auto;
+}
+
+#monitor-panel Static {
+    height: auto;
+}
+
 #log-header {
     layout: horizontal;
     height: auto;

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -22,8 +22,12 @@ from ..formatting import (
     format_timestamp,
     style_log_line,
 )
+from ..monitor_service import MonitorSnapshot
 from .confirm import ConfirmScreen
 from .sidebar import Sidebar
+
+if TYPE_CHECKING:
+    from ..monitor_service import MonitorService, QueryAttempt
 
 # The live log view keeps only a bounded tail in memory and on screen so very
 # chatty jobs cannot grow the UI without limit. The RichLog widget and the
@@ -34,6 +38,20 @@ LOG_VIEW_LINES = 200
 # more than this between ticks; the remainder is picked up on the next tick
 # by carrying the offset forward. Bounds memory and RichLog write bursts.
 LOG_READ_CHUNK_BYTES = 65536
+
+# Most recent shell/query attempts shown in the compact history line; older
+# attempts are summarized by count rather than dropped silently.
+MONITOR_HISTORY_LIMIT = 5
+
+_PHASE_LABELS: dict[str, str] = {
+    "preparing": "preparing",
+    "queued": "queued",
+    "running": "running",
+    "succeeded": "succeeded",
+    "failed": "failed",
+    "retrying": "retrying",
+    "unknown": "unknown",
+}
 
 
 class JobDetailScreen(Screen[None]):
@@ -52,7 +70,13 @@ class JobDetailScreen(Screen[None]):
 
     follow_mode = reactive(True)
 
-    def __init__(self, job_id: str, cancel_on_mount: bool = False) -> None:
+    def __init__(
+        self,
+        job_id: str,
+        cancel_on_mount: bool = False,
+        *,
+        monitor_service: MonitorService | None = None,
+    ) -> None:
         super().__init__()
         self.job_id = job_id
         self.cancel_on_mount = cancel_on_mount
@@ -73,6 +97,12 @@ class JobDetailScreen(Screen[None]):
         self._refresh_in_flight = False
         # Last markup painted per Static, to skip no-op repaints over SSH.
         self._static_cache: dict[str, str] = {}
+        # Slice 5 monitoring panel. ``None`` (the default) keeps monitoring
+        # off entirely so every existing caller/test is unaffected; the app
+        # wires its owned MonitorService through for real navigation.
+        self._monitor_service = monitor_service
+        self._monitor_subscribed = False
+        self._monitor_refresh_in_flight = False
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Hide actions that do not apply to the Job's current state."""
@@ -111,6 +141,10 @@ class JobDetailScreen(Screen[None]):
 
                 yield Static("", id="error-banner")
 
+                with Vertical(id="monitor-panel"):
+                    yield Static("", id="monitor-attempt")
+                    yield Static("", id="monitor-history")
+
                 with Horizontal(id="log-header"):
                     yield Static("[bold]Logs[/]", classes="section-title")
                     yield Static("", id="log-streaming")
@@ -142,6 +176,63 @@ class JobDetailScreen(Screen[None]):
             self.action_cancel()
         await self._refresh_detail_async()
         self.set_interval(1.0, self._refresh_detail_async)
+        await self._subscribe_monitor_async()
+        self.set_interval(2.0, self._refresh_monitor_async)
+
+    def on_unmount(self) -> None:
+        # Screen is popped, not suspended-in-place (see app.py navigation);
+        # dropping the subscription here returns this job's pollers to the
+        # background cadence for every other consumer.
+        if self._monitor_subscribed and self._monitor_service is not None:
+            self._monitor_service.unsubscribe(self.job_id)
+            self._monitor_subscribed = False
+
+    def _unwired_monitor_snapshot(self) -> MonitorSnapshot:
+        return MonitorSnapshot(
+            job_id=self.job_id,
+            available=False,
+            unavailable_reason="monitoring unavailable",
+        )
+
+    async def _subscribe_monitor_async(self) -> None:
+        """Subscribe to monitoring for this job, driving the foreground cadence.
+
+        Paints the quiet "monitoring unavailable" line and returns without
+        subscribing when no service was wired in — the default for every
+        existing caller/test, and identical to a wired service reporting no
+        sidecar for this job. Runs the (blocking, file-reading) ``subscribe``
+        call in a thread so the event loop is never blocked, per the
+        dispatch-textual-tui skill.
+        """
+        service = self._monitor_service
+        if service is None:
+            self._apply_monitor_snapshot(self._unwired_monitor_snapshot())
+            return
+        job_id = self.job_id
+        job_dir = self.job_dir
+
+        def _subscribe() -> MonitorSnapshot:
+            return service.subscribe(job_id, job_dir)
+
+        snapshot = await asyncio.to_thread(_subscribe)
+        self._monitor_subscribed = True
+        self._apply_monitor_snapshot(snapshot)
+
+    async def _refresh_monitor_async(self) -> None:
+        if self._monitor_service is None or self._monitor_refresh_in_flight:
+            return
+        self._monitor_refresh_in_flight = True
+        service = self._monitor_service
+        job_id = self.job_id
+
+        def _snapshot() -> MonitorSnapshot:
+            return service.snapshot(job_id)
+
+        try:
+            snapshot = await asyncio.to_thread(_snapshot)
+            self._apply_monitor_snapshot(snapshot)
+        finally:
+            self._monitor_refresh_in_flight = False
 
     async def _refresh_detail_async(self) -> None:
         if self._refresh_in_flight:
@@ -322,6 +413,109 @@ class JobDetailScreen(Screen[None]):
             self._set_static("#error-banner", "[red]Job failed.[/] [dim]Check log for details.[/]")
         if not banner.display:
             banner.display = True
+
+    # -- Slice 5: Impala attempt monitoring panel -------------------------
+    #
+    # The manifest's coarse job state (rendered above, unchanged) is the only
+    # authoritative job-level truth. This panel shows a *separate* signal:
+    # the current Impala attempt's phase, pool, reported progress, queued
+    # duration, and a compact shell/query attempt history, sourced only from
+    # MonitorService snapshots. It never overrides or reinterprets the
+    # manifest state, and a monitoring failure never touches cancel/log-tail
+    # behavior above.
+
+    def _apply_monitor_snapshot(self, snapshot: MonitorSnapshot) -> None:
+        if not snapshot.available:
+            reason = snapshot.unavailable_reason or "monitoring unavailable"
+            self._set_static("#monitor-attempt", f"[dim]Impala attempt: {reason}[/]")
+            self._set_static("#monitor-history", "")
+            return
+
+        leaf = self._current_leaf_attempt(snapshot)
+        self._set_static("#monitor-attempt", self._format_current_attempt(leaf))
+        self._set_static("#monitor-history", self._format_attempt_history(snapshot))
+
+    @staticmethod
+    def _current_leaf_attempt(snapshot: MonitorSnapshot) -> QueryAttempt | None:
+        """Return the most recently started live leaf query attempt, if any.
+
+        A query superseded by a transparent retry is represented by its
+        latest retry (the live continuation); the last shell in event order
+        is the most current attempt.
+        """
+        for shell in reversed(snapshot.shell_executions):
+            if not shell.queries:
+                continue
+            query = shell.queries[-1]
+            leaf = query.retries[-1] if query.retries else query
+            return leaf
+        return None
+
+    def _format_current_attempt(self, leaf: QueryAttempt | None) -> str:
+        if leaf is None:
+            return "[dim]Impala attempt: no query observed yet[/]"
+        observation = leaf.observation
+        if observation is None:
+            return "[dim]Impala attempt: awaiting first observation…[/]"
+
+        if observation.availability_error:
+            return (
+                f"[dim]Impala attempt: monitoring unavailable ({observation.availability_error})[/]"
+            )
+
+        phase_text = _PHASE_LABELS.get(observation.phase, observation.phase)
+        parts = [f"Impala attempt: [bold]{phase_text}[/]"]
+        if observation.pool:
+            parts.append(f"pool [cyan]{observation.pool}[/]")
+        progress = observation.query_progress or observation.scan_progress
+        if progress is not None and progress.display:
+            parts.append(f"reported work completed: {progress.display}")
+        if observation.queued_duration:
+            parts.append(f"queued {observation.queued_duration}")
+        return "  ·  ".join(parts)
+
+    def _format_attempt_history(self, snapshot: MonitorSnapshot) -> str:
+        entries: list[str] = []
+        for shell in snapshot.shell_executions:
+            for query in shell.queries:
+                entries.extend(self._describe_query_chain(query, pool=shell.pool))
+        if not entries:
+            return ""
+        shown = entries[-MONITOR_HISTORY_LIMIT:]
+        lines = [f"[dim]Attempt history ({len(entries)} total):[/]"]
+        lines.extend(f"  {entry}" for entry in shown)
+        return "\n".join(lines)
+
+    def _describe_query_chain(self, query: QueryAttempt, *, pool: str) -> list[str]:
+        """Describe one initial query and its transparent-retry chain.
+
+        A mid-chain ``EXCEPTION`` (an attempt with at least one following
+        retry) reads "attempt failed; job retrying" — never "job failed",
+        since the manifest (not this panel) is the only source of job-level
+        truth. Only the last attempt in the chain (no further retry) may
+        report a terminal outcome as such.
+        """
+        chain = [query, *query.retries]
+        described: list[str] = []
+        for index, attempt in enumerate(chain):
+            has_following = index < len(chain) - 1
+            described.append(
+                self._describe_single_attempt(attempt, pool=pool, has_following=has_following)
+            )
+        return described
+
+    @staticmethod
+    def _describe_single_attempt(query: QueryAttempt, *, pool: str, has_following: bool) -> str:
+        observation = query.observation
+        label = "retry" if query.relation == "transparent_retry" else "attempt"
+        if observation is None:
+            return f"{label} ({pool}): awaiting observation…"
+        if observation.availability_error and observation.phase == "unknown":
+            return f"{label} ({pool}): monitoring unavailable"
+        phase_text = _PHASE_LABELS.get(observation.phase, observation.phase)
+        if observation.phase == "failed" and has_following:
+            return f"{label} ({pool}): attempt failed; job retrying"
+        return f"{label} ({pool}): {phase_text}"
 
     def _styled_log_line(self, line: str) -> str:
         styled = self._style_log_line(line)
