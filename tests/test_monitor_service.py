@@ -667,6 +667,71 @@ class TestPolling:
         assert client.calls[0].query_id == QID_RETRY
         assert client.calls[0].relation == "transparent_retry"
 
+    def test_retry_discovered_after_initial_poller_already_active_supersedes_it(
+        self, tmp_path: Path
+    ) -> None:
+        """A retry arriving in a *later* refresh cycle must prune the poller
+        for the query it supersedes, not just skip creating a duplicate.
+
+        Regression test: previously ``_prune_pollers_for_job`` only removed a
+        poller once it was both non-live *and* already marked ``stopped``
+        (a flag only ever set by a terminal observation). A poller for a
+        query superseded mid-flight by a ``query_retried`` event discovered
+        in a subsequent refresh is never terminal and was therefore never
+        pruned, leaving two pollers alive (and being polled) for what the
+        hierarchy says is one live query.
+        """
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                event_line("shell_started", pool="default", seq=1),
+                event_line("query_discovered", coordinator_base_url=COORD_1, query_id=QID_1, seq=2),
+            ],
+        )
+        client = FakeMonitorClient()
+        client.default_response = make_observation(phase="running")
+        clock = FakeClock()
+        service = ms.MonitorService(client, clock=clock, foreground_poll_seconds=2.0)
+        service.subscribe("job-1", tmp_path)
+
+        # First refresh cycle: only QID_1 is known, its poller is created and
+        # polled once.
+        service.run_pending()
+        assert len(client.calls) == 1
+        assert client.calls[0].query_id == QID_1
+        assert service.poller_count("job-1") == 1
+
+        # The retry is discovered only now, in a later cycle -- QID_1's
+        # poller already exists and has already been polled.
+        with events_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                event_line(
+                    "query_retried",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_RETRY,
+                    seq=3,
+                )
+            )
+
+        clock.advance(2.0)
+        service.run_pending()
+
+        # Exactly one live poller remains: the retry's. QID_1's poller must
+        # have been pruned, not left running alongside it.
+        assert service.poller_count("job-1") == 1
+        snapshot = service.snapshot("job-1")
+        leaf = snapshot.shell_executions[0].queries[0]
+        assert leaf.retries[-1].query_id == QID_RETRY
+
+        # Only the retry gets polled from here on -- QID_1 must never be
+        # observed again.
+        clock.advance(2.0)
+        service.run_pending()
+        polled_ids = {call.query_id for call in client.calls}
+        assert QID_RETRY in polled_ids
+        assert all(call.query_id != QID_1 for call in client.calls[1:])
+
 
 # --------------------------------------------------------------------------
 # Rebuild-from-sidecar-after-restart

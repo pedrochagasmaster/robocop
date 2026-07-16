@@ -660,11 +660,18 @@ class MonitorService:
         self._prune_pollers_for_job(job_id, live_keys=live_keys)
 
     def _prune_pollers_for_job(self, job_id: str, *, live_keys: set[tuple[str, str, str]]) -> None:
-        stale = [
-            key
-            for key in self._pollers
-            if key[0] == job_id and key not in live_keys and self._pollers[key].stopped
-        ]
+        """Drop every poller for ``job_id`` that is no longer a live leaf.
+
+        A poller stops being live the moment a later refresh discovers a
+        ``query_retried`` (or any other hierarchy change) that supersedes it
+        -- not only when it has already reached a terminal observation. A
+        superseded poller must be removed unconditionally so it stops being
+        polled, preserving "exactly one poller per live query"; leaving it
+        behind until its (possibly never-reached) ``stopped`` flag is set
+        would let it keep polling forever alongside the query that replaced
+        it.
+        """
+        stale = [key for key in self._pollers if key[0] == job_id and key not in live_keys]
         for key in stale:
             del self._pollers[key]
 
