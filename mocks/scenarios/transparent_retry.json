@@ -1,0 +1,6 @@
+{
+  "description": "Happy-path query that prints both the monitor-URL line and a Retried query link line on stderr, simulating an Impala transparent retry within one shell execution.",
+  "delay_seconds": 0,
+  "print_monitor_line": true,
+  "print_retried_line": true
+}

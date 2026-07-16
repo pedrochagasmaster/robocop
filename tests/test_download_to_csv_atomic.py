@@ -20,19 +20,14 @@ def test_export_writes_to_temp_sibling_then_publishes_atomically(
     observed_output_targets: list[Path] = []
     observed_previous_content: list[str] = []
 
-    class FakeProcess:
-        returncode = 0
+    def fake_run_impala_shell(command: list[str], *, pool: str = "") -> tuple[int, bytes, bytes]:
+        target = Path(command[command.index("-o") + 1])
+        observed_output_targets.append(target)
+        observed_previous_content.append(output_file.read_text(encoding="utf-8"))
+        target.write_text("new complete csv\n", encoding="utf-8")
+        return 0, b"ok", b""
 
-        def __init__(self, command: list[str], stdout, stderr) -> None:
-            target = Path(command[command.index("-o") + 1])
-            observed_output_targets.append(target)
-            observed_previous_content.append(output_file.read_text(encoding="utf-8"))
-            target.write_text("new complete csv\n", encoding="utf-8")
-
-        def communicate(self) -> tuple[bytes, bytes]:
-            return b"ok", b""
-
-    monkeypatch.setattr(download_to_csv.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(download_to_csv, "run_impala_shell", fake_run_impala_shell)
 
     assert download_to_csv.run_export_on_impala("select 1", str(output_file)) is True
 
@@ -52,18 +47,13 @@ def test_export_failure_removes_temp_file_and_preserves_existing_csv(
     output_file.write_text("previous complete csv\n", encoding="utf-8")
     observed_output_targets: list[Path] = []
 
-    class FakeProcess:
-        returncode = 1
+    def fake_run_impala_shell(command: list[str], *, pool: str = "") -> tuple[int, bytes, bytes]:
+        target = Path(command[command.index("-o") + 1])
+        observed_output_targets.append(target)
+        target.write_text("partial csv\n", encoding="utf-8")
+        return 1, b"", b"Admission rejected: queue is full"
 
-        def __init__(self, command: list[str], stdout, stderr) -> None:
-            target = Path(command[command.index("-o") + 1])
-            observed_output_targets.append(target)
-            target.write_text("partial csv\n", encoding="utf-8")
-
-        def communicate(self) -> tuple[bytes, bytes]:
-            return b"", b"Admission rejected: queue is full"
-
-    monkeypatch.setattr(download_to_csv.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(download_to_csv, "run_impala_shell", fake_run_impala_shell)
 
     assert download_to_csv.run_export_on_impala("select 1", str(output_file)) is False
 
@@ -79,21 +69,16 @@ def test_publish_failure_removes_temp_file_and_preserves_existing_csv(
     output_file.write_text("previous complete csv\n", encoding="utf-8")
     observed_output_targets: list[Path] = []
 
-    class FakeProcess:
-        returncode = 0
-
-        def __init__(self, command: list[str], stdout, stderr) -> None:
-            target = Path(command[command.index("-o") + 1])
-            observed_output_targets.append(target)
-            target.write_text("new complete csv\n", encoding="utf-8")
-
-        def communicate(self) -> tuple[bytes, bytes]:
-            return b"ok", b""
+    def fake_run_impala_shell(command: list[str], *, pool: str = "") -> tuple[int, bytes, bytes]:
+        target = Path(command[command.index("-o") + 1])
+        observed_output_targets.append(target)
+        target.write_text("new complete csv\n", encoding="utf-8")
+        return 0, b"ok", b""
 
     def fail_replace(src: str, dst: str) -> None:
         raise PermissionError(f"cannot publish {src} to {dst}")
 
-    monkeypatch.setattr(download_to_csv.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(download_to_csv, "run_impala_shell", fake_run_impala_shell)
     monkeypatch.setattr(download_to_csv.os, "replace", fail_replace)
 
     try:
@@ -115,16 +100,13 @@ def test_communicate_failure_removes_temp_file_and_preserves_existing_csv(
     output_file.write_text("previous complete csv\n", encoding="utf-8")
     observed_output_targets: list[Path] = []
 
-    class FakeProcess:
-        def __init__(self, command: list[str], stdout, stderr) -> None:
-            target = Path(command[command.index("-o") + 1])
-            observed_output_targets.append(target)
-            target.write_text("partial csv\n", encoding="utf-8")
+    def fake_run_impala_shell(command: list[str], *, pool: str = "") -> tuple[int, bytes, bytes]:
+        target = Path(command[command.index("-o") + 1])
+        observed_output_targets.append(target)
+        target.write_text("partial csv\n", encoding="utf-8")
+        raise RuntimeError("communicate failed")
 
-        def communicate(self) -> tuple[bytes, bytes]:
-            raise RuntimeError("communicate failed")
-
-    monkeypatch.setattr(download_to_csv.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(download_to_csv, "run_impala_shell", fake_run_impala_shell)
 
     try:
         download_to_csv.run_export_on_impala("select 1", str(output_file))

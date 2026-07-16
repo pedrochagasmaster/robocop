@@ -1,5 +1,4 @@
 # pylint: disable=line-too-long,trailing-whitespace,missing-final-newline,no-else-return,logging-fstring-interpolation,consider-using-with,unspecified-encoding
-import subprocess
 import logging
 import argparse
 import sys
@@ -11,6 +10,7 @@ from _common import (
     classificar_erro_impala,
     cycle_through_pools,
     resolve_pools,
+    run_impala_shell,
     send_email,
     validate_full_table,
 )
@@ -58,13 +58,12 @@ def run_export_on_impala(
     ]
 
     try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = process.communicate()
+        returncode, stdout, stderr = run_impala_shell(command, pool=queue)
     except Exception:
         _remove_temp_output(temp_output_file)
         raise
-    
-    if process.returncode == 0:
+
+    if returncode == 0:
         try:
             os.replace(temp_output_file, output_file)
         except Exception:

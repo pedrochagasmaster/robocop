@@ -307,6 +307,75 @@ class TestRunnerLifecycle:
 
 
 # =============================================================================
+# Execution identity event protocol sidecar (monitor.events.jsonl)
+# =============================================================================
+
+
+def _read_monitor_events(job_dir: Path) -> list[dict]:
+    events_path = job_dir / "monitor.events.jsonl"
+    if not events_path.exists():
+        return []
+    import json
+
+    lines = events_path.read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+class TestRunnerMonitorEventsSidecar:
+    """DISPATCH_MONITOR_EVENTS_PATH/DISPATCH_JOB_ID wiring end-to-end via the
+    mock impala-shell's monitor-line scenarios."""
+
+    def test_monitor_line_scenario_writes_query_discovered_event(
+        self, mock_env, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("DISPATCH_MOCK_SCENARIO", "monitor_line")
+        job_dir, initial = _create_csv_job(tmp_path)
+        result = _spawn_runner(job_dir)
+        assert result.returncode == 0, result.stderr or result.stdout or _read_log(job_dir)
+
+        final = manifest.load(job_dir / "manifest.json")
+        assert final["state"] == "Succeeded", _read_log(job_dir)
+
+        events = _read_monitor_events(job_dir)
+        types = [event["type"] for event in events]
+        assert "shell_started" in types
+        assert "query_discovered" in types
+        assert "shell_finished" in types
+        discovered = next(event for event in events if event["type"] == "query_discovered")
+        assert discovered["job_id"] == initial["id"]
+        assert discovered["coordinator_base_url"].startswith("https://")
+        assert ":" in discovered["query_id"]
+
+    def test_transparent_retry_scenario_writes_query_retried_event(
+        self, mock_env, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("DISPATCH_MOCK_SCENARIO", "transparent_retry")
+        job_dir, initial = _create_csv_job(tmp_path)
+        result = _spawn_runner(job_dir)
+        assert result.returncode == 0, result.stderr or result.stdout or _read_log(job_dir)
+
+        events = _read_monitor_events(job_dir)
+        types = [event["type"] for event in events]
+        assert "query_discovered" in types
+        assert "query_retried" in types
+        retried = next(event for event in events if event["type"] == "query_retried")
+        assert retried["job_id"] == initial["id"]
+
+    def test_happy_path_scenario_writes_no_discovery_events(self, mock_env, tmp_path):
+        """No monitor line in the mock output => shell events but no discovery."""
+        job_dir, _ = _create_csv_job(tmp_path)
+        result = _spawn_runner(job_dir)
+        assert result.returncode == 0, result.stderr or result.stdout or _read_log(job_dir)
+
+        events = _read_monitor_events(job_dir)
+        types = [event["type"] for event in events]
+        assert "shell_started" in types
+        assert "shell_finished" in types
+        assert "query_discovered" not in types
+        assert "query_retried" not in types
+
+
+# =============================================================================
 # Execution-queue selection (DISPATCH_REQUEST_POOL wiring)
 # =============================================================================
 

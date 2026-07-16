@@ -26,20 +26,29 @@ def _log(message: str) -> None:
         LOG.flush()
 
 
-def _orchestrator_env(manifest: manifest_io.JobManifest) -> dict[str, str] | None:
+def _orchestrator_env(manifest: manifest_io.JobManifest, job_dir: Path) -> dict[str, str]:
     """Build the environment for orchestrator subprocesses.
 
-    When the job selected a specific execution queue, export it as
-    ``DISPATCH_REQUEST_POOL`` so the orchestrators pin the query to that
-    Impala request pool (see ``scr/_common.resolve_pools``). The ``auto``
-    sentinel (and a missing/blank value) inherits the runner's environment
-    unchanged, preserving the historical "cycle every queue" behaviour.
+    Every orchestrator subprocess always gets a job-scoped monitoring-event
+    sidecar path (``DISPATCH_MONITOR_EVENTS_PATH``) and the job ID
+    (``DISPATCH_JOB_ID``) so ``scr/_common.run_impala_shell`` can append
+    identity events without changing the orchestrators' public argv contract
+    (see ``docs/research/impala-debug-web-monitoring-contract.md``).
+
+    When the job selected a specific execution queue, the environment also
+    carries ``DISPATCH_REQUEST_POOL`` so the orchestrators pin the query to
+    that Impala request pool (see ``scr/_common.resolve_pools``). The
+    ``auto`` sentinel (and a missing/blank value) leaves the pool variable
+    unset, preserving the historical "cycle every queue" behaviour; the
+    monitor variables are set in both cases.
     """
-    queue = str(manifest.get("params", {}).get("queue", "")).strip()
-    if not queue or queue.lower() == "auto":
-        return None
     env = os.environ.copy()
-    env["DISPATCH_REQUEST_POOL"] = queue
+    env["DISPATCH_MONITOR_EVENTS_PATH"] = str(job_dir / "monitor.events.jsonl")
+    env["DISPATCH_JOB_ID"] = str(manifest.get("id", ""))
+
+    queue = str(manifest.get("params", {}).get("queue", "")).strip()
+    if queue and queue.lower() != "auto":
+        env["DISPATCH_REQUEST_POOL"] = queue
     return env
 
 
@@ -133,8 +142,8 @@ def run(job_dir: Path) -> int:
             pid=os.getpid(),
         )
 
-        orchestrator_env = _orchestrator_env(manifest)
-        if orchestrator_env is not None:
+        orchestrator_env = _orchestrator_env(manifest, job_dir)
+        if "DISPATCH_REQUEST_POOL" in orchestrator_env:
             _log(f"[runner] pinning request_pool={orchestrator_env['DISPATCH_REQUEST_POOL']}")
         try:
             for call in manifest["orchestrator_calls"]:

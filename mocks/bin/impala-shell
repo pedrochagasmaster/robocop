@@ -124,6 +124,37 @@ def _fail(message: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Monitor / retried-link lines (execution identity event protocol)
+# ---------------------------------------------------------------------------
+
+# Synthetic but shaped like a real deployment: HTTPS coordinator base URL and
+# a hex16:hex16 query id. Never derived from any real capture.
+_MOCK_COORDINATOR_URL = "https://coordinator-1.internal.example:25443"
+_MOCK_QUERY_ID = "1a2b3c4d5e6f7081:9192a3b4c5d6e7f8"
+_MOCK_RETRIED_QUERY_ID = "2b3c4d5e6f708192:a3b4c5d6e7f89101"
+
+
+def _print_monitor_lines(scenario: dict) -> None:
+    """Print the impala-shell monitor line (and optional retried-link line).
+
+    Mirrors the real shell's verbose-mode output
+    (``Query state can be monitored at: <url>``) so the mock exercises
+    ``scr._common.run_impala_shell``'s stderr pattern matching end-to-end.
+    """
+    if not scenario.get("print_monitor_line"):
+        return
+    print(
+        f"Query state can be monitored at: {_MOCK_COORDINATOR_URL}/query_plan?query_id={_MOCK_QUERY_ID}",
+        file=sys.stderr,
+    )
+    if scenario.get("print_retried_line"):
+        print(
+            f"Retried query link: {_MOCK_COORDINATOR_URL}/query_plan?query_id={_MOCK_RETRIED_QUERY_ID}",
+            file=sys.stderr,
+        )
+
+
+# ---------------------------------------------------------------------------
 # SQL routing  (seam: query type → tag)
 # ---------------------------------------------------------------------------
 
@@ -246,7 +277,9 @@ def apply_scenario(scenario: dict, pool: str, count: int, output_file: str | Non
     if name == "generic_error":
         return _fail("Unexpected impala-shell failure")
 
-    # happy_path / slow / memory_exceeded after failures → success
+    # happy_path / slow / memory_exceeded after failures / monitor_line /
+    # transparent_retry → success
+    _print_monitor_lines(scenario)
     if output_file:
         _write_csv(output_file)
     print(f"Mock impala-shell scenario={name} pool={pool} succeeded")

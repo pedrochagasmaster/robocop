@@ -1,0 +1,5 @@
+{
+  "description": "Happy-path query that also prints the impala-shell monitor-URL line on stderr, exercising the execution identity event protocol end-to-end.",
+  "delay_seconds": 0,
+  "print_monitor_line": true
+}
