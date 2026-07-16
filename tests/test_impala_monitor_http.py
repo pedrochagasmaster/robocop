@@ -145,6 +145,50 @@ def test_observe_unknown_id_yields_availability_error_not_exception() -> None:
     assert observation.availability_error is not None
 
 
+def test_observe_with_allow_http_parses_successful_body_not_discarded() -> None:
+    # Regression: allow_http=True + an http:// coordinator identity used to
+    # make parse_query_detail's internal re-derivation of detail_url raise
+    # (it always validates with allow_http=False), discarding an already
+    # successfully fetched, well-formed body behind a bogus
+    # availability_error instead of parsing it.
+    http_seed = "http://coordinator-1.internal.example:25443"
+    transport = FakeTransport()
+    identity = make_identity(coordinator_base_url=http_seed)
+    detail_url = im.build_detail_url(http_seed, "query_stmt", identity.query_id, allow_http=True)
+    transport.set_json(detail_url, fixture_bytes("query_stmt_running.json"))
+
+    client = http_mod.ImpalaMonitorClient(transport, allow_http=True, random_source=_ZeroJitter())
+    observation = client.observe(identity)
+
+    assert observation.phase == "running"
+    assert observation.availability_error is None
+    assert observation.detail_url == detail_url
+    assert observation.detail_url.startswith("http://")
+
+
+def test_observe_with_allow_http_query_plan_fallback_not_discarded() -> None:
+    # Same regression as above, but through the query_plan fallback path
+    # (endpoint != "query_stmt"), which also re-syncs detail_url.
+    http_seed = "http://coordinator-1.internal.example:25443"
+    transport = FakeTransport()
+    identity = make_identity(coordinator_base_url=http_seed)
+    primary_url = im.build_detail_url(http_seed, "query_stmt", identity.query_id, allow_http=True)
+    transport.set_response(
+        primary_url,
+        http_mod.FetchResult(status=404, content_type="application/json", body=b"{}"),
+    )
+    fallback_url = im.build_detail_url(http_seed, "query_plan", identity.query_id, allow_http=True)
+    transport.set_json(fallback_url, fixture_bytes("query_stmt_running.json"))
+
+    client = http_mod.ImpalaMonitorClient(transport, allow_http=True, random_source=_ZeroJitter())
+    observation = client.observe(identity)
+
+    assert observation.phase == "running"
+    assert observation.availability_error is None
+    assert observation.detail_url == fallback_url
+    assert observation.detail_url.startswith("http://")
+
+
 # =============================================================================
 # Capability detection: query_stmt first, fall back to query_plan, then cache
 # =============================================================================

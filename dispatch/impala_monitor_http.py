@@ -31,6 +31,7 @@ Security posture (never relaxed here or by any caller):
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import random
 import ssl
@@ -456,12 +457,33 @@ class ImpalaMonitorClient:
                 "unexpected content type", detail_url=detail_url, observed_at=observed_at
             )
 
-        observation = parse_query_detail(result.body, identity)
-        # parse_query_detail derives detail_url itself from identity+endpoint
-        # "query_stmt"; when capability fallback chose query_plan, keep the
-        # observation's detail_url in sync with what was actually fetched.
-        if endpoint != "query_stmt":
-            observation = _with_detail_url(observation, detail_url)
+        # parse_query_detail (slice 1, pure layer) always re-derives its own
+        # detail_url with build_detail_url(..., allow_http=False) — by design
+        # it has no config to consult and must never self-authorize http://
+        # (see test_parse_query_detail_never_downgrades_to_http). That means
+        # an identity whose coordinator_base_url is genuinely http://, only
+        # authorized here via the client's own allow_http dev/mock opt-in,
+        # would make that internal re-derivation raise and parse_query_detail
+        # would discard the already-fetched, already-enforced body behind an
+        # availability_error instead of parsing it. base_url has already
+        # passed this client's own host-allowlist/scheme enforcement above,
+        # so it is safe to hand parse_query_detail an https-coerced identity
+        # purely so its internal validation succeeds; the real (possibly
+        # http://) detail_url that was actually fetched is restored below
+        # regardless of which endpoint was used.
+        parse_identity = identity
+        if self._allow_http and base_url.startswith("http://"):
+            parse_identity = dataclasses.replace(
+                identity, coordinator_base_url="https://" + base_url[len("http://") :]
+            )
+        observation = parse_query_detail(result.body, parse_identity)
+        # Always resync detail_url with the URL that was actually fetched:
+        # parse_query_detail derives it from parse_identity + the hardcoded
+        # "query_stmt" endpoint, which differs from the real fetch whenever
+        # capability fallback chose query_plan, and would also carry the
+        # https-coerced scheme above whenever the http:// dev/mock opt-in
+        # was used.
+        observation = _with_detail_url(observation, detail_url)
         return observation
 
     def _capability_for(
