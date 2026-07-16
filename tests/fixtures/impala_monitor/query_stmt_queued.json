@@ -1,0 +1,16 @@
+{
+  "query_id": "2b3c4d5e6f708192:a3b4c5d6e7f89192",
+  "inflight": true,
+  "record_json": {
+    "query_id": "2b3c4d5e6f708192:a3b4c5d6e7f89192",
+    "effective_user": "user_a",
+    "default_db": "db_a",
+    "stmt": "SELECT 1 /* sanitized */",
+    "stmt_type": "QUERY",
+    "state": "COMPILED",
+    "last_event": "Queued",
+    "resource_pool": "adhoc_small",
+    "queued_duration": "3s412ms",
+    "rows_fetched": 0
+  }
+}

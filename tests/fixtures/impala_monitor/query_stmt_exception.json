@@ -1,0 +1,17 @@
+{
+  "query_id": "6f70819293949596:e7f8919293949a9b",
+  "inflight": true,
+  "status": "AnalysisException: sanitized error text for fixture purposes",
+  "record_json": {
+    "query_id": "6f70819293949596:e7f8919293949a9b",
+    "effective_user": "user_a",
+    "default_db": "db_a",
+    "stmt": "SELECT 1 /* sanitized */",
+    "stmt_type": "QUERY",
+    "state": "EXCEPTION",
+    "last_event": "Cancelled",
+    "resource_pool": "default",
+    "queued_duration": "0s010ms",
+    "rows_fetched": 0
+  }
+}

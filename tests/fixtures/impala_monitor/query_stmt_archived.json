@@ -1,0 +1,19 @@
+{
+  "query_id": "92939495969a9b9c:9293949a9b9c9d9e",
+  "not_inflight": true,
+  "record_json": {
+    "query_id": "92939495969a9b9c:9293949a9b9c9d9e",
+    "effective_user": "user_a",
+    "default_db": "db_a",
+    "stmt": "SELECT 1 /* sanitized */",
+    "stmt_type": "QUERY",
+    "state": "FINISHED",
+    "last_event": "Unregister query",
+    "resource_pool": "default",
+    "queued_duration": "0s030ms",
+    "progress": "100 / 100 (100%)",
+    "bytes_read": "2.00 MB",
+    "bytes_sent": "64.00 KB",
+    "rows_fetched": 5
+  }
+}

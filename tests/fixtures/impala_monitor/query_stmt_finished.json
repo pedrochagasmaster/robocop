@@ -1,0 +1,19 @@
+{
+  "query_id": "5e6f708192939495:d6e7f8919293949a",
+  "inflight": true,
+  "record_json": {
+    "query_id": "5e6f708192939495:d6e7f8919293949a",
+    "effective_user": "user_a",
+    "default_db": "db_a",
+    "stmt": "SELECT 1 /* sanitized */",
+    "stmt_type": "QUERY",
+    "state": "FINISHED",
+    "last_event": "Rows available",
+    "resource_pool": "default",
+    "queued_duration": "0s050ms",
+    "progress": "100 / 100 (100%)",
+    "bytes_read": "4.50 MB",
+    "bytes_sent": "128.00 KB",
+    "rows_fetched": 10
+  }
+}

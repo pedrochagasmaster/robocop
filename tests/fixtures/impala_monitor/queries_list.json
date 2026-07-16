@@ -1,0 +1,62 @@
+{
+  "in_flight_queries": [
+    {
+      "query_id": "a1a2a3a4a5a6a7a8:b1b2b3b4b5b6b7b8",
+      "effective_user": "user_a",
+      "default_db": "db_a",
+      "stmt": "SELECT 1 /* sanitized */",
+      "stmt_type": "QUERY",
+      "state": "RUNNING",
+      "resource_pool": "default",
+      "start_time": "2026-07-15 10:00:00.000000000"
+    },
+    {
+      "query_id": "c1c2c3c4c5c6c7c8:d1d2d3d4d5d6d7d8",
+      "effective_user": "user_a",
+      "default_db": "db_a",
+      "stmt": "SELECT col_xxxxxxxxxx SELECT col_xxxxxxxxxx SELECT col_xxxxxxxxxx SELECT col_xxxxxxxxxx SELECT col_xxxxxxxxxx SELECT col_xxxxxxxxxx SELECT col_xxxxxxxxxx SELECT col_xxxxxxxxxx SELECT col_xxxxxxxxxx SELECT col_xxxxxxxxxx SELECT col_xxxxxxxxxx SELECT c...",
+      "stmt_type": "QUERY",
+      "state": "COMPILED",
+      "last_event": "Queued",
+      "resource_pool": "adhoc_small",
+      "start_time": "2026-07-15 10:01:00.000000000"
+    },
+    {
+      "query_id": "e1e2e3e4e5e6e7e8:f1f2f3f4f5f6f7f8",
+      "effective_user": "user_a",
+      "default_db": "db_a",
+      "stmt": "SELECT 1 /* sanitized-ambiguous */",
+      "stmt_type": "QUERY",
+      "state": "RUNNING",
+      "resource_pool": "default",
+      "start_time": "2026-07-15 10:02:00.000000000"
+    },
+    {
+      "query_id": "e1e2e3e4e5e6e7e8:99f2f3f4f5f6f7f8",
+      "effective_user": "user_a",
+      "default_db": "db_a",
+      "stmt": "SELECT 1 /* sanitized-ambiguous */",
+      "stmt_type": "QUERY",
+      "state": "RUNNING",
+      "resource_pool": "default",
+      "start_time": "2026-07-15 10:02:01.000000000"
+    }
+  ],
+  "completed_queries": [
+    {
+      "query_id": "11121314151617a1:21222324252627a1",
+      "effective_user": "user_a",
+      "default_db": "db_a",
+      "stmt": "SELECT 1 /* sanitized */",
+      "stmt_type": "QUERY",
+      "state": "FINISHED",
+      "resource_pool": "default",
+      "start_time": "2026-07-15 09:55:00.000000000",
+      "end_time": "2026-07-15 09:55:03.000000000"
+    }
+  ],
+  "num_queries": 5,
+  "query_locations": {},
+  "completed_log_size": 100,
+  "query_stmt_size": 250
+}

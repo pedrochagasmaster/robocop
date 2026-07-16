@@ -1,0 +1,37 @@
+{
+  "backends": [
+    {
+      "address": "coordinator-1.internal.example:22000",
+      "webserver_url": "https://coordinator-1.internal.example:25443",
+      "is_coordinator": true,
+      "is_executor": true,
+      "is_active": true,
+      "is_quiescing": false
+    },
+    {
+      "address": "coordinator-2.internal.example:22000",
+      "webserver_url": "https://coordinator-2.internal.example:25443",
+      "is_coordinator": true,
+      "is_executor": false,
+      "is_active": true,
+      "is_quiescing": false
+    },
+    {
+      "address": "coordinator-3.internal.example:22000",
+      "webserver_url": "https://coordinator-3.internal.example:25443",
+      "is_coordinator": true,
+      "is_executor": false,
+      "is_active": false,
+      "is_quiescing": false
+    },
+    {
+      "address": "executor-1.internal.example:22000",
+      "webserver_url": "https://executor-1.internal.example:25443",
+      "is_coordinator": false,
+      "is_executor": true,
+      "is_active": true,
+      "is_quiescing": false
+    }
+  ],
+  "num_backends": 4
+}
