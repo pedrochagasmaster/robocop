@@ -47,6 +47,7 @@ from .impala_monitor import MAX_BODY_BYTES as MAX_BODY_BYTES_TRANSPORT
 from .impala_monitor import (
     ImpalaObservation,
     QueryIdentity,
+    Relation,
     build_detail_url,
     parse_query_detail,
     validate_coordinator_url,
@@ -68,6 +69,8 @@ DISCOVERY_TTL_SECONDS = 10 * 60
 _JSON_CONTENT_TYPE_PREFIX = "application/json"
 
 _CAPABILITY_ENDPOINTS = ("query_stmt", "query_plan")
+
+_RELATION_VALUES = ("initial", "transparent_retry")
 
 
 class MonitorHttpError(Exception):
@@ -124,7 +127,7 @@ class DiscoveryCriteria:
     started_after: str  # ISO-8601 UTC, inclusive
     started_before: str  # ISO-8601 UTC, inclusive
     shell_execution_id: str
-    relation: str = "initial"
+    relation: Relation = "initial"
 
 
 def _utc_now_iso() -> str:
@@ -350,6 +353,12 @@ class ImpalaMonitorClient:
         attempts = self._max_retries + 1
         for attempt in range(attempts):
             if attempt > 0:
+                if self._breaker.is_open(host):
+                    # A failure on a prior attempt this call opened the
+                    # breaker (or consumed the single half-open probe slot).
+                    # Stop retrying immediately rather than firing further
+                    # requests at a host the breaker just clamped down on.
+                    return None
                 time.sleep(RETRY_BASE_DELAY_SECONDS * attempt + self._jitter())
             try:
                 result = self._transport.fetch(url, timeout)
@@ -483,6 +492,7 @@ class ImpalaMonitorClient:
             result is not None
             and result.status == 200
             and _is_json_content_type(result.content_type)
+            and len(result.body) <= MAX_BODY_BYTES_TRANSPORT
         ):
             data = _try_parse_object(result.body)
             if data is not None and _looks_like_query_detail(data):
@@ -580,11 +590,13 @@ class ImpalaMonitorClient:
         except Exception as exc:
             raise AmbiguousIdentityError("matched entry had an invalid query_id") from exc
 
+        relation = _validate_relation(criteria.relation)
+
         return QueryIdentity(
             coordinator_base_url=base_url,
             query_id=query_id,
             shell_execution_id=criteria.shell_execution_id,
-            relation=criteria.relation,  # type: ignore[arg-type]
+            relation=relation,
             discovered_at=_utc_now_iso(),
         )
 
@@ -600,6 +612,21 @@ class ImpalaMonitorClient:
                 seen.add(url)
                 unique.append(url)
         return unique
+
+
+def _validate_relation(value: str) -> Relation:
+    """Narrow an arbitrary ``str`` to the ``Relation`` literal at runtime.
+
+    ``DiscoveryCriteria.relation`` is statically typed as ``Relation``, but a
+    caller can still hand ``discover`` an arbitrary string at runtime (e.g.
+    from untrusted input); this rejects anything outside the declared
+    literal instead of forwarding it into ``QueryIdentity`` unchecked.
+    """
+    if value not in _RELATION_VALUES:
+        raise AmbiguousIdentityError(
+            f"invalid relation {value!r}; expected one of {_RELATION_VALUES}"
+        )
+    return value  # type: ignore[return-value]
 
 
 def _try_parse_object(body: bytes) -> dict | None:

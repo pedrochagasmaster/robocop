@@ -231,6 +231,43 @@ def test_capability_probe_runs_once_per_coordinator_not_per_call() -> None:
     assert transport.calls.count(stmt_url) == 3
 
 
+def test_capability_probe_rejects_oversized_body_before_parsing_shape() -> None:
+    """The one-time capability probe must apply the size cap before parsing.
+
+    An oversized query_stmt response that would otherwise "look like" a
+    query-detail shape (has a record_json object) must not be parsed to
+    decide capability, and must not get query_stmt cached as the winning
+    endpoint -- capability detection must fall back to query_plan exactly as
+    it would for a 404 or any other unusable query_stmt probe response.
+    """
+    transport = FakeTransport()
+    identity = make_identity()
+    stmt_url = im.build_detail_url(SEED_URL, "query_stmt", identity.query_id)
+    plan_url = im.build_detail_url(SEED_URL, "query_plan", identity.query_id)
+    oversized = (
+        b'{"record_json": {"state": "RUNNING", "filler": "'
+        + (b"a" * (im.MAX_BODY_BYTES + 1))
+        + b'"}}'
+    )
+    transport.set_json(stmt_url, oversized)
+    transport.set_json(plan_url, fixture_bytes("query_stmt_running.json"))
+
+    client = no_sleep_client(transport)
+    observation = client.observe(identity)
+
+    # Must have fallen back to query_plan rather than caching query_stmt from
+    # the oversized (unparsed) probe body.
+    assert plan_url in transport.calls
+    assert observation.availability_error is None
+    assert observation.phase == "running"
+
+    # Capability must be cached as query_plan, not query_stmt.
+    transport.calls.clear()
+    client.observe(identity)
+    assert stmt_url not in transport.calls
+    assert plan_url in transport.calls
+
+
 # =============================================================================
 # Adversarial: off-list redirect, oversized body, wrong content type, HTML body
 # =============================================================================
@@ -505,6 +542,46 @@ def test_circuit_breaker_half_open_probe_failure_reopens_and_restarts_cooldown()
     assert len(transport.calls) == 2
 
 
+def test_circuit_breaker_clamps_retries_within_a_single_call_at_production_default() -> None:
+    """Regression test: retries must stop the moment the breaker opens.
+
+    Uses the production default ``max_retries`` (``MAX_RETRIES`` == 2) with a
+    breaker that opens after a single failure. A naive implementation that
+    only checks ``is_open`` once before the retry loop would still fire the
+    two additional retry attempts against the same failing host even though
+    the breaker opened on the very first attempt -- that must not happen.
+    """
+    transport = FakeTransport()
+    identity = make_identity()
+    detail_url = im.build_detail_url(SEED_URL, "query_stmt", identity.query_id)
+    transport.set_raises(detail_url, OSError("boom"))
+
+    clock = _FakeClock()
+    breaker = http_mod._CircuitBreaker(failure_threshold=1, cooldown_seconds=10.0, clock=clock)
+    # Deliberately omit max_retries so the production default (MAX_RETRIES ==
+    # 2) is exercised, per the plan's stated retry/breaker defaults.
+    client = no_sleep_client(transport, circuit_breaker=breaker)
+    assert client._max_retries == http_mod.MAX_RETRIES
+
+    # Capability probe (query_stmt) fails once, opening the breaker
+    # (threshold=1) on that very first attempt. No further retries against
+    # query_stmt may fire, and the query_plan fallback fetch in the same
+    # observe() call is blocked outright by the now-open breaker.
+    client.observe(identity)
+    assert len(transport.calls) == 1
+
+    clock.advance(11.0)
+    # Half-open window: exactly one probe request is allowed through for the
+    # whole observe() call, even though max_retries would otherwise permit
+    # up to 3 attempts.
+    client.observe(identity)
+    assert len(transport.calls) == 2
+
+    # Breaker re-opened immediately by the failed probe; no further calls.
+    client.observe(identity)
+    assert len(transport.calls) == 2
+
+
 # =============================================================================
 # discover_coordinators — TTL cache, filters, host allowlist growth
 # =============================================================================
@@ -615,6 +692,27 @@ def test_discover_unique_match_succeeds() -> None:
     assert identity.query_id == "a1a2a3a4a5a6a7a8:b1b2b3b4b5b6b7b8"
     assert identity.coordinator_base_url == SEED_URL
     assert identity.shell_execution_id == "shell-exec-recovery"
+
+
+def test_discover_rejects_invalid_relation_value() -> None:
+    """A criteria.relation outside the Relation literal must be refused.
+
+    DiscoveryCriteria.relation is statically typed as Relation, but a caller
+    can still construct one with an arbitrary string at runtime (e.g. from
+    untrusted input parsed elsewhere); discover() must validate it rather
+    than forwarding it straight into QueryIdentity unchecked.
+    """
+    transport = FakeTransport()
+    client = _client_with_discovered_coordinators(transport)
+    queries_url = f"{SEED_URL}/queries?json"
+    transport.set_json(queries_url, fixture_bytes("queries_list.json"))
+    coord2_queries_url = f"{COORD_2}/queries?json"
+    transport.set_json(coord2_queries_url, b'{"in_flight_queries": [], "completed_queries": []}')
+
+    bad_criteria = _criteria(relation="not_a_real_relation")  # type: ignore[arg-type]
+
+    with pytest.raises(http_mod.AmbiguousIdentityError):
+        client.discover(bad_criteria)
 
 
 def test_discover_refuses_zero_matches() -> None:
