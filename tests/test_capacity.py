@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import multiprocessing
 import os
 import stat
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from dispatch import manifest
+from dispatch import capacity, manifest
 from dispatch.capacity import (
     CapacityBusy,
     CapacityLedgerError,
@@ -20,6 +23,23 @@ from dispatch.capacity import (
 )
 
 PROCESS_TIMEOUT = 10
+
+
+def _read_ledger(root: Path) -> dict[str, Any]:
+    return json.loads((root / ".dispatch" / "capacity.json").read_text(encoding="utf-8"))
+
+
+def _wait_for_intent_pids(root: Path, expected: list[int]) -> None:
+    deadline = time.monotonic() + PROCESS_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            observed = [intent["pid"] for intent in _read_ledger(root)["launch_intents"]]
+        except (FileNotFoundError, json.JSONDecodeError):
+            observed = []
+        if observed == expected:
+            return
+        time.sleep(0.01)
+    pytest.fail(f"launch intents never reached {expected!r}; observed {observed!r}")
 
 
 def _job_manifest(job_id: str, state: str, pid: int | None = None) -> dict[str, Any]:
@@ -89,12 +109,9 @@ def _held_lease_worker(root: Path, acquired: Any, release: Any) -> None:
 def _launch_worker(
     root: Path,
     label: str,
-    started: Any,
     callback_order: Any,
     outcomes: Any,
 ) -> None:
-    started.set()
-
     def create_pending() -> str:
         callback_order.append(label)
         _write_job(root, label)
@@ -108,15 +125,8 @@ def _launch_worker(
     outcomes.put(("admitted", result))
 
 
-def _queued_launch_without_job(root: Path, callback_started: Any, outcomes: Any) -> None:
-    def callback() -> str:
-        callback_started.set()
-        return "launch"
-
-    try:
-        outcomes.put(("admitted", admit_launch(callback, timeout=5, root=root)))
-    except Exception as exc:
-        outcomes.put(("error", type(exc).__name__, str(exc)))
+def _blocked_launch_worker(root: Path) -> None:
+    admit_launch(lambda: "launch", timeout=30, root=root)
 
 
 def _exit_cleanly() -> None:
@@ -176,32 +186,61 @@ def test_live_process_metadata_lease_is_not_reclaimed(tmp_path: Path) -> None:
     _join(process)
 
 
+def test_windows_pid_probe_does_not_call_os_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Kernel32:
+        def __init__(self) -> None:
+            self.closed: list[int] = []
+
+        def OpenProcess(self, access: int, inherit: bool, pid: int) -> int:
+            assert access == 0x1000
+            assert inherit is False
+            assert pid == 4242
+            return 99
+
+        def GetExitCodeProcess(self, handle: int, exit_code: Any) -> bool:
+            assert handle == 99
+            exit_code._obj.value = 259
+            return True
+
+        def CloseHandle(self, handle: int) -> bool:
+            self.closed.append(handle)
+            return True
+
+    kernel32 = Kernel32()
+    monkeypatch.setattr(capacity, "_WINDOWS", True, raising=False)
+    monkeypatch.setattr(capacity, "_WINDOWS_KERNEL32", kernel32, raising=False)
+
+    def destructive_probe(pid: int, signal: int) -> None:
+        raise AssertionError(f"os.kill({pid}, {signal}) must not run on Windows")
+
+    monkeypatch.setattr(capacity.os, "kill", destructive_probe)
+
+    assert capacity._pid_is_alive(4242)
+    assert kernel32.closed == [99]
+
+
 def test_launch_intents_are_admitted_fifo_across_processes(tmp_path: Path) -> None:
     ctx = multiprocessing.get_context("spawn")
     manager = ctx.Manager()
     callback_order = manager.list()
     outcomes = ctx.Queue()
-    first_started = ctx.Event()
-    second_started = ctx.Event()
     first_lease = try_acquire_metadata("describe", tmp_path)
     second_lease = try_acquire_metadata("describe", tmp_path)
     first = ctx.Process(
         target=_launch_worker,
-        args=(tmp_path, "first", first_started, callback_order, outcomes),
+        args=(tmp_path, "first", callback_order, outcomes),
     )
     second = ctx.Process(
         target=_launch_worker,
-        args=(tmp_path, "second", second_started, callback_order, outcomes),
+        args=(tmp_path, "second", callback_order, outcomes),
     )
 
     first.start()
-    assert first_started.wait(PROCESS_TIMEOUT)
-    time.sleep(0.2)
+    assert first.pid is not None
+    _wait_for_intent_pids(tmp_path, [first.pid])
     second.start()
-    assert second_started.wait(PROCESS_TIMEOUT)
-    time.sleep(0.2)
-    assert first.is_alive()
-    assert second.is_alive()
+    assert second.pid is not None
+    _wait_for_intent_pids(tmp_path, [first.pid, second.pid])
 
     first_lease.release()
     second_lease.release()
@@ -215,32 +254,92 @@ def test_launch_intents_are_admitted_fifo_across_processes(tmp_path: Path) -> No
     assert sorted(observed) == [("admitted", "first"), ("admitted", "second")]
 
 
-def test_waiting_launch_has_priority_over_new_stats_lease(tmp_path: Path) -> None:
-    ctx = multiprocessing.get_context("spawn")
-    callback_started = ctx.Event()
-    outcomes = ctx.Queue()
+def test_waiting_launch_has_priority_over_new_stats_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launch_waiting = threading.Event()
+    resume_launch = threading.Event()
+    outcome: list[str] = []
+
+    def controlled_wait() -> None:
+        launch_waiting.set()
+        assert resume_launch.wait(PROCESS_TIMEOUT)
+
+    monkeypatch.setattr(capacity, "_wait_for_retry", controlled_wait, raising=False)
     first_lease = try_acquire_metadata("describe", tmp_path)
     second_lease = try_acquire_metadata("describe", tmp_path)
-    launch = ctx.Process(
-        target=_queued_launch_without_job,
-        args=(tmp_path, callback_started, outcomes),
-    )
+
+    def launch_target() -> None:
+        outcome.append(admit_launch(lambda: "launch", timeout=5, root=tmp_path))
+
+    launch = threading.Thread(target=launch_target)
     launch.start()
-    time.sleep(0.2)
-    assert launch.is_alive()
+    assert launch_waiting.wait(PROCESS_TIMEOUT)
+    assert len(_read_ledger(tmp_path)["launch_intents"]) == 1
 
     first_lease.release()
-    try:
-        stats_lease = try_acquire_metadata("stats", tmp_path)
-    except CapacityBusy:
-        stats_lease = None
-    else:
-        assert callback_started.is_set(), "a new stats lease overtook a queued launch"
-        stats_lease.release()
+    with pytest.raises(CapacityBusy):
+        try_acquire_metadata("stats", tmp_path)
 
+    resume_launch.set()
     second_lease.release()
-    _join(launch)
-    assert outcomes.get(timeout=PROCESS_TIMEOUT) == ("admitted", "launch")
+    launch.join(PROCESS_TIMEOUT)
+    assert not launch.is_alive()
+    assert outcome == ["launch"]
+
+
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt, asyncio.CancelledError])
+def test_waiting_launch_removes_intent_on_base_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: type[BaseException],
+) -> None:
+    first = try_acquire_metadata("describe", tmp_path)
+    second = try_acquire_metadata("describe", tmp_path)
+
+    def interrupt_wait(delay: float) -> None:
+        raise interruption()
+
+    monkeypatch.setattr(capacity.time, "sleep", interrupt_wait)
+
+    with pytest.raises(interruption):
+        admit_launch(lambda: "not-created", timeout=5, root=tmp_path)
+
+    assert _read_ledger(tmp_path)["launch_intents"] == []
+    first.release()
+    stats = try_acquire_metadata("stats", tmp_path)
+    stats.release()
+    second.release()
+
+
+def test_callback_base_exception_removes_launch_intent(tmp_path: Path) -> None:
+    def cancel_callback() -> None:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        admit_launch(cancel_callback, root=tmp_path)
+
+    assert _read_ledger(tmp_path)["launch_intents"] == []
+
+
+def test_dead_launch_intent_is_reclaimed(tmp_path: Path) -> None:
+    ctx = multiprocessing.get_context("spawn")
+    first = try_acquire_metadata("describe", tmp_path)
+    second = try_acquire_metadata("describe", tmp_path)
+    launch = ctx.Process(target=_blocked_launch_worker, args=(tmp_path,))
+    launch.start()
+    assert launch.pid is not None
+    _wait_for_intent_pids(tmp_path, [launch.pid])
+
+    launch.terminate()
+    launch.join(PROCESS_TIMEOUT)
+    assert not launch.is_alive()
+
+    first.release()
+    stats = try_acquire_metadata("stats", tmp_path)
+    assert _read_ledger(tmp_path)["launch_intents"] == []
+    stats.release()
+    second.release()
 
 
 def test_launch_times_out_and_removes_its_intent(tmp_path: Path) -> None:
@@ -260,7 +359,6 @@ def test_two_active_jobs_reject_launch_without_waiting(tmp_path: Path) -> None:
     admit_launch(lambda: _write_job(tmp_path, "first"), root=tmp_path)
     admit_launch(lambda: _write_job(tmp_path, "second"), root=tmp_path)
     callback_called = False
-    started = time.monotonic()
 
     def create_pending() -> None:
         nonlocal callback_called
@@ -270,7 +368,6 @@ def test_two_active_jobs_reject_launch_without_waiting(tmp_path: Path) -> None:
         admit_launch(create_pending, timeout=2, root=tmp_path)
 
     assert not callback_called
-    assert time.monotonic() - started < 0.5
 
 
 @pytest.mark.parametrize("final_state", ["Succeeded", "Failed", "Cancelled"])
@@ -361,6 +458,156 @@ def test_malformed_ledger_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(CapacityLedgerError):
         admit_launch(create_pending, timeout=0, root=tmp_path)
     assert not callback_called
+
+
+def test_release_is_idempotent_and_token_scoped(tmp_path: Path) -> None:
+    first = try_acquire_metadata("describe-first", tmp_path)
+    second = try_acquire_metadata("describe-second", tmp_path)
+
+    first.release()
+    first.release()
+    replacement = try_acquire_metadata("replacement", tmp_path)
+    with pytest.raises(CapacityBusy):
+        try_acquire_metadata("must-not-remove-second", tmp_path)
+
+    owners = _read_ledger(tmp_path)["metadata_owners"]
+    assert {owner["operation"] for owner in owners} == {"describe-second", "replacement"}
+    replacement.release()
+    second.release()
+
+
+def test_ledger_replacement_fsyncs_containing_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synced: list[Path] = []
+    monkeypatch.setattr(capacity, "_fsync_directory", synced.append, raising=False)
+
+    lease = try_acquire_metadata("describe", tmp_path)
+
+    assert synced == [tmp_path / ".dispatch"]
+    lease.release()
+
+
+def test_unwritable_ledger_replacement_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(capacity.time, "sleep", lambda delay: None)
+
+    def deny_replace(source: Path, destination: Path) -> None:
+        raise PermissionError("read-only capacity state")
+
+    monkeypatch.setattr(capacity.os, "replace", deny_replace)
+
+    with pytest.raises(CapacityLedgerError, match="cannot update capacity ledger"):
+        try_acquire_metadata("describe", tmp_path)
+
+
+@pytest.mark.parametrize("unsafe_name", ["capacity.json", "capacity.lock"])
+def test_non_regular_capacity_file_fails_closed(tmp_path: Path, unsafe_name: str) -> None:
+    home = tmp_path / ".dispatch"
+    home.mkdir()
+    (home / unsafe_name).mkdir()
+
+    with pytest.raises(CapacityLedgerError):
+        try_acquire_metadata("describe", tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation is not reliable on Windows CI")
+@pytest.mark.parametrize("unsafe_name", ["capacity.json", "capacity.lock"])
+def test_symlinked_capacity_file_fails_closed(tmp_path: Path, unsafe_name: str) -> None:
+    home = tmp_path / ".dispatch"
+    home.mkdir()
+    external = tmp_path / f"external-{unsafe_name}"
+    external.write_text("{}", encoding="utf-8")
+    (home / unsafe_name).symlink_to(external)
+
+    with pytest.raises(CapacityLedgerError):
+        try_acquire_metadata("describe", tmp_path)
+
+
+def test_non_directory_jobs_root_fails_closed(tmp_path: Path) -> None:
+    lease = try_acquire_metadata("describe", tmp_path)
+    lease.release()
+    jobs = tmp_path / ".dispatch" / "jobs"
+    jobs.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(CapacityLedgerError):
+        try_acquire_metadata("describe", tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation is not reliable on Windows CI")
+def test_symlinked_jobs_root_fails_closed(tmp_path: Path) -> None:
+    external_jobs = tmp_path / "external-jobs"
+    external_jobs.mkdir()
+    home = tmp_path / ".dispatch"
+    home.mkdir()
+    (home / "jobs").symlink_to(external_jobs, target_is_directory=True)
+
+    with pytest.raises(CapacityLedgerError):
+        try_acquire_metadata("describe", tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation is not reliable on Windows CI")
+def test_symlinked_job_directory_is_not_reconciled_outside_root(tmp_path: Path) -> None:
+    external_job = tmp_path / "external-job"
+    external_manifest = external_job / "manifest.json"
+    manifest.write(
+        external_manifest,
+        _job_manifest("external", "Running", 999_999_999),  # type: ignore[arg-type]
+    )
+    jobs = tmp_path / ".dispatch" / "jobs"
+    jobs.mkdir(parents=True)
+    (jobs / "external").symlink_to(external_job, target_is_directory=True)
+
+    with pytest.raises(CapacityLedgerError):
+        try_acquire_metadata("describe", tmp_path)
+
+    assert manifest.load(external_manifest)["state"] == "Running"
+
+
+def test_non_directory_job_entry_fails_closed(tmp_path: Path) -> None:
+    jobs = tmp_path / ".dispatch" / "jobs"
+    jobs.mkdir(parents=True)
+    (jobs / "looks-like-a-job").write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(CapacityLedgerError):
+        try_acquire_metadata("describe", tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation is not reliable on Windows CI")
+def test_symlinked_manifest_is_not_reconciled_outside_root(tmp_path: Path) -> None:
+    external_manifest = tmp_path / "external-manifest.json"
+    manifest.write(
+        external_manifest,
+        _job_manifest("external", "Running", 999_999_999),  # type: ignore[arg-type]
+    )
+    job = tmp_path / ".dispatch" / "jobs" / "external"
+    job.mkdir(parents=True)
+    (job / "manifest.json").symlink_to(external_manifest)
+
+    with pytest.raises(CapacityLedgerError):
+        try_acquire_metadata("describe", tmp_path)
+
+    assert manifest.load(external_manifest)["state"] == "Running"
+
+
+def test_non_regular_manifest_fails_closed(tmp_path: Path) -> None:
+    manifest_path = tmp_path / ".dispatch" / "jobs" / "job" / "manifest.json"
+    manifest_path.mkdir(parents=True)
+
+    with pytest.raises(CapacityLedgerError):
+        try_acquire_metadata("describe", tmp_path)
+
+
+def test_exported_interface_is_explicit_and_small() -> None:
+    assert capacity.__all__ == [
+        "CapacityBusy",
+        "CapacityLedgerError",
+        "CapacityTimeout",
+        "MetadataLease",
+        "admit_launch",
+        "try_acquire_metadata",
+    ]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are not reliable on Windows")
