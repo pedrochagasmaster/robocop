@@ -374,6 +374,27 @@ class TestRunnerMonitorEventsSidecar:
         assert "query_discovered" not in types
         assert "query_retried" not in types
 
+    def test_table_plus_csv_calls_receive_distinct_deterministic_lineage(self, mock_env, tmp_path):
+        job_dir, _ = _create_sqlfile_table_plus_csv_job(tmp_path)
+
+        result = _spawn_runner(job_dir)
+
+        assert result.returncode == 0, result.stderr or result.stdout or _read_log(job_dir)
+        started = [
+            event for event in _read_monitor_events(job_dir) if event["type"] == "shell_started"
+        ]
+        assert [
+            (event["orchestrator_call_id"], event["orchestrator_call_index"]) for event in started
+        ] == [
+            ("call-0001", 1),
+            ("call-0002", 2),
+        ]
+        assert [event["orchestrator_script"] for event in started] == [
+            "Query_Impala_Parametrized.py",
+            "download_to_csv.py",
+        ]
+        assert [event["shell_relation"] for event in started] == ["initial", "initial"]
+
 
 # =============================================================================
 # Execution-queue selection (DISPATCH_REQUEST_POOL wiring)

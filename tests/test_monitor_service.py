@@ -32,6 +32,7 @@ QID_1 = "1a2b3c4d5e6f7081:9192a3b4c5d6e7f8"
 QID_2 = "2a2b3c4d5e6f7081:9192a3b4c5d6e7f8"
 QID_3 = "3a2b3c4d5e6f7081:9192a3b4c5d6e7f8"
 QID_RETRY = "aaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb"
+QID_RETRY_2 = "cccccccccccccccc:dddddddddddddddd"
 
 
 def event_line(
@@ -54,6 +55,26 @@ def event_line(
         "ts": ts,
         **extra,
     }
+    return json.dumps(payload, sort_keys=True) + "\n"
+
+
+def v2_event_line(
+    event_type: str,
+    *,
+    call_id: str = "call-0001",
+    call_index: int = 1,
+    script: str = "download_to_csv.py",
+    shell_relation: str = "initial",
+    **kwargs: object,
+) -> str:
+    payload = json.loads(event_line(event_type, **kwargs))
+    payload.update(
+        v=2,
+        orchestrator_call_id=call_id,
+        orchestrator_call_index=call_index,
+        orchestrator_script=script,
+        shell_relation=shell_relation,
+    )
     return json.dumps(payload, sort_keys=True) + "\n"
 
 
@@ -91,6 +112,9 @@ class FakeMonitorClient:
 
     def __init__(self) -> None:
         self.calls: list[im.QueryIdentity] = []
+        self.coordinator_discovery_calls: list[str] = []
+        self.discovery_criteria_calls: list[im.DiscoveryCriteria] = []
+        self.discovered_identity: im.QueryIdentity | None = None
         self.responses: dict[tuple[str, str], list[im.ImpalaObservation]] = {}
         self.default_response: im.ImpalaObservation | None = None
 
@@ -111,6 +135,16 @@ class FakeMonitorClient:
         if self.default_response is not None:
             return self.default_response
         return make_observation()
+
+    def discover_coordinators(self, seed_base_url: str) -> list[str]:
+        self.coordinator_discovery_calls.append(seed_base_url)
+        return [seed_base_url]
+
+    def discover(self, criteria: im.DiscoveryCriteria) -> im.QueryIdentity:
+        self.discovery_criteria_calls.append(criteria)
+        if self.discovered_identity is None:
+            raise RuntimeError("no discovery result")
+        return self.discovered_identity
 
 
 class FakeClock:
@@ -135,6 +169,193 @@ class FakeClock:
 
 
 class TestEventFileReplay:
+    def test_tail_skips_unchanged_body_and_reads_only_appended_suffix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        initial = event_line("shell_started")
+        write_events(events_path, [initial])
+        real_open = Path.open
+        open_count = 0
+        read_sizes: list[int] = []
+
+        class CountingReader:
+            def __init__(self, wrapped: object) -> None:
+                self.wrapped = wrapped
+
+            def __enter__(self) -> CountingReader:
+                self.wrapped.__enter__()  # type: ignore[attr-defined]
+                return self
+
+            def __exit__(self, *args: object) -> object:
+                return self.wrapped.__exit__(*args)  # type: ignore[attr-defined]
+
+            def seek(self, offset: int) -> int:
+                return self.wrapped.seek(offset)  # type: ignore[attr-defined,no-any-return]
+
+            def read(self, size: int = -1) -> bytes:
+                read_sizes.append(size)
+                return self.wrapped.read(size)  # type: ignore[attr-defined,no-any-return]
+
+        def counting_open(path: Path, mode: str = "r", *args: object, **kwargs: object):
+            nonlocal open_count
+            opened = real_open(path, mode, *args, **kwargs)
+            if path == events_path and mode == "rb":
+                open_count += 1
+                return CountingReader(opened)
+            return opened
+
+        monkeypatch.setattr(Path, "open", counting_open)
+        service = ms.MonitorService(FakeMonitorClient(), clock=FakeClock())
+        service.register_job("job-1", tmp_path)
+        assert open_count == 1
+        for _ in range(10):
+            service.run_pending()
+        assert open_count == 1
+
+        suffix = event_line("shell_finished", returncode=0)
+        size_before = events_path.stat().st_size
+        with real_open(events_path, "a", encoding="utf-8") as handle:
+            handle.write(suffix)
+        appended_bytes = events_path.stat().st_size - size_before
+        service.register_job("job-1", tmp_path)
+        assert open_count == 2
+        assert read_sizes[-1] == appended_bytes
+
+    def test_truncation_replays_once_then_returns_to_unchanged_fast_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                event_line("shell_started"),
+                event_line("query_discovered", coordinator_base_url=COORD_1, query_id=QID_1),
+            ],
+        )
+        real_open = Path.open
+        body_opens = 0
+
+        def counting_open(path: Path, mode: str = "r", *args: object, **kwargs: object):
+            nonlocal body_opens
+            if path == events_path and mode == "rb":
+                body_opens += 1
+            return real_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", counting_open)
+        service = ms.MonitorService(FakeMonitorClient(), clock=FakeClock())
+        service.register_job("job-1", tmp_path)
+        with real_open(events_path, "w", encoding="utf-8") as handle:
+            handle.write(event_line("shell_started", shell_execution_id="replacement"))
+        snapshot = service.register_job("job-1", tmp_path)
+        service.register_job("job-1", tmp_path)
+
+        assert body_opens == 2
+        shell = snapshot.orchestrator_calls[0].shell_executions[0]
+        assert shell.shell_execution_id == "replacement"
+
+    def test_v2_groups_pool_fallback_shells_under_the_same_call(self, tmp_path: Path) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                v2_event_line("shell_started", shell_execution_id="shell-a"),
+                v2_event_line(
+                    "query_discovered",
+                    shell_execution_id="shell-a",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_1,
+                ),
+                v2_event_line(
+                    "shell_started",
+                    shell_execution_id="shell-b",
+                    pool="adhoc",
+                    shell_relation="orchestrator_pool_fallback",
+                ),
+                v2_event_line(
+                    "query_discovered",
+                    shell_execution_id="shell-b",
+                    pool="adhoc",
+                    shell_relation="orchestrator_pool_fallback",
+                    coordinator_base_url=COORD_2,
+                    query_id=QID_2,
+                ),
+            ],
+        )
+
+        builder = ms.replay_event_file(events_path)
+        assert builder is not None
+        calls = builder.calls()
+        assert [(call.call_id, call.index, call.script) for call in calls] == [
+            ("call-0001", 1, "download_to_csv.py")
+        ]
+        assert [shell.shell_relation for shell in builder.shells(calls[0])] == [
+            "initial",
+            "orchestrator_pool_fallback",
+        ]
+
+    def test_v2_separate_manifest_calls_are_not_fallbacks(self, tmp_path: Path) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                v2_event_line("shell_started", shell_execution_id="shell-a"),
+                v2_event_line(
+                    "shell_started",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-b",
+                ),
+            ],
+        )
+
+        builder = ms.replay_event_file(events_path)
+        assert builder is not None
+        calls = builder.calls()
+        assert [call.call_id for call in calls] == ["call-0001", "call-0002"]
+        assert [call.shells[0].shell_relation for call in calls] == ["initial", "initial"]
+
+    def test_v2_conflicting_call_metadata_is_skipped(self, tmp_path: Path) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                v2_event_line("shell_started", shell_execution_id="shell-a"),
+                v2_event_line(
+                    "query_discovered",
+                    shell_execution_id="shell-a",
+                    script="conflicting.py",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_1,
+                ),
+            ],
+        )
+
+        builder = ms.replay_event_file(events_path)
+        assert builder is not None
+        assert builder.calls()[0].shells[0].queries == []
+
+    def test_mixed_v1_and_v2_never_invents_legacy_lineage(self, tmp_path: Path) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                event_line("shell_started", shell_execution_id="legacy-a"),
+                event_line("shell_started", shell_execution_id="legacy-b"),
+                v2_event_line("shell_started", shell_execution_id="v2-a"),
+            ],
+        )
+
+        builder = ms.replay_event_file(events_path)
+        assert builder is not None
+        calls = builder.calls()
+        assert len(calls) == 3
+        assert calls[0].shells[0].shell_relation == "unknown_legacy"
+        assert calls[1].shells[0].shell_relation == "unknown_legacy"
+        assert calls[0].call_id != calls[1].call_id
+        assert calls[2].shells[0].shell_relation == "initial"
+
     def test_absent_file_means_monitoring_unavailable(self, tmp_path: Path) -> None:
         builder = ms.replay_event_file(tmp_path / "monitor.events.jsonl")
         assert builder is None
@@ -145,7 +366,7 @@ class TestEventFileReplay:
         snapshot = service.register_job("job-1", tmp_path)
         assert snapshot.available is False
         assert snapshot.unavailable_reason == "monitoring unavailable"
-        assert snapshot.shell_executions == ()
+        assert snapshot.orchestrator_calls == ()
 
     def test_single_shell_single_query(self, tmp_path: Path) -> None:
         events_path = tmp_path / "monitor.events.jsonl"
@@ -163,7 +384,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 1
         assert shells[0].pool == "default"
         assert shells[0].returncode == 0
@@ -206,7 +427,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 1
         queries = shells[0].queries
         assert [q.query_id for q in queries] == [QID_1, QID_2, QID_3]
@@ -244,7 +465,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 2
         assert shells[0].pool == "default"
         assert shells[0].queries[0].query_id == QID_1
@@ -278,7 +499,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 1
         query = shells[0].queries[0]
         assert query.query_id == QID_1
@@ -290,6 +511,69 @@ class TestEventFileReplay:
         leaves = builder.leaf_queries()
         assert len(leaves) == 1
         assert leaves[0].query_id == QID_RETRY
+
+    def test_sequential_retries_form_recursive_chain_and_poll_only_grandchild(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                event_line("shell_started", pool="default", seq=1),
+                event_line(
+                    "query_discovered",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_1,
+                    seq=2,
+                ),
+                event_line(
+                    "query_retried",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_RETRY,
+                    seq=3,
+                ),
+                event_line(
+                    "query_retried",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_RETRY_2,
+                    seq=4,
+                ),
+            ],
+        )
+
+        builder = ms.replay_event_file(events_path)
+        assert builder is not None
+        root = builder.shells(builder.calls()[0])[0].queries[0]
+        child = root.retries[0]
+        grandchild = child.retries[0]
+        assert root.query_id == QID_1
+        assert child.query_id == QID_RETRY
+        assert grandchild.query_id == QID_RETRY_2
+        assert [query.query_id for query in builder.query_nodes()] == [
+            QID_1,
+            QID_RETRY,
+            QID_RETRY_2,
+        ]
+        assert [query.query_id for query in builder.leaf_queries()] == [QID_RETRY_2]
+
+        client = FakeMonitorClient()
+        client.default_response = make_observation(phase="running")
+        service = ms.MonitorService(client, clock=FakeClock(), foreground_poll_seconds=2.0)
+        service.subscribe("job-1", tmp_path)
+        service.run_pending()
+
+        assert [call.query_id for call in client.calls] == [QID_RETRY_2]
+        assert service.poller_count("job-1") == 1
+        snapshot_root = (
+            service.snapshot("job-1").orchestrator_calls[0].shell_executions[0].queries[0]
+        )
+        assert [attempt.query_id for attempt in snapshot_root.attempts_depth_first()] == [
+            QID_1,
+            QID_RETRY,
+            QID_RETRY_2,
+        ]
+        assert snapshot_root.latest_retry_leaf().query_id == QID_RETRY_2
+        assert snapshot_root.retries[0].retries[0].observation is not None
 
     def test_query_retried_with_no_prior_query_is_dropped_tolerantly(self, tmp_path: Path) -> None:
         events_path = tmp_path / "monitor.events.jsonl"
@@ -307,7 +591,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 1
         assert shells[0].queries == []
 
@@ -340,7 +624,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 1
         # Only the v1 query is present; the v2 event was skipped.
         assert [q.query_id for q in shells[0].queries] == [QID_1]
@@ -361,7 +645,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        assert len(builder.shells()) == 1
+        assert sum(len(builder.shells(call)) for call in builder.calls()) == 1
 
     def test_malformed_json_line_is_skipped(self, tmp_path: Path) -> None:
         events_path = tmp_path / "monitor.events.jsonl"
@@ -380,7 +664,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 1
         assert [q.query_id for q in shells[0].queries] == [QID_1]
 
@@ -394,7 +678,7 @@ class TestEventFileReplay:
 
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 1
         assert [q.query_id for q in shells[0].queries] == [QID_1]
 
@@ -403,7 +687,7 @@ class TestEventFileReplay:
         events_path.write_text("", encoding="utf-8")
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        assert builder.shells() == []
+        assert builder.calls() == []
 
     def test_interleaved_partial_line_tail_across_refreshes(self, tmp_path: Path) -> None:
         """Simulates a service repeatedly re-reading a file while a writer
@@ -418,25 +702,27 @@ class TestEventFileReplay:
         assert snapshot.available is False
 
         # Writer appends shell_started, then a partial query_discovered line.
+        full_query_line = event_line(
+            "query_discovered", coordinator_base_url=COORD_1, query_id=QID_1, seq=2
+        )
+        partial_prefix = full_query_line[:35]
         events_path.write_text(
-            event_line("shell_started", pool="default", seq=1) + '{"v": 1, "type": "query_discove',
+            event_line("shell_started", pool="default", seq=1) + partial_prefix,
             encoding="utf-8",
         )
         snapshot = service.register_job("job-1", tmp_path)
         assert snapshot.available is True
-        assert len(snapshot.shell_executions) == 1
-        assert snapshot.shell_executions[0].queries == ()
+        assert len(snapshot.orchestrator_calls) == 1
+        assert snapshot.orchestrator_calls[0].shell_executions[0].queries == ()
 
-        # Writer completes the line and appends more.
-        events_path.write_text(
-            event_line("shell_started", pool="default", seq=1)
-            + event_line("query_discovered", coordinator_base_url=COORD_1, query_id=QID_1, seq=2),
-            encoding="utf-8",
-        )
+        # Writer completes the same append-only line.
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write(full_query_line[len(partial_prefix) :])
         snapshot = service.register_job("job-1", tmp_path)
         assert snapshot.available is True
-        assert len(snapshot.shell_executions[0].queries) == 1
-        assert snapshot.shell_executions[0].queries[0].query_id == QID_1
+        shell = snapshot.orchestrator_calls[0].shell_executions[0]
+        assert len(shell.queries) == 1
+        assert shell.queries[0].query_id == QID_1
 
 
 # --------------------------------------------------------------------------
@@ -455,6 +741,342 @@ class TestPolling:
             ],
         )
         return tmp_path
+
+    def test_superseded_attempt_keeps_failure_and_gets_one_final_confirmation(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = self._job_with_one_running_query(tmp_path) / "monitor.events.jsonl"
+        client = FakeMonitorClient()
+        client.queue(
+            COORD_1,
+            QID_1,
+            make_observation(phase="failed", raw_state="EXCEPTION"),
+            make_observation(
+                phase="unknown", raw_state=None, availability_error="Unknown query id"
+            ),
+        )
+        client.queue(COORD_1, QID_RETRY, make_observation(phase="running"))
+        clock = FakeClock()
+        service = ms.MonitorService(client, clock=clock, foreground_poll_seconds=2.0)
+        service.subscribe("job-1", tmp_path)
+        service.run_pending()
+
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                event_line(
+                    "query_retried",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_RETRY,
+                    seq=3,
+                )
+            )
+        service.run_pending()
+
+        parent = service.snapshot("job-1").orchestrator_calls[0].shell_executions[0].queries[0]
+        assert parent.observation is not None
+        assert parent.observation.raw_state == "EXCEPTION"
+        assert parent.observation.phase == "failed"
+        assert parent.observation.availability_error == "Unknown query id"
+        assert parent.retries[0].observation is not None
+        assert [call.query_id for call in client.calls].count(QID_1) == 2
+
+        clock.advance(10.0)
+        service.run_pending()
+        assert [call.query_id for call in client.calls].count(QID_1) == 2
+
+
+class TestBackgroundRegistration:
+    def test_background_cadence_tightens_for_detail_without_duplicate_poller(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                event_line("shell_started"),
+                event_line("query_discovered", coordinator_base_url=COORD_1, query_id=QID_1),
+            ],
+        )
+        client = FakeMonitorClient()
+        clock = FakeClock()
+        service = ms.MonitorService(client, clock=clock)
+
+        service.sync_background_jobs({("job-1", tmp_path)})
+        service.run_pending()
+        assert len(client.calls) == 1
+        assert service.poller_count("job-1") == 1
+        clock.advance(29)
+        service.run_pending()
+        assert len(client.calls) == 1
+        clock.advance(1)
+        service.run_pending()
+        assert len(client.calls) == 2
+
+        service.subscribe("job-1", tmp_path)
+        assert service.poller_count("job-1") == 1
+        clock.advance(2)
+        service.run_pending()
+        assert len(client.calls) == 3
+        service.unsubscribe("job-1")
+        clock.advance(2)
+        service.run_pending()
+        assert len(client.calls) == 3
+        clock.advance(28)
+        service.run_pending()
+        assert len(client.calls) == 4
+
+    def test_unlisted_terminal_job_prunes_after_final_confirmation(self, tmp_path: Path) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                event_line("shell_started"),
+                event_line("query_discovered", coordinator_base_url=COORD_1, query_id=QID_1),
+            ],
+        )
+        terminal = make_observation(phase="succeeded", raw_state="FINISHED")
+        client = FakeMonitorClient()
+        client.queue(COORD_1, QID_1, terminal, terminal)
+        clock = FakeClock()
+        service = ms.MonitorService(client, clock=clock)
+        service.sync_background_jobs({("job-1", tmp_path)})
+        service.run_pending()
+        service.sync_background_jobs(set())
+        assert service.snapshot("job-1").available
+        clock.advance(30)
+        service.run_pending()
+        assert not service.snapshot("job-1").available
+
+
+class TestIdentityRecovery:
+    def _job_with_one_running_query(self, tmp_path: Path) -> Path:
+        return TestPolling._job_with_one_running_query(self, tmp_path)
+
+    def _recoverable_job(self, tmp_path: Path) -> None:
+        job_manifest = {
+            "schema_version": 1,
+            "id": "job-1",
+            "tool": "dispatch",
+            "user": "user_a",
+            "source": {"type": "SqlFile", "sql_path_at_launch": "input.sql"},
+            "destination": {
+                "type": "Table+Csv",
+                "schema": "db_a",
+                "table_name": "table_a",
+                "csv_path": "out.csv",
+            },
+            "params": {},
+            "orchestrator_calls": [
+                {"script": "Query_Impala_Parametrized.py", "argv": ["python", "first.py"]},
+                {
+                    "script": "download_to_csv.py",
+                    "argv": [
+                        "python",
+                        "download_to_csv.py",
+                        "--table-name",
+                        "db_a.table_a",
+                        "--output-file",
+                        "out.csv",
+                    ],
+                },
+            ],
+            "state": "Running",
+            "pid": 123,
+            "started_at": "2026-07-15T10:00:00Z",
+            "finished_at": None,
+            "exit_code": None,
+        }
+        (tmp_path / "manifest.json").write_text(json.dumps(job_manifest), encoding="utf-8")
+        write_events(
+            tmp_path / "monitor.events.jsonl",
+            [
+                v2_event_line(
+                    "shell_started",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-recover",
+                )
+            ],
+        )
+
+    def test_criteria_are_exactly_derived_and_unique_identity_is_attached(
+        self, tmp_path: Path
+    ) -> None:
+        self._recoverable_job(tmp_path)
+        client = FakeMonitorClient()
+        client.discovered_identity = im.QueryIdentity(
+            coordinator_base_url=COORD_1,
+            query_id=QID_1,
+            shell_execution_id="shell-recover",
+            relation="initial",
+            discovered_at="2026-07-15T10:00:30Z",
+        )
+        service = ms.MonitorService(client, clock=FakeClock())
+        service.sync_background_jobs({("job-1", tmp_path)})
+
+        criteria = service.recovery_criteria("job-1", "call-0002")
+        assert criteria.statement_prefix == "select * from db_a.table_a;"
+        assert criteria.statement_type == "QUERY"
+        assert criteria.database == "db_a"
+        assert criteria.orchestrator_call_id == "call-0002"
+        assert criteria.orchestrator_call_index == 2
+        snapshot = service.recover_identity("job-1", "call-0002", criteria, seed_url=COORD_1)
+
+        query = snapshot.orchestrator_calls[0].shell_executions[0].queries[0]
+        assert query.query_id == QID_1
+        assert client.coordinator_discovery_calls == [COORD_1]
+        assert client.discovery_criteria_calls == [criteria]
+        with (tmp_path / "monitor.events.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(
+                v2_event_line(
+                    "shell_finished",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-recover",
+                    returncode=0,
+                )
+            )
+        service.run_pending()
+        assert service.snapshot("job-1").orchestrator_calls[0].shell_executions[0].queries
+
+        # A bounded truncation replay reattaches only the in-memory recovery;
+        # a fresh process would have no such map and must recover again.
+        write_events(
+            tmp_path / "monitor.events.jsonl",
+            [
+                v2_event_line(
+                    "shell_started",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-recover",
+                )
+            ],
+        )
+        service.run_pending()
+        assert service.snapshot("job-1").orchestrator_calls[0].shell_executions[0].queries
+
+    def test_recovery_refuses_weakened_or_context_free_criteria(self, tmp_path: Path) -> None:
+        self._recoverable_job(tmp_path)
+        client = FakeMonitorClient()
+        service = ms.MonitorService(client, clock=FakeClock())
+        service.sync_background_jobs({("job-1", tmp_path)})
+        criteria = service.recovery_criteria("job-1", "call-0002")
+        weakened = im.DiscoveryCriteria(**{**criteria.__dict__, "statement_prefix": "select *"})
+        with pytest.raises(ms.IdentityRecoveryError, match="identity unavailable/ambiguous"):
+            service.recover_identity("job-1", "call-0002", weakened, seed_url=COORD_1)
+
+    def test_one_missing_fallback_shell_is_recoverable_from_captured_seed(
+        self, tmp_path: Path
+    ) -> None:
+        self._recoverable_job(tmp_path)
+        write_events(
+            tmp_path / "monitor.events.jsonl",
+            [
+                v2_event_line(
+                    "shell_started",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-initial",
+                ),
+                v2_event_line(
+                    "query_discovered",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-initial",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_1,
+                ),
+                v2_event_line(
+                    "shell_started",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-recover",
+                    shell_relation="orchestrator_pool_fallback",
+                ),
+            ],
+        )
+        client = FakeMonitorClient()
+        client.discovered_identity = im.QueryIdentity(
+            coordinator_base_url=COORD_2,
+            query_id=QID_2,
+            shell_execution_id="shell-recover",
+            relation="initial",
+            discovered_at="2026-07-15T10:00:30Z",
+        )
+        service = ms.MonitorService(client, clock=FakeClock())
+        service.sync_background_jobs({("job-1", tmp_path)})
+        criteria = service.recovery_criteria("job-1", "call-0002")
+
+        snapshot = service.recover_identity("job-1", "call-0002", criteria)
+
+        assert client.coordinator_discovery_calls == [COORD_1]
+        assert snapshot.orchestrator_calls[0].shell_executions[1].queries[0].query_id == QID_2
+
+    def test_recovery_refuses_identity_already_attached_elsewhere(self, tmp_path: Path) -> None:
+        self._recoverable_job(tmp_path)
+        write_events(
+            tmp_path / "monitor.events.jsonl",
+            [
+                v2_event_line(
+                    "shell_started",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="known",
+                ),
+                v2_event_line(
+                    "query_discovered",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="known",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_1,
+                ),
+                v2_event_line(
+                    "shell_started",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-recover",
+                    shell_relation="orchestrator_pool_fallback",
+                ),
+            ],
+        )
+        client = FakeMonitorClient()
+        client.discovered_identity = im.QueryIdentity(
+            coordinator_base_url=COORD_1,
+            query_id=QID_1,
+            shell_execution_id="shell-recover",
+            relation="initial",
+            discovered_at="2026-07-15T10:00:30Z",
+        )
+        service = ms.MonitorService(client, clock=FakeClock())
+        service.sync_background_jobs({("job-1", tmp_path)})
+        criteria = service.recovery_criteria("job-1", "call-0002")
+        with pytest.raises(ms.IdentityRecoveryError, match="identity unavailable/ambiguous"):
+            service.recover_identity("job-1", "call-0002", criteria)
+
+    def test_query_file_call_is_not_eligible(self, tmp_path: Path) -> None:
+        self._recoverable_job(tmp_path)
+        data = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+        data["orchestrator_calls"][1]["argv"] = [
+            "python",
+            "download_to_csv.py",
+            "--query-file",
+            "job.sql",
+        ]
+        (tmp_path / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+        service = ms.MonitorService(FakeMonitorClient(), clock=FakeClock())
+        service.sync_background_jobs({("job-1", tmp_path)})
+        with pytest.raises(ms.IdentityRecoveryError, match="identity unavailable/ambiguous"):
+            service.recovery_criteria("job-1", "call-0002")
 
     def test_poller_shared_across_two_subscribers_one_client_call_stream(
         self, tmp_path: Path
@@ -567,7 +1189,7 @@ class TestPolling:
         assert len(client.calls) == 3
 
         snapshot = service.snapshot("job-1")
-        leaf_observation = snapshot.shell_executions[0].queries[0].observation
+        leaf_observation = snapshot.orchestrator_calls[0].shell_executions[0].queries[0].observation
         assert leaf_observation is not None
         assert leaf_observation.phase == "succeeded"
 
@@ -607,7 +1229,7 @@ class TestPolling:
 
         service.run_pending()
         snapshot = service.snapshot("job-1")
-        observation = snapshot.shell_executions[0].queries[0].observation
+        observation = snapshot.orchestrator_calls[0].shell_executions[0].queries[0].observation
         assert observation is not None
         assert observation.phase == "running"
         assert observation.availability_error is None
@@ -615,7 +1237,7 @@ class TestPolling:
         clock.advance(2.0)
         service.run_pending()
         snapshot = service.snapshot("job-1")
-        observation = snapshot.shell_executions[0].queries[0].observation
+        observation = snapshot.orchestrator_calls[0].shell_executions[0].queries[0].observation
         assert observation is not None
         # Retains the last good phase/state...
         assert observation.phase == "running"
@@ -638,7 +1260,7 @@ class TestPolling:
 
         service.run_pending()
         snapshot = service.snapshot("job-1")
-        observation = snapshot.shell_executions[0].queries[0].observation
+        observation = snapshot.orchestrator_calls[0].shell_executions[0].queries[0].observation
         assert observation is not None
         assert observation.phase == "unknown"
         assert observation.availability_error == "monitoring unavailable"
@@ -722,16 +1344,17 @@ class TestPolling:
         # have been pruned, not left running alongside it.
         assert service.poller_count("job-1") == 1
         snapshot = service.snapshot("job-1")
-        leaf = snapshot.shell_executions[0].queries[0]
+        leaf = snapshot.orchestrator_calls[0].shell_executions[0].queries[0]
         assert leaf.retries[-1].query_id == QID_RETRY
 
-        # Only the retry gets polled from here on -- QID_1 must never be
-        # observed again.
+        # QID_1 received exactly one immediate final confirmation poll when
+        # superseded; only the retry gets polled from here on.
+        assert [call.query_id for call in client.calls].count(QID_1) == 2
         clock.advance(2.0)
         service.run_pending()
         polled_ids = {call.query_id for call in client.calls}
         assert QID_RETRY in polled_ids
-        assert all(call.query_id != QID_1 for call in client.calls[1:])
+        assert [call.query_id for call in client.calls].count(QID_1) == 2
 
 
 # --------------------------------------------------------------------------
@@ -805,7 +1428,8 @@ class TestRestartRecovery:
                         for query in shell.queries
                     ],
                 )
-                for shell in snapshot.shell_executions
+                for call in snapshot.orchestrator_calls
+                for shell in call.shell_executions
             ]
 
         assert hierarchy_shape(first_snapshot) == hierarchy_shape(second_snapshot)
@@ -971,12 +1595,14 @@ class TestModuleHygiene:
 
     def test_snapshot_and_hierarchy_dataclasses_are_frozen(self) -> None:
         snapshot = ms.MonitorSnapshot(
-            job_id="job-1", available=True, unavailable_reason=None, shell_executions=()
+            job_id="job-1", available=True, unavailable_reason=None, orchestrator_calls=()
         )
         with pytest.raises(Exception):
             snapshot.job_id = "job-2"  # type: ignore[misc]
 
-        shell = ms.ShellExecutionAttempt(shell_execution_id="s1", pool="default", seq=1)
+        shell = ms.ShellExecutionAttempt(
+            shell_execution_id="s1", shell_relation="initial", pool="default", seq=1
+        )
         with pytest.raises(Exception):
             shell.pool = "other"  # type: ignore[misc]
 

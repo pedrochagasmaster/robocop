@@ -879,3 +879,90 @@ def test_urllib_transport_honors_configured_ca_bundle_path(tmp_path: Path) -> No
         # constructor attempted to load the configured path rather than
         # silently ignoring it.
         pass
+
+
+def test_urllib_transport_passes_exact_connect_timeout_to_opener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened_timeouts: list[float] = []
+    installed_handlers: list[object] = []
+
+    class Response:
+        status = 200
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self, _size: int) -> bytes:
+            return b""
+
+        def getcode(self) -> int:
+            return 200
+
+    class Opener:
+        def open(self, _request: object, *, timeout: float) -> Response:
+            opened_timeouts.append(timeout)
+            return Response()
+
+    def build_opener(*handlers: object) -> Opener:
+        installed_handlers.extend(handlers)
+        return Opener()
+
+    monkeypatch.setattr(http_mod.urllib.request, "build_opener", build_opener)
+    result = http_mod.UrllibTransport().fetch(SEED_URL, (3.0, 10.0))
+
+    assert result.status == 200
+    assert opened_timeouts == [3.0]
+    assert any(isinstance(item, http_mod._TimeoutHTTPHandler) for item in installed_handlers)
+    assert any(isinstance(item, http_mod._TimeoutHTTPSHandler) for item in installed_handlers)
+
+
+@pytest.mark.parametrize(
+    ("connection_type", "base_type"),
+    [
+        (http_mod._ReadTimeoutHTTPConnection, http_mod.http.client.HTTPConnection),
+        (http_mod._ReadTimeoutHTTPSConnection, http_mod.http.client.HTTPSConnection),
+    ],
+)
+def test_connection_switches_from_three_second_connect_to_ten_second_read_timeout(
+    monkeypatch: pytest.MonkeyPatch, connection_type: type, base_type: type
+) -> None:
+    socket_timeouts: list[float] = []
+
+    class Socket:
+        def settimeout(self, value: float) -> None:
+            socket_timeouts.append(value)
+
+    def connect(connection: object) -> None:
+        connection.sock = Socket()  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(base_type, "connect", connect)
+    connection = connection_type("coordinator.internal", timeout=3.0, read_timeout=10.0)
+    assert connection.timeout == 3.0
+    connection.connect()
+    assert socket_timeouts == [10.0]
+
+
+@pytest.mark.parametrize("message", ["connect timed out", "read timed out"])
+def test_connect_and_read_timeouts_both_degrade_to_unavailable(message: str) -> None:
+    transport = FakeTransport()
+    identity = make_identity()
+    detail_url = im.build_detail_url(SEED_URL, "query_stmt", identity.query_id)
+    transport.set_raises(detail_url, TimeoutError(message))
+
+    observation = no_sleep_client(transport, max_retries=0).observe(identity)
+
+    assert observation.availability_error == "monitoring unavailable"
+
+
+def test_optional_recovery_seed_config_is_trimmed_and_defaults_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DISPATCH_IMPALA_MONITOR_SEED_URL", raising=False)
+    assert http_mod.config.impala_monitor_seed_url() is None
+    monkeypatch.setenv("DISPATCH_IMPALA_MONITOR_SEED_URL", f"  {SEED_URL}  ")
+    assert http_mod.config.impala_monitor_seed_url() == SEED_URL

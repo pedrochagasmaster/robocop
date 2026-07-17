@@ -26,7 +26,12 @@ def _log(message: str) -> None:
         LOG.flush()
 
 
-def _orchestrator_env(manifest: manifest_io.JobManifest, job_dir: Path) -> dict[str, str]:
+def _orchestrator_env(
+    manifest: manifest_io.JobManifest,
+    job_dir: Path,
+    call: manifest_io.OrchestratorCall,
+    call_index: int,
+) -> dict[str, str]:
     """Build the environment for orchestrator subprocesses.
 
     Every orchestrator subprocess always gets a job-scoped monitoring-event
@@ -45,6 +50,9 @@ def _orchestrator_env(manifest: manifest_io.JobManifest, job_dir: Path) -> dict[
     env = os.environ.copy()
     env["DISPATCH_MONITOR_EVENTS_PATH"] = str(job_dir / "monitor.events.jsonl")
     env["DISPATCH_JOB_ID"] = str(manifest.get("id", ""))
+    env["DISPATCH_ORCHESTRATOR_CALL_ID"] = f"call-{call_index:04d}"
+    env["DISPATCH_ORCHESTRATOR_CALL_INDEX"] = str(call_index)
+    env["DISPATCH_ORCHESTRATOR_SCRIPT"] = call["script"]
 
     queue = str(manifest.get("params", {}).get("queue", "")).strip()
     if queue and queue.lower() != "auto":
@@ -142,11 +150,13 @@ def run(job_dir: Path) -> int:
             pid=os.getpid(),
         )
 
-        orchestrator_env = _orchestrator_env(manifest, job_dir)
-        if "DISPATCH_REQUEST_POOL" in orchestrator_env:
-            _log(f"[runner] pinning request_pool={orchestrator_env['DISPATCH_REQUEST_POOL']}")
         try:
-            for call in manifest["orchestrator_calls"]:
+            for call_index, call in enumerate(manifest["orchestrator_calls"], start=1):
+                orchestrator_env = _orchestrator_env(manifest, job_dir, call, call_index)
+                if call_index == 1 and "DISPATCH_REQUEST_POOL" in orchestrator_env:
+                    _log(
+                        f"[runner] pinning request_pool={orchestrator_env['DISPATCH_REQUEST_POOL']}"
+                    )
                 _log(f"[runner] starting {call['script']}: {' '.join(call['argv'])}")
                 with subprocess.Popen(
                     call["argv"], stdout=log, stderr=log, env=orchestrator_env

@@ -96,3 +96,9 @@ def impala_monitor_allow_http() -> bool:
     """
     raw = os.environ.get("DISPATCH_IMPALA_MONITOR_ALLOW_HTTP", "").strip().lower()
     return raw not in ("", "0", "false", "off", "no")
+
+
+def impala_monitor_seed_url() -> str | None:
+    """Optional validated coordinator seed for operator-triggered recovery."""
+    override = os.environ.get("DISPATCH_IMPALA_MONITOR_SEED_URL", "").strip()
+    return override or None

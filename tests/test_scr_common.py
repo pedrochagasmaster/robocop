@@ -19,6 +19,13 @@ import download_to_csv  # noqa: E402
 import monthly_query_processor  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _monitor_lineage_env(monkeypatch):
+    monkeypatch.setenv("DISPATCH_ORCHESTRATOR_CALL_ID", "call-0001")
+    monkeypatch.setenv("DISPATCH_ORCHESTRATOR_CALL_INDEX", "1")
+    monkeypatch.setenv("DISPATCH_ORCHESTRATOR_SCRIPT", "test_orchestrator.py")
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -580,6 +587,73 @@ class TestRunImpalaShellMonitorLineExtraction:
 
 
 class TestRunImpalaShellMalformedUrlRejection:
+    @pytest.mark.parametrize(
+        "stderr_line",
+        [
+            "error: Query state can be monitored at: https://host.example/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+            "Query state can be monitored at: https://host.example/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8 trailing",
+            "Query state can be monitored at: https://host.example/cancel_query?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+            "Query state can be monitored at: https://host.example/query_stmt?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+            "Query state can be monitored at: https://host.example/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8&x=1",
+            "Query state can be monitored at: https://host.example/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8&query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+            "Query state can be monitored at: https://user:secret@host.example/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+            "Query state can be monitored at: https://host.example/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8#fragment",
+            "Query state can be monitored at: https://host.example:99999/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+            "Query state can be monitored at: https://host.example/query_plan?query_id=1A2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+        ],
+    )
+    def test_non_exact_monitor_lines_are_rejected_and_preserve_bytes(
+        self, stderr_line: str, tmp_path, monkeypatch
+    ) -> None:
+        expected = (stderr_line + "\r\n").encode()
+        script = tmp_path / "adversarial_child.py"
+        script.write_text(
+            "import sys\nsys.stderr.buffer.write(" + repr(expected) + ")\n",
+            encoding="utf-8",
+        )
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+
+        returncode, stdout, stderr = _common.run_impala_shell(
+            [sys.executable, str(script)], pool="adhoc"
+        )
+
+        assert (returncode, stdout, stderr) == (0, b"", expected)
+        assert [event["type"] for event in _read_events(events_path)] == [
+            "shell_started",
+            "shell_finished",
+        ]
+
+    @pytest.mark.parametrize("line_ending", [b"\n", b"\r\n"])
+    def test_exact_monitor_line_accepts_lf_or_crlf_and_preserves_bytes(
+        self, line_ending: bytes, tmp_path, monkeypatch
+    ) -> None:
+        expected = (
+            b"Query state can be monitored at: "
+            b"https://host.example:25443/query_plan?"
+            b"query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8" + line_ending
+        )
+        script = tmp_path / "exact_child.py"
+        script.write_text(
+            "import sys\nsys.stderr.buffer.write(" + repr(expected) + ")\n",
+            encoding="utf-8",
+        )
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+
+        returncode, stdout, stderr = _common.run_impala_shell(
+            [sys.executable, str(script)], pool="adhoc"
+        )
+
+        assert (returncode, stdout, stderr) == (0, b"", expected)
+        assert [event["type"] for event in _read_events(events_path)] == [
+            "shell_started",
+            "query_discovered",
+            "shell_finished",
+        ]
+
     def test_malformed_url_is_rejected_without_affecting_execution(
         self, tmp_path, monkeypatch
     ) -> None:
@@ -704,7 +778,7 @@ class TestRunImpalaShellUnwritableEventsPath:
 
 
 class TestRunImpalaShellEventShape:
-    def test_events_carry_v1_job_id_seq_pool_and_utc_timestamp(self, tmp_path, monkeypatch) -> None:
+    def test_events_carry_v2_call_lineage_and_utc_timestamp(self, tmp_path, monkeypatch) -> None:
         script = tmp_path / "monitor_child.py"
         script.write_text(
             "import sys\n"
@@ -718,6 +792,10 @@ class TestRunImpalaShellEventShape:
         events_path = tmp_path / "monitor.events.jsonl"
         monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
         monkeypatch.setenv("DISPATCH_JOB_ID", "job-shape-test")
+        monkeypatch.setenv("DISPATCH_ORCHESTRATOR_CALL_ID", "call-0002")
+        monkeypatch.setenv("DISPATCH_ORCHESTRATOR_CALL_INDEX", "2")
+        monkeypatch.setenv("DISPATCH_ORCHESTRATOR_SCRIPT", "download_to_csv.py")
+        monkeypatch.setattr(_common, "_SHELL_EXECUTION_COUNTER", 0)
 
         _common.run_impala_shell([sys.executable, str(script)], pool="acs_large")
 
@@ -726,9 +804,13 @@ class TestRunImpalaShellEventShape:
         seqs = [event["seq"] for event in events]
         assert seqs == [1, 2, 3]
         for event in events:
-            assert event["v"] == 1
+            assert event["v"] == 2
             assert event["job_id"] == "job-shape-test"
             assert event["pool"] == "acs_large"
+            assert event["orchestrator_call_id"] == "call-0002"
+            assert event["orchestrator_call_index"] == 2
+            assert event["orchestrator_script"] == "download_to_csv.py"
+            assert event["shell_relation"] == "initial"
             assert "shell_execution_id" in event and event["shell_execution_id"]
             assert event["ts"].endswith("Z")
         assert events[0]["type"] == "shell_started"
@@ -777,6 +859,28 @@ class TestRunImpalaShellEventShape:
         events = _read_events(events_path)
         ids = {event["shell_execution_id"] for event in events}
         assert len(ids) == 2
+
+    def test_shell_runs_are_numbered_as_initial_then_pool_fallback(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        script = tmp_path / "plain_child.py"
+        script.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+        monkeypatch.setenv("DISPATCH_ORCHESTRATOR_CALL_ID", "call-0001")
+        monkeypatch.setenv("DISPATCH_ORCHESTRATOR_CALL_INDEX", "1")
+        monkeypatch.setenv("DISPATCH_ORCHESTRATOR_SCRIPT", "download_to_csv.py")
+        monkeypatch.setattr(_common, "_SHELL_EXECUTION_COUNTER", 0)
+
+        _common.run_impala_shell([sys.executable, str(script)], pool="acs_small")
+        _common.run_impala_shell([sys.executable, str(script)], pool="acs_large")
+
+        started = [event for event in _read_events(events_path) if event["type"] == "shell_started"]
+        assert [event["shell_relation"] for event in started] == [
+            "initial",
+            "orchestrator_pool_fallback",
+        ]
 
 
 class TestRunImpalaShellByteEquivalence:
@@ -833,10 +937,18 @@ class TestRunnerOrchestratorEnvMonitorVars:
 
         job_dir = tmp_path / "job-1"
         job_dir.mkdir()
-        env = runner._orchestrator_env({"id": "job-1", "params": {}}, job_dir)
+        env = runner._orchestrator_env(
+            {"id": "job-1", "params": {}},
+            job_dir,
+            {"script": "Query_Impala_Parametrized.py", "argv": []},
+            1,
+        )
 
         assert env["DISPATCH_JOB_ID"] == "job-1"
         assert env["DISPATCH_MONITOR_EVENTS_PATH"] == str(job_dir / "monitor.events.jsonl")
+        assert env["DISPATCH_ORCHESTRATOR_CALL_ID"] == "call-0001"
+        assert env["DISPATCH_ORCHESTRATOR_CALL_INDEX"] == "1"
+        assert env["DISPATCH_ORCHESTRATOR_SCRIPT"] == "Query_Impala_Parametrized.py"
         assert "DISPATCH_REQUEST_POOL" not in env
 
     def test_monitor_vars_set_when_queue_pinned(self, tmp_path) -> None:
@@ -844,7 +956,12 @@ class TestRunnerOrchestratorEnvMonitorVars:
 
         job_dir = tmp_path / "job-2"
         job_dir.mkdir()
-        env = runner._orchestrator_env({"id": "job-2", "params": {"queue": "acs_large"}}, job_dir)
+        env = runner._orchestrator_env(
+            {"id": "job-2", "params": {"queue": "acs_large"}},
+            job_dir,
+            {"script": "download_to_csv.py", "argv": []},
+            2,
+        )
 
         assert env["DISPATCH_JOB_ID"] == "job-2"
         assert env["DISPATCH_MONITOR_EVENTS_PATH"] == str(job_dir / "monitor.events.jsonl")
@@ -855,7 +972,12 @@ class TestRunnerOrchestratorEnvMonitorVars:
 
         job_dir = tmp_path / "job-3"
         job_dir.mkdir()
-        env = runner._orchestrator_env({"id": "job-3", "params": {"queue": "auto"}}, job_dir)
+        env = runner._orchestrator_env(
+            {"id": "job-3", "params": {"queue": "auto"}},
+            job_dir,
+            {"script": "download_to_csv.py", "argv": []},
+            1,
+        )
 
         assert env["DISPATCH_JOB_ID"] == "job-3"
         assert env["DISPATCH_MONITOR_EVENTS_PATH"] == str(job_dir / "monitor.events.jsonl")
@@ -867,6 +989,11 @@ class TestRunnerOrchestratorEnvMonitorVars:
         monkeypatch.setenv("SOME_UNRELATED_VAR", "keep-me")
         job_dir = tmp_path / "job-4"
         job_dir.mkdir()
-        env = runner._orchestrator_env({"id": "job-4", "params": {}}, job_dir)
+        env = runner._orchestrator_env(
+            {"id": "job-4", "params": {}},
+            job_dir,
+            {"script": "download_to_csv.py", "argv": []},
+            1,
+        )
 
         assert env["SOME_UNRELATED_VAR"] == "keep-me"

@@ -41,10 +41,12 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
-from .impala_monitor import ImpalaObservation, QueryIdentity, Relation
+from . import config, manifest, sql
+from .impala_monitor import DiscoveryCriteria, ImpalaObservation, QueryIdentity, Relation
 
 logger = logging.getLogger("dispatch.monitor_service")
 
@@ -64,6 +66,14 @@ class MonitorClient(Protocol):
     """
 
     def observe(self, identity: QueryIdentity) -> ImpalaObservation: ...
+
+    def discover_coordinators(self, seed_base_url: str) -> list[str]: ...
+
+    def discover(self, criteria: DiscoveryCriteria) -> QueryIdentity: ...
+
+
+class IdentityRecoveryError(Exception):
+    """Sanitized refusal from explicit operator identity recovery."""
 
 
 # --------------------------------------------------------------------------
@@ -88,6 +98,20 @@ class QueryAttempt:
     def identity_key(self) -> tuple[str, str]:
         return (self.coordinator_base_url, self.query_id)
 
+    def attempts_depth_first(self) -> tuple[QueryAttempt, ...]:
+        """Return this attempt and every transparent retry in event order."""
+        attempts = [self]
+        for retry in self.retries:
+            attempts.extend(retry.attempts_depth_first())
+        return tuple(attempts)
+
+    def latest_retry_leaf(self) -> QueryAttempt:
+        """Follow the newest transparent-retry branch to its deepest leaf."""
+        query = self
+        while query.retries:
+            query = query.retries[-1]
+        return query
+
 
 @dataclass(frozen=True)
 class ShellExecutionAttempt:
@@ -96,12 +120,27 @@ class ShellExecutionAttempt:
     transparent-retry chain)."""
 
     shell_execution_id: str
+    shell_relation: ShellRelation
     pool: str
     seq: int
     started_at: str | None = None
     finished_at: str | None = None
     returncode: int | None = None
     queries: tuple[QueryAttempt, ...] = field(default_factory=tuple)
+
+
+ShellRelation = Literal["initial", "orchestrator_pool_fallback", "unknown_legacy"]
+
+
+@dataclass(frozen=True)
+class OrchestratorCallAttempt:
+    """One manifest orchestrator call and its explicitly related shells."""
+
+    call_id: str
+    index: int | None
+    script: str | None
+    seq: int
+    shell_executions: tuple[ShellExecutionAttempt, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -115,13 +154,13 @@ class MonitorSnapshot:
     job_id: str
     available: bool
     unavailable_reason: str | None
-    shell_executions: tuple[ShellExecutionAttempt, ...] = field(default_factory=tuple)
+    orchestrator_calls: tuple[OrchestratorCallAttempt, ...] = field(default_factory=tuple)
     generation: int = 0
 
 
 def _unavailable_snapshot(job_id: str, reason: str) -> MonitorSnapshot:
     return MonitorSnapshot(
-        job_id=job_id, available=False, unavailable_reason=reason, shell_executions=()
+        job_id=job_id, available=False, unavailable_reason=reason, orchestrator_calls=()
     )
 
 
@@ -158,6 +197,7 @@ class _MutableQuery:
 class _MutableShell:
     shell_execution_id: str
     pool: str
+    shell_relation: ShellRelation
     seq: int
     started_at: str | None = None
     finished_at: str | None = None
@@ -167,12 +207,31 @@ class _MutableShell:
     def freeze(self) -> ShellExecutionAttempt:
         return ShellExecutionAttempt(
             shell_execution_id=self.shell_execution_id,
+            shell_relation=self.shell_relation,
             pool=self.pool,
             seq=self.seq,
             started_at=self.started_at,
             finished_at=self.finished_at,
             returncode=self.returncode,
             queries=tuple(query.freeze() for query in self.queries),
+        )
+
+
+@dataclass
+class _MutableCall:
+    call_id: str
+    index: int | None
+    script: str | None
+    seq: int
+    shells: list[_MutableShell] = field(default_factory=list)
+
+    def freeze(self) -> OrchestratorCallAttempt:
+        return OrchestratorCallAttempt(
+            call_id=self.call_id,
+            index=self.index,
+            script=self.script,
+            seq=self.seq,
+            shell_executions=tuple(shell.freeze() for shell in self.shells),
         )
 
 
@@ -204,7 +263,9 @@ class _HierarchyBuilder:
 
     def __init__(self) -> None:
         self._shells: dict[str, _MutableShell] = {}
-        self._shell_order: list[str] = []
+        self._shell_calls: dict[str, str] = {}
+        self._calls: dict[str, _MutableCall] = {}
+        self._call_order: list[str] = []
         self._seq_counter = 0
 
     def feed_line(self, line: str) -> None:
@@ -217,7 +278,8 @@ class _HierarchyBuilder:
             return
         if not isinstance(event, dict):
             return
-        if event.get("v") != 1:
+        version = event.get("v")
+        if version not in (1, 2):
             # Unknown/future event version: skip, don't crash.
             return
         event_type = event.get("type")
@@ -230,8 +292,12 @@ class _HierarchyBuilder:
         self._seq_counter += 1
         seq = self._seq_counter
 
+        call = self._call_for_event(version, shell_execution_id, event, seq)
+        if call is None:
+            return
+
         if event_type == "shell_started":
-            self._handle_shell_started(shell_execution_id, event, seq)
+            self._handle_shell_started(call, shell_execution_id, event, seq, version)
         elif event_type == "shell_finished":
             self._handle_shell_finished(shell_execution_id, event)
         elif event_type == "query_discovered":
@@ -239,28 +305,76 @@ class _HierarchyBuilder:
         elif event_type == "query_retried":
             self._handle_query_retried(shell_execution_id, event, seq)
 
-    def _handle_shell_started(self, shell_execution_id: str, event: dict, seq: int) -> None:
+    def _call_for_event(
+        self, version: int, shell_execution_id: str, event: dict, seq: int
+    ) -> _MutableCall | None:
+        if version == 1:
+            call_id = self._shell_calls.get(shell_execution_id)
+            if call_id is None:
+                call_id = f"legacy-{len(self._call_order) + 1:04d}-{shell_execution_id}"
+                self._calls[call_id] = _MutableCall(call_id, None, None, seq)
+                self._call_order.append(call_id)
+                self._shell_calls[shell_execution_id] = call_id
+            return self._calls[call_id]
+
+        call_id = event.get("orchestrator_call_id")
+        index = event.get("orchestrator_call_index")
+        script = event.get("orchestrator_script")
+        if (
+            not isinstance(call_id, str)
+            or not call_id
+            or not isinstance(index, int)
+            or isinstance(index, bool)
+            or index < 1
+            or not isinstance(script, str)
+            or not script
+        ):
+            return None
+        existing_shell_call = self._shell_calls.get(shell_execution_id)
+        if existing_shell_call is not None and existing_shell_call != call_id:
+            return None
+        call = self._calls.get(call_id)
+        if call is None:
+            call = _MutableCall(call_id, index, script, seq)
+            self._calls[call_id] = call
+            self._call_order.append(call_id)
+        elif call.index != index or call.script != script:
+            return None
+        self._shell_calls[shell_execution_id] = call_id
+        return call
+
+    def _handle_shell_started(
+        self, call: _MutableCall, shell_execution_id: str, event: dict, seq: int, version: int
+    ) -> None:
         if shell_execution_id in self._shells:
             return
         pool = event.get("pool")
         pool = pool if isinstance(pool, str) else ""
         ts = event.get("ts")
         ts = ts if isinstance(ts, str) else None
+        relation: ShellRelation = "unknown_legacy"
+        if version == 2:
+            candidate = event.get("shell_relation")
+            if candidate not in ("initial", "orchestrator_pool_fallback"):
+                return
+            relation = candidate
         self._shells[shell_execution_id] = _MutableShell(
-            shell_execution_id=shell_execution_id, pool=pool, seq=seq, started_at=ts
+            shell_execution_id=shell_execution_id,
+            pool=pool,
+            shell_relation=relation,
+            seq=seq,
+            started_at=ts,
         )
-        self._shell_order.append(shell_execution_id)
+        call.shells.append(self._shells[shell_execution_id])
 
-    def _ensure_shell(self, shell_execution_id: str, seq: int) -> _MutableShell:
+    def _ensure_shell(self, shell_execution_id: str, seq: int) -> _MutableShell | None:
         # A shell can legitimately be referenced by a query event before its
         # shell_started line is written (e.g. truncated tail catching up
         # mid-write); tolerate that by lazily creating the shell record
         # rather than dropping the event.
         shell = self._shells.get(shell_execution_id)
         if shell is None:
-            shell = _MutableShell(shell_execution_id=shell_execution_id, pool="", seq=seq)
-            self._shells[shell_execution_id] = shell
-            self._shell_order.append(shell_execution_id)
+            return None
         return shell
 
     def _handle_shell_finished(self, shell_execution_id: str, event: dict) -> None:
@@ -280,6 +394,8 @@ class _HierarchyBuilder:
         ts = event.get("ts")
         ts = ts if isinstance(ts, str) else ""
         shell = self._ensure_shell(shell_execution_id, seq)
+        if shell is None:
+            return
         shell.queries.append(
             _MutableQuery(
                 query_id=qid,
@@ -305,6 +421,8 @@ class _HierarchyBuilder:
         ts = event.get("ts")
         ts = ts if isinstance(ts, str) else ""
         parent = shell.queries[-1]
+        while parent.retries:
+            parent = parent.retries[-1]
         parent.retries.append(
             _MutableQuery(
                 query_id=qid,
@@ -316,8 +434,28 @@ class _HierarchyBuilder:
             )
         )
 
-    def shells(self) -> list[_MutableShell]:
-        return [self._shells[shell_id] for shell_id in self._shell_order]
+    def calls(self) -> list[_MutableCall]:
+        """Return all orchestrator calls in first-event order."""
+        return [self._calls[call_id] for call_id in self._call_order]
+
+    def shells(self, call: _MutableCall) -> list[_MutableShell]:
+        """Return every shell explicitly owned by ``call`` in event order."""
+        return list(call.shells)
+
+    def query_nodes(self) -> list[_MutableQuery]:
+        """Return all query nodes recursively, including superseded parents."""
+        nodes: list[_MutableQuery] = []
+
+        def visit(query: _MutableQuery) -> None:
+            nodes.append(query)
+            for retry in query.retries:
+                visit(retry)
+
+        for call in self.calls():
+            for shell in self.shells(call):
+                for query in shell.queries:
+                    visit(query)
+        return nodes
 
     def leaf_queries(self) -> list[_MutableQuery]:
         """Return every query attempt that should currently be polled.
@@ -327,9 +465,14 @@ class _HierarchyBuilder:
         retries is itself the live leaf.
         """
         leaves: list[_MutableQuery] = []
-        for shell in self.shells():
-            for query in shell.queries:
-                leaves.append(query.retries[-1] if query.retries else query)
+
+        def leaf(query: _MutableQuery) -> _MutableQuery:
+            return leaf(query.retries[-1]) if query.retries else query
+
+        for call in self.calls():
+            for shell in self.shells(call):
+                for query in shell.queries:
+                    leaves.append(leaf(query))
         return leaves
 
 
@@ -393,6 +536,14 @@ class _RealClock:
 
 
 _TERMINAL_PHASES = frozenset({"succeeded", "failed"})
+_EVENT_FILE_MAX_BYTES = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class _PollerKey:
+    job_id: str
+    coordinator_base_url: str
+    query_id: str
 
 
 @dataclass
@@ -411,6 +562,7 @@ class _QueryPollerState:
     next_poll_at: float = 0.0
     stopped: bool = False
     terminal_extra_poll_done: bool = False
+    superseded_final_pending: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -419,11 +571,24 @@ class _QueryPollerState:
 
 
 @dataclass
+class _TailState:
+    file_identity: tuple[int, int] | None = None
+    offset: int = 0
+    size: int = 0
+    mtime_ns: int = 0
+    pending: bytes = b""
+    builder: _HierarchyBuilder = field(default_factory=_HierarchyBuilder)
+
+
+@dataclass
 class _JobState:
     job_dir: Path
     subscriber_count: int = 0
     generation: int = 0
     builder: _HierarchyBuilder | None = None
+    tail: _TailState = field(default_factory=_TailState)
+    background_registered: bool = False
+    recovered_identities: dict[str, QueryIdentity] = field(default_factory=dict)
     snapshot: MonitorSnapshot = field(
         default_factory=lambda: _unavailable_snapshot("", "monitoring unavailable")
     )
@@ -457,8 +622,7 @@ class MonitorService:
 
         self._lock = threading.RLock()
         self._jobs: dict[str, _JobState] = {}
-        self._pollers: dict[tuple[str, str, str], _QueryPollerState] = {}
-        # keyed by (job_id, coordinator_base_url, query_id)
+        self._pollers: dict[_PollerKey, _QueryPollerState] = {}
 
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -525,6 +689,7 @@ class MonitorService:
             state.subscriber_count = max(0, state.subscriber_count - 1)
             if was_foreground and state.subscriber_count == 0:
                 self._reschedule_job_pollers_locked(job_id, tighten=False)
+                self._prune_job_if_finished_locked(job_id)
         self._wake_event.set()
 
     def _reschedule_job_pollers_locked(self, job_id: str, *, tighten: bool) -> None:
@@ -552,7 +717,7 @@ class MonitorService:
         now = self._clock.monotonic()
         horizon = now + cadence
         for key, poller in self._pollers.items():
-            if key[0] != job_id or poller.stopped:
+            if key.job_id != job_id or poller.stopped:
                 continue
             if tighten:
                 poller.next_poll_at = min(poller.next_poll_at, horizon)
@@ -583,10 +748,168 @@ class MonitorService:
             if state is None:
                 state = _JobState(job_dir=job_dir)
                 self._jobs[job_id] = state
+            state.background_registered = True
             self._refresh_job_locked(job_id, state)
             snapshot = state.snapshot
         self._wake_event.set()
         return snapshot
+
+    def sync_background_jobs(self, active_jobs: set[tuple[str, Path]]) -> None:
+        """Synchronize Dashboard-provided active manifests without rescanning."""
+        normalized = {(job_id, Path(job_dir)) for job_id, job_dir in active_jobs}
+        active_ids = {job_id for job_id, _ in normalized}
+        with self._lock:
+            for state in self._jobs.values():
+                state.background_registered = False
+            for job_id, job_dir in normalized:
+                state = self._jobs.get(job_id)
+                if state is None:
+                    state = _JobState(job_dir=job_dir)
+                    self._jobs[job_id] = state
+                else:
+                    state.job_dir = job_dir
+                state.background_registered = True
+                self._refresh_job_locked(job_id, state)
+            for job_id in list(self._jobs):
+                if job_id not in active_ids:
+                    self._prune_job_if_finished_locked(job_id)
+        self._wake_event.set()
+
+    def recovery_criteria(self, job_id: str, call_id: str) -> DiscoveryCriteria:
+        """Derive exact criteria for the one safely recoverable generated call."""
+        with self._lock:
+            state = self._jobs.get(job_id)
+            if state is None or state.builder is None:
+                raise IdentityRecoveryError("identity unavailable/ambiguous")
+            calls = [call for call in state.builder.calls() if call.call_id == call_id]
+            if len(calls) != 1:
+                raise IdentityRecoveryError("identity unavailable/ambiguous")
+            call = calls[0]
+            missing_shells = [shell for shell in call.shells if not shell.queries]
+            if (
+                call.index is None
+                or call.call_id.startswith("legacy-")
+                or call.script != "download_to_csv.py"
+                or len(missing_shells) != 1
+            ):
+                raise IdentityRecoveryError("identity unavailable/ambiguous")
+            shell = missing_shells[0]
+            job_dir = state.job_dir
+
+        try:
+            job_manifest = manifest.load(job_dir / "manifest.json")
+            source = job_manifest["source"]
+            destination = job_manifest["destination"]
+            calls_data = job_manifest["orchestrator_calls"]
+            started_at = job_manifest["started_at"]
+            user = job_manifest["user"]
+            if (
+                source.get("type") != "SqlFile"
+                or destination.get("type") != "Table+Csv"
+                or not isinstance(started_at, str)
+                or not isinstance(user, str)
+                or not user
+                or call.index > len(calls_data)
+            ):
+                raise ValueError
+            call_data = calls_data[call.index - 1]
+            if call_data.get("script") != call.script:
+                raise ValueError
+            argv = call_data.get("argv")
+            if not isinstance(argv, list) or "--query-file" in argv:
+                raise ValueError
+            positions = [index for index, value in enumerate(argv) if value == "--table-name"]
+            if len(positions) != 1 or positions[0] + 1 >= len(argv):
+                raise ValueError
+            full_table = argv[positions[0] + 1]
+            if not isinstance(full_table, str) or sql.validate_full_table(full_table):
+                raise ValueError
+            database, _ = full_table.split(".", 1)
+            started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            started = started.astimezone(timezone.utc)
+        except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
+            raise IdentityRecoveryError("identity unavailable/ambiguous") from exc
+
+        def impala_time(value: datetime) -> str:
+            return value.strftime("%Y-%m-%d %H:%M:%S.000000000")
+
+        return DiscoveryCriteria(
+            user=user,
+            statement_prefix=f"select * from {full_table};",
+            statement_type="QUERY",
+            database=database,
+            started_after=impala_time(started - timedelta(minutes=5)),
+            started_before=impala_time(started + timedelta(minutes=5)),
+            shell_execution_id=shell.shell_execution_id,
+            relation="initial",
+            orchestrator_call_id=call.call_id,
+            orchestrator_call_index=call.index,
+        )
+
+    def recover_identity(
+        self,
+        job_id: str,
+        call_id: str,
+        criteria: DiscoveryCriteria,
+        *,
+        seed_url: str | None = None,
+    ) -> MonitorSnapshot:
+        """Explicitly discover and attach one identity without durable writes."""
+        expected = self.recovery_criteria(job_id, call_id)
+        if criteria != expected:
+            raise IdentityRecoveryError("identity unavailable/ambiguous")
+        with self._lock:
+            state = self._jobs[job_id]
+            captured = [query.coordinator_base_url for query in state.builder.query_nodes()]  # type: ignore[union-attr]
+        seed = seed_url or (captured[0] if captured else config.impala_monitor_seed_url())
+        if not seed:
+            raise IdentityRecoveryError("identity unavailable/ambiguous")
+        try:
+            self._client.discover_coordinators(seed)
+            identity = self._client.discover(criteria)
+        except Exception as exc:
+            raise IdentityRecoveryError("identity unavailable/ambiguous") from exc
+        if (
+            identity.shell_execution_id != criteria.shell_execution_id
+            or identity.relation != "initial"
+        ):
+            raise IdentityRecoveryError("identity unavailable/ambiguous")
+
+        with self._lock:
+            state = self._jobs.get(job_id)
+            if state is None or state.builder is None:
+                raise IdentityRecoveryError("identity unavailable/ambiguous")
+            call = next((item for item in state.builder.calls() if item.call_id == call_id), None)
+            candidates = (
+                [] if call is None else [shell for shell in call.shells if not shell.queries]
+            )
+            identity_conflicts = any(
+                query.coordinator_base_url == identity.coordinator_base_url
+                and query.query_id == identity.query_id
+                for query in state.builder.query_nodes()
+            )
+            if (
+                len(candidates) != 1
+                or candidates[0].shell_execution_id != identity.shell_execution_id
+                or identity_conflicts
+            ):
+                raise IdentityRecoveryError("identity unavailable/ambiguous")
+            query = _MutableQuery(
+                query_id=identity.query_id,
+                coordinator_base_url=identity.coordinator_base_url,
+                relation=identity.relation,
+                shell_execution_id=identity.shell_execution_id,
+                discovered_at=identity.discovered_at,
+                seq=max((node.seq for node in state.builder.query_nodes()), default=0) + 1,
+            )
+            candidates[0].queries.append(query)
+            state.recovered_identities[call_id] = identity
+            state.generation += 1
+            state.snapshot = self._freeze_snapshot(job_id, state)
+            self._sync_pollers_locked(job_id, state, state.builder)
+            return state.snapshot
 
     # -- internal: replay + snapshot rebuild ------------------------------
 
@@ -601,43 +924,137 @@ class MonitorService:
         events_path = state.job_dir / "monitor.events.jsonl"
         previous_observations: dict[tuple[str, str], ImpalaObservation] = {}
         if state.builder is not None:
-            for leaf in state.builder.leaf_queries():
-                if leaf.observation is not None:
-                    previous_observations[(leaf.coordinator_base_url, leaf.query_id)] = (
-                        leaf.observation
+            for query in state.builder.query_nodes():
+                if query.observation is not None:
+                    previous_observations[(query.coordinator_base_url, query.query_id)] = (
+                        query.observation
                     )
 
-        builder = replay_event_file(events_path)
-        if builder is None:
-            state.builder = None
-            state.generation += 1
-            state.snapshot = _unavailable_snapshot(job_id, "monitoring unavailable")
-            self._prune_pollers_for_job(job_id, live_keys=set())
+        changed, unavailable_reason = self._tail_event_file(events_path, state.tail)
+        if unavailable_reason is not None:
+            if state.snapshot.available or state.snapshot.job_id != job_id:
+                state.generation += 1
+            calls = (
+                tuple(call.freeze() for call in state.builder.calls())
+                if state.builder is not None
+                else ()
+            )
+            state.snapshot = MonitorSnapshot(
+                job_id=job_id,
+                available=False,
+                unavailable_reason=unavailable_reason,
+                orchestrator_calls=calls,
+                generation=state.generation,
+            )
+            return
+        if not changed:
             return
 
-        for leaf in builder.leaf_queries():
-            key = (leaf.coordinator_base_url, leaf.query_id)
+        builder = state.tail.builder
+        self._reattach_recovered_identities(state, builder)
+        for query in builder.query_nodes():
+            key = (query.coordinator_base_url, query.query_id)
             if key in previous_observations:
-                leaf.observation = previous_observations[key]
+                query.observation = previous_observations[key]
 
         state.builder = builder
         state.generation += 1
-        state.snapshot = MonitorSnapshot(
+        state.snapshot = self._freeze_snapshot(job_id, state)
+
+        self._sync_pollers_locked(job_id, state, builder)
+
+    def _reattach_recovered_identities(self, state: _JobState, builder: _HierarchyBuilder) -> None:
+        for call_id, identity in state.recovered_identities.items():
+            call = next((item for item in builder.calls() if item.call_id == call_id), None)
+            if call is None:
+                continue
+            candidates = [
+                shell
+                for shell in call.shells
+                if shell.shell_execution_id == identity.shell_execution_id and not shell.queries
+            ]
+            if len(candidates) == 1:
+                candidates[0].queries.append(
+                    _MutableQuery(
+                        query_id=identity.query_id,
+                        coordinator_base_url=identity.coordinator_base_url,
+                        relation=identity.relation,
+                        shell_execution_id=identity.shell_execution_id,
+                        discovered_at=identity.discovered_at,
+                        seq=max((node.seq for node in builder.query_nodes()), default=0) + 1,
+                    )
+                )
+
+    def _freeze_snapshot(self, job_id: str, state: _JobState) -> MonitorSnapshot:
+        assert state.builder is not None
+        return MonitorSnapshot(
             job_id=job_id,
             available=True,
             unavailable_reason=None,
-            shell_executions=tuple(shell.freeze() for shell in builder.shells()),
+            orchestrator_calls=tuple(call.freeze() for call in state.builder.calls()),
             generation=state.generation,
         )
 
-        self._sync_pollers_locked(job_id, state, builder)
+    def _tail_event_file(self, path: Path, tail: _TailState) -> tuple[bool, str | None]:
+        """Advance one bounded per-job cursor without reopening unchanged files."""
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            if tail.file_identity is not None:
+                tail.file_identity = None
+                tail.offset = tail.size = tail.mtime_ns = 0
+                tail.pending = b""
+                tail.builder = _HierarchyBuilder()
+            return False, "monitoring unavailable"
+        except OSError:
+            return False, "monitoring unavailable"
+
+        identity = (stat.st_dev, stat.st_ino)
+        if (
+            tail.file_identity == identity
+            and tail.size == stat.st_size
+            and tail.mtime_ns == stat.st_mtime_ns
+        ):
+            return False, None
+
+        reset = (
+            tail.file_identity is None
+            or tail.file_identity != identity
+            or stat.st_size < tail.offset
+            or (stat.st_size == tail.size and stat.st_mtime_ns != tail.mtime_ns)
+        )
+        start = 0 if reset else tail.offset
+        to_read = min(max(stat.st_size - start, 0), _EVENT_FILE_MAX_BYTES - start)
+        try:
+            with path.open("rb") as handle:
+                handle.seek(start)
+                chunk = handle.read(to_read)
+        except OSError:
+            return False, "monitoring unavailable"
+
+        if reset:
+            tail.builder = _HierarchyBuilder()
+            tail.pending = b""
+        combined = tail.pending + chunk
+        complete, separator, pending = combined.rpartition(b"\n")
+        if separator:
+            for raw_line in complete.split(b"\n"):
+                tail.builder.feed_line(raw_line.decode("utf-8", errors="replace"))
+            tail.pending = pending
+        else:
+            tail.pending = combined
+        tail.file_identity = identity
+        tail.offset = start + len(chunk)
+        tail.size = stat.st_size
+        tail.mtime_ns = stat.st_mtime_ns
+        return True, None
 
     def _sync_pollers_locked(
         self, job_id: str, state: _JobState, builder: _HierarchyBuilder
     ) -> None:
-        live_keys: set[tuple[str, str, str]] = set()
+        live_keys: set[_PollerKey] = set()
         for leaf in builder.leaf_queries():
-            poller_key = (job_id, leaf.coordinator_base_url, leaf.query_id)
+            poller_key = _PollerKey(job_id, leaf.coordinator_base_url, leaf.query_id)
             live_keys.add(poller_key)
             existing = self._pollers.get(poller_key)
             if existing is not None:
@@ -657,23 +1074,29 @@ class MonitorService:
                 last_observation=leaf.observation,
                 next_poll_at=self._clock.monotonic(),
             )
-        self._prune_pollers_for_job(job_id, live_keys=live_keys)
+        self._mark_superseded_pollers_locked(job_id, live_keys=live_keys)
 
-    def _prune_pollers_for_job(self, job_id: str, *, live_keys: set[tuple[str, str, str]]) -> None:
-        """Drop every poller for ``job_id`` that is no longer a live leaf.
+    def _mark_superseded_pollers_locked(self, job_id: str, *, live_keys: set[_PollerKey]) -> None:
+        """Give newly superseded identities exactly one immediate final poll."""
+        for key, poller in self._pollers.items():
+            if key.job_id != job_id or key in live_keys or poller.stopped:
+                continue
+            if not poller.superseded_final_pending:
+                poller.superseded_final_pending = True
+                poller.next_poll_at = self._clock.monotonic()
 
-        A poller stops being live the moment a later refresh discovers a
-        ``query_retried`` (or any other hierarchy change) that supersedes it
-        -- not only when it has already reached a terminal observation. A
-        superseded poller must be removed unconditionally so it stops being
-        polled, preserving "exactly one poller per live query"; leaving it
-        behind until its (possibly never-reached) ``stopped`` flag is set
-        would let it keep polling forever alongside the query that replaced
-        it.
-        """
-        stale = [key for key in self._pollers if key[0] == job_id and key not in live_keys]
-        for key in stale:
-            del self._pollers[key]
+    def _prune_job_if_finished_locked(self, job_id: str) -> None:
+        state = self._jobs.get(job_id)
+        if state is None or state.background_registered or state.subscriber_count:
+            return
+        if any(
+            key.job_id == job_id and not poller.stopped for key, poller in self._pollers.items()
+        ):
+            return
+        self._pollers = {
+            key: poller for key, poller in self._pollers.items() if key.job_id != job_id
+        }
+        self._jobs.pop(job_id, None)
 
     # -- internal: background loop ----------------------------------------
 
@@ -717,6 +1140,8 @@ class MonitorService:
             self._poll_one(poller)
 
         with self._lock:
+            for job_id in list(self._jobs):
+                self._prune_job_if_finished_locked(job_id)
             upcoming = [p.next_poll_at for p in self._pollers.values() if not p.stopped]
         if not upcoming:
             return self._background_poll_seconds
@@ -740,6 +1165,11 @@ class MonitorService:
 
             self._attach_observation_locked(poller.job_id, poller.identity, poller.last_observation)
 
+            if poller.superseded_final_pending:
+                poller.superseded_final_pending = False
+                poller.stopped = True
+                return
+
             cadence = self._cadence_for(poller.job_id)
             if observation.phase in _TERMINAL_PHASES:
                 if poller.terminal_extra_poll_done:
@@ -756,7 +1186,7 @@ class MonitorService:
         state = self._jobs.get(job_id)
         if state is None or state.builder is None or observation is None:
             return
-        for leaf in state.builder.leaf_queries():
+        for leaf in state.builder.query_nodes():
             if (
                 leaf.coordinator_base_url == identity.coordinator_base_url
                 and leaf.query_id == identity.query_id
@@ -764,13 +1194,7 @@ class MonitorService:
                 leaf.observation = observation
                 break
         state.generation += 1
-        state.snapshot = MonitorSnapshot(
-            job_id=job_id,
-            available=True,
-            unavailable_reason=None,
-            shell_executions=tuple(shell.freeze() for shell in state.builder.shells()),
-            generation=state.generation,
-        )
+        state.snapshot = self._freeze_snapshot(job_id, state)
 
     # -- test/introspection helpers ---------------------------------------
 
@@ -780,7 +1204,7 @@ class MonitorService:
             return sum(
                 1
                 for key, poller in self._pollers.items()
-                if not poller.stopped and (job_id is None or key[0] == job_id)
+                if not poller.stopped and (job_id is None or key.job_id == job_id)
             )
 
     def run_pending(self) -> float:
