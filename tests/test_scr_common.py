@@ -876,9 +876,7 @@ class TestRunImpalaShellEventShape:
         _common.run_impala_shell([sys.executable, str(script)], pool="acs_small")
         _common.run_impala_shell([sys.executable, str(script)], pool="acs_large")
 
-        started = [
-            event for event in _read_events(events_path) if event["type"] == "shell_started"
-        ]
+        started = [event for event in _read_events(events_path) if event["type"] == "shell_started"]
         assert [event["shell_relation"] for event in started] == [
             "initial",
             "orchestrator_pool_fallback",
