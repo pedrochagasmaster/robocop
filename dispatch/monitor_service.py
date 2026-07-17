@@ -510,6 +510,14 @@ class _RealClock:
 
 
 _TERMINAL_PHASES = frozenset({"succeeded", "failed"})
+_EVENT_FILE_MAX_BYTES = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class _PollerKey:
+    job_id: str
+    coordinator_base_url: str
+    query_id: str
 
 
 @dataclass
@@ -528,6 +536,7 @@ class _QueryPollerState:
     next_poll_at: float = 0.0
     stopped: bool = False
     terminal_extra_poll_done: bool = False
+    superseded_final_pending: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -536,11 +545,22 @@ class _QueryPollerState:
 
 
 @dataclass
+class _TailState:
+    file_identity: tuple[int, int] | None = None
+    offset: int = 0
+    size: int = 0
+    mtime_ns: int = 0
+    pending: bytes = b""
+    builder: _HierarchyBuilder = field(default_factory=_HierarchyBuilder)
+
+
+@dataclass
 class _JobState:
     job_dir: Path
     subscriber_count: int = 0
     generation: int = 0
     builder: _HierarchyBuilder | None = None
+    tail: _TailState = field(default_factory=_TailState)
     snapshot: MonitorSnapshot = field(
         default_factory=lambda: _unavailable_snapshot("", "monitoring unavailable")
     )
@@ -574,8 +594,7 @@ class MonitorService:
 
         self._lock = threading.RLock()
         self._jobs: dict[str, _JobState] = {}
-        self._pollers: dict[tuple[str, str, str], _QueryPollerState] = {}
-        # keyed by (job_id, coordinator_base_url, query_id)
+        self._pollers: dict[_PollerKey, _QueryPollerState] = {}
 
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -669,7 +688,7 @@ class MonitorService:
         now = self._clock.monotonic()
         horizon = now + cadence
         for key, poller in self._pollers.items():
-            if key[0] != job_id or poller.stopped:
+            if key.job_id != job_id or poller.stopped:
                 continue
             if tighten:
                 poller.next_poll_at = min(poller.next_poll_at, horizon)
@@ -718,24 +737,37 @@ class MonitorService:
         events_path = state.job_dir / "monitor.events.jsonl"
         previous_observations: dict[tuple[str, str], ImpalaObservation] = {}
         if state.builder is not None:
-            for leaf in state.builder.leaf_queries():
-                if leaf.observation is not None:
-                    previous_observations[(leaf.coordinator_base_url, leaf.query_id)] = (
-                        leaf.observation
+            for query in state.builder.query_nodes():
+                if query.observation is not None:
+                    previous_observations[(query.coordinator_base_url, query.query_id)] = (
+                        query.observation
                     )
 
-        builder = replay_event_file(events_path)
-        if builder is None:
-            state.builder = None
-            state.generation += 1
-            state.snapshot = _unavailable_snapshot(job_id, "monitoring unavailable")
-            self._prune_pollers_for_job(job_id, live_keys=set())
+        changed, unavailable_reason = self._tail_event_file(events_path, state.tail)
+        if unavailable_reason is not None:
+            if state.snapshot.available or state.snapshot.job_id != job_id:
+                state.generation += 1
+            calls = (
+                tuple(call.freeze() for call in state.builder.calls())
+                if state.builder is not None
+                else ()
+            )
+            state.snapshot = MonitorSnapshot(
+                job_id=job_id,
+                available=False,
+                unavailable_reason=unavailable_reason,
+                orchestrator_calls=calls,
+                generation=state.generation,
+            )
+            return
+        if not changed:
             return
 
-        for leaf in builder.leaf_queries():
-            key = (leaf.coordinator_base_url, leaf.query_id)
+        builder = state.tail.builder
+        for query in builder.query_nodes():
+            key = (query.coordinator_base_url, query.query_id)
             if key in previous_observations:
-                leaf.observation = previous_observations[key]
+                query.observation = previous_observations[key]
 
         state.builder = builder
         state.generation += 1
@@ -749,12 +781,66 @@ class MonitorService:
 
         self._sync_pollers_locked(job_id, state, builder)
 
+    def _tail_event_file(self, path: Path, tail: _TailState) -> tuple[bool, str | None]:
+        """Advance one bounded per-job cursor without reopening unchanged files."""
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            if tail.file_identity is not None:
+                tail.file_identity = None
+                tail.offset = tail.size = tail.mtime_ns = 0
+                tail.pending = b""
+                tail.builder = _HierarchyBuilder()
+            return False, "monitoring unavailable"
+        except OSError:
+            return False, "monitoring unavailable"
+
+        identity = (stat.st_dev, stat.st_ino)
+        if (
+            tail.file_identity == identity
+            and tail.size == stat.st_size
+            and tail.mtime_ns == stat.st_mtime_ns
+        ):
+            return False, None
+
+        reset = (
+            tail.file_identity is None
+            or tail.file_identity != identity
+            or stat.st_size < tail.offset
+            or (stat.st_size == tail.size and stat.st_mtime_ns != tail.mtime_ns)
+        )
+        start = 0 if reset else tail.offset
+        to_read = min(max(stat.st_size - start, 0), _EVENT_FILE_MAX_BYTES - start)
+        try:
+            with path.open("rb") as handle:
+                handle.seek(start)
+                chunk = handle.read(to_read)
+        except OSError:
+            return False, "monitoring unavailable"
+
+        if reset:
+            tail.builder = _HierarchyBuilder()
+            tail.pending = b""
+        combined = tail.pending + chunk
+        complete, separator, pending = combined.rpartition(b"\n")
+        if separator:
+            for raw_line in complete.split(b"\n"):
+                tail.builder.feed_line(raw_line.decode("utf-8", errors="replace"))
+            tail.pending = pending
+        else:
+            tail.pending = combined
+        tail.file_identity = identity
+        tail.offset = start + len(chunk)
+        tail.size = stat.st_size
+        tail.mtime_ns = stat.st_mtime_ns
+        return True, None
+
     def _sync_pollers_locked(
         self, job_id: str, state: _JobState, builder: _HierarchyBuilder
     ) -> None:
-        live_keys: set[tuple[str, str, str]] = set()
+        live_keys: set[_PollerKey] = set()
         for leaf in builder.leaf_queries():
-            poller_key = (job_id, leaf.coordinator_base_url, leaf.query_id)
+            poller_key = _PollerKey(job_id, leaf.coordinator_base_url, leaf.query_id)
             live_keys.add(poller_key)
             existing = self._pollers.get(poller_key)
             if existing is not None:
@@ -774,23 +860,16 @@ class MonitorService:
                 last_observation=leaf.observation,
                 next_poll_at=self._clock.monotonic(),
             )
-        self._prune_pollers_for_job(job_id, live_keys=live_keys)
+        self._mark_superseded_pollers_locked(job_id, live_keys=live_keys)
 
-    def _prune_pollers_for_job(self, job_id: str, *, live_keys: set[tuple[str, str, str]]) -> None:
-        """Drop every poller for ``job_id`` that is no longer a live leaf.
-
-        A poller stops being live the moment a later refresh discovers a
-        ``query_retried`` (or any other hierarchy change) that supersedes it
-        -- not only when it has already reached a terminal observation. A
-        superseded poller must be removed unconditionally so it stops being
-        polled, preserving "exactly one poller per live query"; leaving it
-        behind until its (possibly never-reached) ``stopped`` flag is set
-        would let it keep polling forever alongside the query that replaced
-        it.
-        """
-        stale = [key for key in self._pollers if key[0] == job_id and key not in live_keys]
-        for key in stale:
-            del self._pollers[key]
+    def _mark_superseded_pollers_locked(self, job_id: str, *, live_keys: set[_PollerKey]) -> None:
+        """Give newly superseded identities exactly one immediate final poll."""
+        for key, poller in self._pollers.items():
+            if key.job_id != job_id or key in live_keys or poller.stopped:
+                continue
+            if not poller.superseded_final_pending:
+                poller.superseded_final_pending = True
+                poller.next_poll_at = self._clock.monotonic()
 
     # -- internal: background loop ----------------------------------------
 
@@ -857,6 +936,11 @@ class MonitorService:
 
             self._attach_observation_locked(poller.job_id, poller.identity, poller.last_observation)
 
+            if poller.superseded_final_pending:
+                poller.superseded_final_pending = False
+                poller.stopped = True
+                return
+
             cadence = self._cadence_for(poller.job_id)
             if observation.phase in _TERMINAL_PHASES:
                 if poller.terminal_extra_poll_done:
@@ -873,7 +957,7 @@ class MonitorService:
         state = self._jobs.get(job_id)
         if state is None or state.builder is None or observation is None:
             return
-        for leaf in state.builder.leaf_queries():
+        for leaf in state.builder.query_nodes():
             if (
                 leaf.coordinator_base_url == identity.coordinator_base_url
                 and leaf.query_id == identity.query_id
@@ -897,7 +981,7 @@ class MonitorService:
             return sum(
                 1
                 for key, poller in self._pollers.items()
-                if not poller.stopped and (job_id is None or key[0] == job_id)
+                if not poller.stopped and (job_id is None or key.job_id == job_id)
             )
 
     def run_pending(self) -> float:

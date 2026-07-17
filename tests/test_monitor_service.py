@@ -155,6 +155,91 @@ class FakeClock:
 
 
 class TestEventFileReplay:
+    def test_tail_skips_unchanged_body_and_reads_only_appended_suffix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        initial = event_line("shell_started")
+        write_events(events_path, [initial])
+        real_open = Path.open
+        open_count = 0
+        read_sizes: list[int] = []
+
+        class CountingReader:
+            def __init__(self, wrapped: object) -> None:
+                self.wrapped = wrapped
+
+            def __enter__(self) -> CountingReader:
+                self.wrapped.__enter__()  # type: ignore[attr-defined]
+                return self
+
+            def __exit__(self, *args: object) -> object:
+                return self.wrapped.__exit__(*args)  # type: ignore[attr-defined]
+
+            def seek(self, offset: int) -> int:
+                return self.wrapped.seek(offset)  # type: ignore[attr-defined,no-any-return]
+
+            def read(self, size: int = -1) -> bytes:
+                read_sizes.append(size)
+                return self.wrapped.read(size)  # type: ignore[attr-defined,no-any-return]
+
+        def counting_open(path: Path, mode: str = "r", *args: object, **kwargs: object):
+            nonlocal open_count
+            opened = real_open(path, mode, *args, **kwargs)
+            if path == events_path and mode == "rb":
+                open_count += 1
+                return CountingReader(opened)
+            return opened
+
+        monkeypatch.setattr(Path, "open", counting_open)
+        service = ms.MonitorService(FakeMonitorClient(), clock=FakeClock())
+        service.register_job("job-1", tmp_path)
+        assert open_count == 1
+        for _ in range(10):
+            service.run_pending()
+        assert open_count == 1
+
+        suffix = event_line("shell_finished", returncode=0)
+        size_before = events_path.stat().st_size
+        with real_open(events_path, "a", encoding="utf-8") as handle:
+            handle.write(suffix)
+        appended_bytes = events_path.stat().st_size - size_before
+        service.register_job("job-1", tmp_path)
+        assert open_count == 2
+        assert read_sizes[-1] == appended_bytes
+
+    def test_truncation_replays_once_then_returns_to_unchanged_fast_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                event_line("shell_started"),
+                event_line("query_discovered", coordinator_base_url=COORD_1, query_id=QID_1),
+            ],
+        )
+        real_open = Path.open
+        body_opens = 0
+
+        def counting_open(path: Path, mode: str = "r", *args: object, **kwargs: object):
+            nonlocal body_opens
+            if path == events_path and mode == "rb":
+                body_opens += 1
+            return real_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", counting_open)
+        service = ms.MonitorService(FakeMonitorClient(), clock=FakeClock())
+        service.register_job("job-1", tmp_path)
+        with real_open(events_path, "w", encoding="utf-8") as handle:
+            handle.write(event_line("shell_started", shell_execution_id="replacement"))
+        snapshot = service.register_job("job-1", tmp_path)
+        service.register_job("job-1", tmp_path)
+
+        assert body_opens == 2
+        shell = snapshot.orchestrator_calls[0].shell_executions[0]
+        assert shell.shell_execution_id == "replacement"
+
     def test_v2_groups_pool_fallback_shells_under_the_same_call(self, tmp_path: Path) -> None:
         events_path = tmp_path / "monitor.events.jsonl"
         write_events(
@@ -540,8 +625,12 @@ class TestEventFileReplay:
         assert snapshot.available is False
 
         # Writer appends shell_started, then a partial query_discovered line.
+        full_query_line = event_line(
+            "query_discovered", coordinator_base_url=COORD_1, query_id=QID_1, seq=2
+        )
+        partial_prefix = full_query_line[:35]
         events_path.write_text(
-            event_line("shell_started", pool="default", seq=1) + '{"v": 1, "type": "query_discove',
+            event_line("shell_started", pool="default", seq=1) + partial_prefix,
             encoding="utf-8",
         )
         snapshot = service.register_job("job-1", tmp_path)
@@ -549,12 +638,9 @@ class TestEventFileReplay:
         assert len(snapshot.orchestrator_calls) == 1
         assert snapshot.orchestrator_calls[0].shell_executions[0].queries == ()
 
-        # Writer completes the line and appends more.
-        events_path.write_text(
-            event_line("shell_started", pool="default", seq=1)
-            + event_line("query_discovered", coordinator_base_url=COORD_1, query_id=QID_1, seq=2),
-            encoding="utf-8",
-        )
+        # Writer completes the same append-only line.
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write(full_query_line[len(partial_prefix) :])
         snapshot = service.register_job("job-1", tmp_path)
         assert snapshot.available is True
         shell = snapshot.orchestrator_calls[0].shell_executions[0]
@@ -578,6 +664,48 @@ class TestPolling:
             ],
         )
         return tmp_path
+
+    def test_superseded_attempt_keeps_failure_and_gets_one_final_confirmation(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = self._job_with_one_running_query(tmp_path) / "monitor.events.jsonl"
+        client = FakeMonitorClient()
+        client.queue(
+            COORD_1,
+            QID_1,
+            make_observation(phase="failed", raw_state="EXCEPTION"),
+            make_observation(
+                phase="unknown", raw_state=None, availability_error="Unknown query id"
+            ),
+        )
+        client.queue(COORD_1, QID_RETRY, make_observation(phase="running"))
+        clock = FakeClock()
+        service = ms.MonitorService(client, clock=clock, foreground_poll_seconds=2.0)
+        service.subscribe("job-1", tmp_path)
+        service.run_pending()
+
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                event_line(
+                    "query_retried",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_RETRY,
+                    seq=3,
+                )
+            )
+        service.run_pending()
+
+        parent = service.snapshot("job-1").orchestrator_calls[0].shell_executions[0].queries[0]
+        assert parent.observation is not None
+        assert parent.observation.raw_state == "EXCEPTION"
+        assert parent.observation.phase == "failed"
+        assert parent.observation.availability_error == "Unknown query id"
+        assert parent.retries[0].observation is not None
+        assert [call.query_id for call in client.calls].count(QID_1) == 2
+
+        clock.advance(10.0)
+        service.run_pending()
+        assert [call.query_id for call in client.calls].count(QID_1) == 2
 
     def test_poller_shared_across_two_subscribers_one_client_call_stream(
         self, tmp_path: Path
@@ -848,13 +976,14 @@ class TestPolling:
         leaf = snapshot.orchestrator_calls[0].shell_executions[0].queries[0]
         assert leaf.retries[-1].query_id == QID_RETRY
 
-        # Only the retry gets polled from here on -- QID_1 must never be
-        # observed again.
+        # QID_1 received exactly one immediate final confirmation poll when
+        # superseded; only the retry gets polled from here on.
+        assert [call.query_id for call in client.calls].count(QID_1) == 2
         clock.advance(2.0)
         service.run_pending()
         polled_ids = {call.query_id for call in client.calls}
         assert QID_RETRY in polled_ids
-        assert all(call.query_id != QID_1 for call in client.calls[1:])
+        assert [call.query_id for call in client.calls].count(QID_1) == 2
 
 
 # --------------------------------------------------------------------------
