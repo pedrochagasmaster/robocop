@@ -40,6 +40,54 @@ def render_monthly_sql(sql_template: str, date_inicio: str, date_fim: str) -> st
     )
 
 
+def _strip_terminal_semicolon(sql: str) -> str:
+    """Remove the final SQL delimiter while preserving comments and quoted text."""
+    state = "sql"
+    last_sql_index = None
+    index = 0
+
+    while index < len(sql):
+        char = sql[index]
+        next_char = sql[index + 1] if index + 1 < len(sql) else ""
+
+        if state == "line_comment":
+            if char == "\n":
+                state = "sql"
+        elif state == "block_comment":
+            if char == "*" and next_char == "/":
+                index += 1
+                state = "sql"
+        elif state in {"single_quote", "double_quote"}:
+            last_sql_index = index
+            quote = "'" if state == "single_quote" else '"'
+            if char == quote:
+                if next_char == quote:
+                    index += 1
+                    last_sql_index = index
+                else:
+                    state = "sql"
+        elif char == "-" and next_char == "-":
+            index += 1
+            state = "line_comment"
+        elif char == "/" and next_char == "*":
+            index += 1
+            state = "block_comment"
+        elif char == "'":
+            last_sql_index = index
+            state = "single_quote"
+        elif char == '"':
+            last_sql_index = index
+            state = "double_quote"
+        elif not char.isspace():
+            last_sql_index = index
+
+        index += 1
+
+    if last_sql_index is not None and sql[last_sql_index] == ";":
+        return sql[:last_sql_index] + sql[last_sql_index + 1:]
+    return sql
+
+
 def execute_step_with_retry(query: str, operation_desc: str, args):
     """
     Manages the retry logic for a single logical monthly job.
@@ -102,16 +150,16 @@ def build_monthly_job_query(args, sql_template: str) -> tuple[str, list[str], st
         date_inicio_str, date_fim_str = str(date.date()), str(month_end_date.date())
         dt_ano_mes = date.strftime('%Y%m')
         temp_table_name = f"{args.schema}.{args.table_name}_temp_{dt_ano_mes}"
-        # Strip a trailing ';' from the user template so we always emit exactly
-        # one terminator after CREATE ... AS <select>.  Without it, the next
-        # DROP/CREATE is glued into the same Impala parse (SYNTAX_ERROR).
-        monthly_sql = render_monthly_sql(sql_template, date_inicio_str, date_fim_str).rstrip().rstrip(";")
+        monthly_sql = _strip_terminal_semicolon(
+            render_monthly_sql(sql_template, date_inicio_str, date_fim_str)
+        )
         statements.append(f"""
             DROP TABLE IF EXISTS {temp_table_name};
             CREATE TABLE {temp_table_name}
             STORED AS parquet LOCATION '/das/{schema_prefix}/enc/{args.user}/{args.table_name}_temp_{dt_ano_mes}'
             AS
-            {monthly_sql};
+            {monthly_sql}
+            ;
         """)
 
     union_query_parts = [f"SELECT * FROM {table}" for table in planned_temp_tables]

@@ -37,7 +37,60 @@ def _args(tmp_path: Path) -> Namespace:
 
 def _impala_statements(query: str) -> list[str]:
     """Split a multi-statement Impala script the way ``impala-shell -q`` does."""
-    return [part.strip() for part in query.split(";") if part.strip()]
+    statements = []
+    statement = []
+    state = "sql"
+    index = 0
+
+    while index < len(query):
+        char = query[index]
+        next_char = query[index + 1] if index + 1 < len(query) else ""
+
+        if state == "line_comment":
+            statement.append(char)
+            if char == "\n":
+                state = "sql"
+        elif state == "block_comment":
+            statement.append(char)
+            if char == "*" and next_char == "/":
+                statement.append(next_char)
+                index += 1
+                state = "sql"
+        elif state in {"single_quote", "double_quote"}:
+            statement.append(char)
+            quote = "'" if state == "single_quote" else '"'
+            if char == quote:
+                if next_char == quote:
+                    statement.append(next_char)
+                    index += 1
+                else:
+                    state = "sql"
+        elif char == "-" and next_char == "-":
+            statement.extend((char, next_char))
+            index += 1
+            state = "line_comment"
+        elif char == "/" and next_char == "*":
+            statement.extend((char, next_char))
+            index += 1
+            state = "block_comment"
+        elif char == "'":
+            statement.append(char)
+            state = "single_quote"
+        elif char == '"':
+            statement.append(char)
+            state = "double_quote"
+        elif char == ";":
+            if text := "".join(statement).strip():
+                statements.append(text)
+            statement = []
+        else:
+            statement.append(char)
+
+        index += 1
+
+    if text := "".join(statement).strip():
+        statements.append(text)
+    return statements
 
 
 def test_build_monthly_job_query_keeps_temp_join_and_cleanup_in_one_script(tmp_path: Path) -> None:
@@ -66,24 +119,32 @@ def test_build_monthly_job_query_keeps_temp_join_and_cleanup_in_one_script(tmp_p
 
 
 @pytest.mark.parametrize(
-    "sql_template",
+    ("sql_template", "rendered_tail"),
     [
-        # User templates often omit a trailing semicolon.
         (
-            "select dw_process_date from core.clear_dtl_enc "
-            "where dw_process_date between '{date_inicio}' and '{date_fim}' "
-            "limit 10"
+            "SELECT '{date_inicio}' AS start_dt, '{date_fim}' AS end_dt",
+            "SELECT '2026-05-01' AS start_dt, '2026-05-31' AS end_dt",
         ),
-        # And often include one — either way the script must stay separable.
         (
-            "select dw_process_date from core.clear_dtl_enc "
-            "where dw_process_date between '{date_inicio}' and '{date_fim}' "
-            "limit 10;"
+            "SELECT '{date_inicio}' AS start_dt, '{date_fim}' AS end_dt;",
+            "SELECT '2026-05-01' AS start_dt, '2026-05-31' AS end_dt",
+        ),
+        (
+            "SELECT '{date_inicio}' AS start_dt, '{date_fim}' AS end_dt; -- keep this",
+            "SELECT '2026-05-01' AS start_dt, '2026-05-31' AS end_dt -- keep this",
+        ),
+        (
+            "SELECT '{date_inicio}' AS start_dt, '{date_fim}' AS end_dt; /* keep this */",
+            "SELECT '2026-05-01' AS start_dt, '2026-05-31' AS end_dt /* keep this */",
+        ),
+        (
+            "SELECT ';' AS marker, '{date_inicio}' AS start_dt, '{date_fim}' AS end_dt",
+            "SELECT ';' AS marker, '2026-05-01' AS start_dt, '2026-05-31' AS end_dt",
         ),
     ],
 )
 def test_build_monthly_job_query_terminates_every_statement_with_semicolon(
-    tmp_path: Path, sql_template: str
+    tmp_path: Path, sql_template: str, rendered_tail: str
 ) -> None:
     """Regression: CREATE fulljoin + cleanup DROP must not share one Impala parse.
 
@@ -94,6 +155,8 @@ def test_build_monthly_job_query_terminates_every_statement_with_semicolon(
     args = _args(tmp_path)
     query, temp_tables, final_table = monthly.build_monthly_job_query(args, sql_template)
     statements = _impala_statements(query)
+
+    assert query.count(f"{rendered_tail}\n            ;") == 1
 
     def _created_table(statement: str) -> str:
         # "CREATE TABLE schema.name ..." -> "schema.name"
