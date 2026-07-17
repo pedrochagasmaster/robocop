@@ -32,6 +32,7 @@ import os
 import threading
 from pathlib import Path
 
+import pytest
 from textual.app import App
 from textual.widgets import Button, Static
 
@@ -296,6 +297,7 @@ class FakeMonitorService:
         self.snapshots: dict[str, ms.MonitorSnapshot] = {}
         self.subscribe_calls: list[str] = []
         self.unsubscribe_calls: list[str] = []
+        self.foreground_subscribers = 0
         self.recovery_criteria_calls: list[tuple[str, str]] = []
         self.recover_calls: list[tuple[str, str, object, str | None]] = []
         self.recover_exception: Exception | None = None
@@ -306,10 +308,12 @@ class FakeMonitorService:
 
     def subscribe(self, job_id: str, job_dir: Path) -> ms.MonitorSnapshot:
         self.subscribe_calls.append(job_id)
+        self.foreground_subscribers += 1
         return self.snapshot(job_id)
 
     def unsubscribe(self, job_id: str) -> None:
         self.unsubscribe_calls.append(job_id)
+        self.foreground_subscribers -= 1
 
     def snapshot(self, job_id: str) -> ms.MonitorSnapshot:
         return self.snapshots.get(
@@ -346,6 +350,7 @@ class BlockingMonitorService(FakeMonitorService):
 
     def subscribe(self, job_id: str, job_dir: Path) -> ms.MonitorSnapshot:
         self.subscribe_calls.append(job_id)
+        self.foreground_subscribers += 1
         self.entered.set()
         assert self.release.wait(timeout=2.0), "test did not release monitor subscribe"
         return ms.MonitorSnapshot(job_id=job_id, available=True, unavailable_reason=None)
@@ -360,7 +365,7 @@ async def _mount_job_detail(
 
 
 class TestJobDetailMonitorPanel:
-    def test_late_subscribe_after_pop_is_compensated_without_paint(
+    def test_cancelled_late_subscribe_after_pop_is_compensated_without_paint(
         self, mock_env_with_config
     ) -> None:
         data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
@@ -371,6 +376,9 @@ class TestJobDetailMonitorPanel:
         class PaintCountingScreen(JobDetailScreen):
             monitor_paints = 0
 
+            async def _start_monitoring_async(self) -> None:
+                """Let this test own and explicitly cancel the subscribe task."""
+
             def _apply_monitor_snapshot(self, snapshot: ms.MonitorSnapshot) -> None:
                 self.monitor_paints += 1
                 super()._apply_monitor_snapshot(snapshot)
@@ -379,16 +387,15 @@ class TestJobDetailMonitorPanel:
             app = DispatchApp()
             async with app.run_test(size=(120, 40)) as pilot:
                 screen = PaintCountingScreen(job_id, monitor_service=service)  # type: ignore[arg-type]
-
-                async def pop_and_release() -> None:
-                    while not service.entered.is_set():
-                        await asyncio.sleep(0.01)
-                    app.pop_screen()
-                    service.release.set()
-
-                compensator = asyncio.create_task(pop_and_release())
-                app.push_screen(screen)
-                await compensator
+                await app.push_screen(screen)
+                subscribe_task = asyncio.create_task(screen._subscribe_monitor_async())
+                while not service.entered.is_set():
+                    await asyncio.sleep(0.01)
+                app.pop_screen()
+                subscribe_task.cancel()
+                service.release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await subscribe_task
                 await pilot.pause(0.2)
                 return screen
 
@@ -397,6 +404,9 @@ class TestJobDetailMonitorPanel:
         assert service.unsubscribe_calls == [job_id]
         assert screen.monitor_paints == 0
         assert screen._monitor_subscribed is False
+        assert service.foreground_subscribers == 0
+        assert screen._monitor_refresh_in_flight is False
+        assert screen._monitor_timer is None
 
     def test_job_detail_layout_is_bounded_and_restores_history_across_sizes(
         self, mock_env_with_config, monkeypatch
@@ -616,6 +626,43 @@ class TestJobDetailMonitorPanel:
         assert "running" in attempt_text.lower()
         # The history line must show the retry as its own entry.
         assert "retry" in history_text.lower()
+
+    def test_nested_retry_chain_uses_deepest_leaf_and_renders_every_attempt(self) -> None:
+        final_retry = _query(
+            "cccccccccccccccc:dddddddddddddddd",
+            relation="transparent_retry",
+            observation=_observation(phase="running", raw_state="RUNNING"),
+            seq=3,
+        )
+        first_retry = _query(
+            QID_RETRY,
+            relation="transparent_retry",
+            observation=_observation(phase="failed", raw_state="EXCEPTION"),
+            retries=(final_retry,),
+            seq=2,
+        )
+        initial = _query(
+            QID_1,
+            observation=_observation(phase="failed", raw_state="EXCEPTION"),
+            retries=(first_retry,),
+        )
+        shell = ms.ShellExecutionAttempt(
+            shell_execution_id="shell-1",
+            shell_relation="initial",
+            pool="default",
+            seq=1,
+            queries=(initial,),
+        )
+        screen = JobDetailScreen("job")
+
+        snapshot = _snapshot_with_shells("job", shell)
+        leaf = screen._current_leaf_attempt(snapshot)
+        history = screen._format_attempt_history(snapshot)
+
+        assert leaf is final_retry
+        assert "running" in screen._format_current_attempt(leaf).lower()
+        assert history.lower().count("attempt failed; job retrying") == 2
+        assert "attempt history (3 total)" in history.lower()
 
     def test_mid_chain_exception_reads_attempt_failed_job_retrying(
         self, mock_env_with_config

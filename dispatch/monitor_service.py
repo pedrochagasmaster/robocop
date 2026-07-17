@@ -407,6 +407,8 @@ class _HierarchyBuilder:
         ts = event.get("ts")
         ts = ts if isinstance(ts, str) else ""
         parent = shell.queries[-1]
+        while parent.retries:
+            parent = parent.retries[-1]
         parent.retries.append(
             _MutableQuery(
                 query_id=qid,

@@ -32,6 +32,7 @@ QID_1 = "1a2b3c4d5e6f7081:9192a3b4c5d6e7f8"
 QID_2 = "2a2b3c4d5e6f7081:9192a3b4c5d6e7f8"
 QID_3 = "3a2b3c4d5e6f7081:9192a3b4c5d6e7f8"
 QID_RETRY = "aaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb"
+QID_RETRY_2 = "cccccccccccccccc:dddddddddddddddd"
 
 
 def event_line(
@@ -510,6 +511,63 @@ class TestEventFileReplay:
         leaves = builder.leaf_queries()
         assert len(leaves) == 1
         assert leaves[0].query_id == QID_RETRY
+
+    def test_sequential_retries_form_recursive_chain_and_poll_only_grandchild(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                event_line("shell_started", pool="default", seq=1),
+                event_line(
+                    "query_discovered",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_1,
+                    seq=2,
+                ),
+                event_line(
+                    "query_retried",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_RETRY,
+                    seq=3,
+                ),
+                event_line(
+                    "query_retried",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_RETRY_2,
+                    seq=4,
+                ),
+            ],
+        )
+
+        builder = ms.replay_event_file(events_path)
+        assert builder is not None
+        root = builder.shells(builder.calls()[0])[0].queries[0]
+        child = root.retries[0]
+        grandchild = child.retries[0]
+        assert root.query_id == QID_1
+        assert child.query_id == QID_RETRY
+        assert grandchild.query_id == QID_RETRY_2
+        assert [query.query_id for query in builder.query_nodes()] == [
+            QID_1,
+            QID_RETRY,
+            QID_RETRY_2,
+        ]
+        assert [query.query_id for query in builder.leaf_queries()] == [QID_RETRY_2]
+
+        client = FakeMonitorClient()
+        client.default_response = make_observation(phase="running")
+        service = ms.MonitorService(client, clock=FakeClock(), foreground_poll_seconds=2.0)
+        service.subscribe("job-1", tmp_path)
+        service.run_pending()
+
+        assert [call.query_id for call in client.calls] == [QID_RETRY_2]
+        assert service.poller_count("job-1") == 1
+        snapshot_root = (
+            service.snapshot("job-1").orchestrator_calls[0].shell_executions[0].queries[0]
+        )
+        assert snapshot_root.retries[0].retries[0].observation is not None
 
     def test_query_retried_with_no_prior_query_is_dropped_tolerantly(self, tmp_path: Path) -> None:
         events_path = tmp_path / "monitor.events.jsonl"
