@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -569,25 +570,27 @@ def test_synthetic_retry_fixtures_are_flagged() -> None:
 
 
 def test_importing_impala_monitor_pulls_in_no_http_or_textual_modules() -> None:
-    forbidden_prefixes = ("http.client", "urllib.request", "textual")
-    # Force a fresh import so we observe exactly what dispatch.impala_monitor
-    # itself causes to load, independent of module import order in this test
-    # session (other test modules may have already imported urllib elsewhere).
-    for mod_name in list(sys.modules):
-        if mod_name == "dispatch.impala_monitor" or mod_name.startswith("dispatch.impala_monitor."):
-            del sys.modules[mod_name]
-    for forbidden in forbidden_prefixes:
-        for mod_name in list(sys.modules):
-            if mod_name == forbidden or mod_name.startswith(forbidden + "."):
-                del sys.modules[mod_name]
-
-    import dispatch.impala_monitor  # noqa: F401
-
-    for mod_name in sys.modules:
-        for forbidden in forbidden_prefixes:
-            assert not (mod_name == forbidden or mod_name.startswith(forbidden + ".")), (
-                f"importing dispatch.impala_monitor pulled in {mod_name}"
-            )
+    # Check the import in a fresh subprocess interpreter. Mutating this
+    # process's sys.modules instead (deleting textual/urllib entries) leaves
+    # two generations of those modules alive and breaks every Textual test
+    # that later runs in the same pytest-xdist worker.
+    probe = (
+        "import sys\n"
+        "import dispatch.impala_monitor\n"
+        "forbidden = ('http.client', 'urllib.request', 'textual')\n"
+        "bad = [m for m in sys.modules\n"
+        "       if any(m == f or m.startswith(f + '.') for f in forbidden)]\n"
+        "if bad:\n"
+        "    print('pulled in: ' + ', '.join(sorted(bad)))\n"
+        "    sys.exit(1)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, (
+        f"importing dispatch.impala_monitor in a fresh interpreter loaded "
+        f"forbidden modules: {result.stdout}{result.stderr}"
+    )
 
 
 def test_module_source_has_no_http_or_textual_imports() -> None:
