@@ -57,6 +57,26 @@ def event_line(
     return json.dumps(payload, sort_keys=True) + "\n"
 
 
+def v2_event_line(
+    event_type: str,
+    *,
+    call_id: str = "call-0001",
+    call_index: int = 1,
+    script: str = "download_to_csv.py",
+    shell_relation: str = "initial",
+    **kwargs: object,
+) -> str:
+    payload = json.loads(event_line(event_type, **kwargs))
+    payload.update(
+        v=2,
+        orchestrator_call_id=call_id,
+        orchestrator_call_index=call_index,
+        orchestrator_script=script,
+        shell_relation=shell_relation,
+    )
+    return json.dumps(payload, sort_keys=True) + "\n"
+
+
 def write_events(path: Path, lines: list[str]) -> None:
     path.write_text("".join(lines), encoding="utf-8")
 
@@ -135,6 +155,108 @@ class FakeClock:
 
 
 class TestEventFileReplay:
+    def test_v2_groups_pool_fallback_shells_under_the_same_call(self, tmp_path: Path) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                v2_event_line("shell_started", shell_execution_id="shell-a"),
+                v2_event_line(
+                    "query_discovered",
+                    shell_execution_id="shell-a",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_1,
+                ),
+                v2_event_line(
+                    "shell_started",
+                    shell_execution_id="shell-b",
+                    pool="adhoc",
+                    shell_relation="orchestrator_pool_fallback",
+                ),
+                v2_event_line(
+                    "query_discovered",
+                    shell_execution_id="shell-b",
+                    pool="adhoc",
+                    shell_relation="orchestrator_pool_fallback",
+                    coordinator_base_url=COORD_2,
+                    query_id=QID_2,
+                ),
+            ],
+        )
+
+        builder = ms.replay_event_file(events_path)
+        assert builder is not None
+        calls = builder.calls()
+        assert [(call.call_id, call.index, call.script) for call in calls] == [
+            ("call-0001", 1, "download_to_csv.py")
+        ]
+        assert [shell.shell_relation for shell in builder.shells(calls[0])] == [
+            "initial",
+            "orchestrator_pool_fallback",
+        ]
+
+    def test_v2_separate_manifest_calls_are_not_fallbacks(self, tmp_path: Path) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                v2_event_line("shell_started", shell_execution_id="shell-a"),
+                v2_event_line(
+                    "shell_started",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-b",
+                ),
+            ],
+        )
+
+        builder = ms.replay_event_file(events_path)
+        assert builder is not None
+        calls = builder.calls()
+        assert [call.call_id for call in calls] == ["call-0001", "call-0002"]
+        assert [call.shells[0].shell_relation for call in calls] == ["initial", "initial"]
+
+    def test_v2_conflicting_call_metadata_is_skipped(self, tmp_path: Path) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                v2_event_line("shell_started", shell_execution_id="shell-a"),
+                v2_event_line(
+                    "query_discovered",
+                    shell_execution_id="shell-a",
+                    script="conflicting.py",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_1,
+                ),
+            ],
+        )
+
+        builder = ms.replay_event_file(events_path)
+        assert builder is not None
+        assert builder.calls()[0].shells[0].queries == []
+
+    def test_mixed_v1_and_v2_never_invents_legacy_lineage(self, tmp_path: Path) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                event_line("shell_started", shell_execution_id="legacy-a"),
+                event_line("shell_started", shell_execution_id="legacy-b"),
+                v2_event_line("shell_started", shell_execution_id="v2-a"),
+            ],
+        )
+
+        builder = ms.replay_event_file(events_path)
+        assert builder is not None
+        calls = builder.calls()
+        assert len(calls) == 3
+        assert calls[0].shells[0].shell_relation == "unknown_legacy"
+        assert calls[1].shells[0].shell_relation == "unknown_legacy"
+        assert calls[0].call_id != calls[1].call_id
+        assert calls[2].shells[0].shell_relation == "initial"
+
     def test_absent_file_means_monitoring_unavailable(self, tmp_path: Path) -> None:
         builder = ms.replay_event_file(tmp_path / "monitor.events.jsonl")
         assert builder is None
@@ -145,7 +267,7 @@ class TestEventFileReplay:
         snapshot = service.register_job("job-1", tmp_path)
         assert snapshot.available is False
         assert snapshot.unavailable_reason == "monitoring unavailable"
-        assert snapshot.shell_executions == ()
+        assert snapshot.orchestrator_calls == ()
 
     def test_single_shell_single_query(self, tmp_path: Path) -> None:
         events_path = tmp_path / "monitor.events.jsonl"
@@ -163,7 +285,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 1
         assert shells[0].pool == "default"
         assert shells[0].returncode == 0
@@ -206,7 +328,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 1
         queries = shells[0].queries
         assert [q.query_id for q in queries] == [QID_1, QID_2, QID_3]
@@ -244,7 +366,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 2
         assert shells[0].pool == "default"
         assert shells[0].queries[0].query_id == QID_1
@@ -278,7 +400,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 1
         query = shells[0].queries[0]
         assert query.query_id == QID_1
@@ -307,7 +429,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 1
         assert shells[0].queries == []
 
@@ -340,7 +462,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 1
         # Only the v1 query is present; the v2 event was skipped.
         assert [q.query_id for q in shells[0].queries] == [QID_1]
@@ -361,7 +483,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        assert len(builder.shells()) == 1
+        assert sum(len(builder.shells(call)) for call in builder.calls()) == 1
 
     def test_malformed_json_line_is_skipped(self, tmp_path: Path) -> None:
         events_path = tmp_path / "monitor.events.jsonl"
@@ -380,7 +502,7 @@ class TestEventFileReplay:
         )
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 1
         assert [q.query_id for q in shells[0].queries] == [QID_1]
 
@@ -394,7 +516,7 @@ class TestEventFileReplay:
 
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        shells = builder.shells()
+        shells = [shell for call in builder.calls() for shell in builder.shells(call)]
         assert len(shells) == 1
         assert [q.query_id for q in shells[0].queries] == [QID_1]
 
@@ -403,7 +525,7 @@ class TestEventFileReplay:
         events_path.write_text("", encoding="utf-8")
         builder = ms.replay_event_file(events_path)
         assert builder is not None
-        assert builder.shells() == []
+        assert builder.calls() == []
 
     def test_interleaved_partial_line_tail_across_refreshes(self, tmp_path: Path) -> None:
         """Simulates a service repeatedly re-reading a file while a writer
@@ -424,8 +546,8 @@ class TestEventFileReplay:
         )
         snapshot = service.register_job("job-1", tmp_path)
         assert snapshot.available is True
-        assert len(snapshot.shell_executions) == 1
-        assert snapshot.shell_executions[0].queries == ()
+        assert len(snapshot.orchestrator_calls) == 1
+        assert snapshot.orchestrator_calls[0].shell_executions[0].queries == ()
 
         # Writer completes the line and appends more.
         events_path.write_text(
@@ -435,8 +557,9 @@ class TestEventFileReplay:
         )
         snapshot = service.register_job("job-1", tmp_path)
         assert snapshot.available is True
-        assert len(snapshot.shell_executions[0].queries) == 1
-        assert snapshot.shell_executions[0].queries[0].query_id == QID_1
+        shell = snapshot.orchestrator_calls[0].shell_executions[0]
+        assert len(shell.queries) == 1
+        assert shell.queries[0].query_id == QID_1
 
 
 # --------------------------------------------------------------------------
@@ -567,7 +690,7 @@ class TestPolling:
         assert len(client.calls) == 3
 
         snapshot = service.snapshot("job-1")
-        leaf_observation = snapshot.shell_executions[0].queries[0].observation
+        leaf_observation = snapshot.orchestrator_calls[0].shell_executions[0].queries[0].observation
         assert leaf_observation is not None
         assert leaf_observation.phase == "succeeded"
 
@@ -607,7 +730,7 @@ class TestPolling:
 
         service.run_pending()
         snapshot = service.snapshot("job-1")
-        observation = snapshot.shell_executions[0].queries[0].observation
+        observation = snapshot.orchestrator_calls[0].shell_executions[0].queries[0].observation
         assert observation is not None
         assert observation.phase == "running"
         assert observation.availability_error is None
@@ -615,7 +738,7 @@ class TestPolling:
         clock.advance(2.0)
         service.run_pending()
         snapshot = service.snapshot("job-1")
-        observation = snapshot.shell_executions[0].queries[0].observation
+        observation = snapshot.orchestrator_calls[0].shell_executions[0].queries[0].observation
         assert observation is not None
         # Retains the last good phase/state...
         assert observation.phase == "running"
@@ -638,7 +761,7 @@ class TestPolling:
 
         service.run_pending()
         snapshot = service.snapshot("job-1")
-        observation = snapshot.shell_executions[0].queries[0].observation
+        observation = snapshot.orchestrator_calls[0].shell_executions[0].queries[0].observation
         assert observation is not None
         assert observation.phase == "unknown"
         assert observation.availability_error == "monitoring unavailable"
@@ -722,7 +845,7 @@ class TestPolling:
         # have been pruned, not left running alongside it.
         assert service.poller_count("job-1") == 1
         snapshot = service.snapshot("job-1")
-        leaf = snapshot.shell_executions[0].queries[0]
+        leaf = snapshot.orchestrator_calls[0].shell_executions[0].queries[0]
         assert leaf.retries[-1].query_id == QID_RETRY
 
         # Only the retry gets polled from here on -- QID_1 must never be
@@ -805,7 +928,8 @@ class TestRestartRecovery:
                         for query in shell.queries
                     ],
                 )
-                for shell in snapshot.shell_executions
+                for call in snapshot.orchestrator_calls
+                for shell in call.shell_executions
             ]
 
         assert hierarchy_shape(first_snapshot) == hierarchy_shape(second_snapshot)
@@ -971,12 +1095,14 @@ class TestModuleHygiene:
 
     def test_snapshot_and_hierarchy_dataclasses_are_frozen(self) -> None:
         snapshot = ms.MonitorSnapshot(
-            job_id="job-1", available=True, unavailable_reason=None, shell_executions=()
+            job_id="job-1", available=True, unavailable_reason=None, orchestrator_calls=()
         )
         with pytest.raises(Exception):
             snapshot.job_id = "job-2"  # type: ignore[misc]
 
-        shell = ms.ShellExecutionAttempt(shell_execution_id="s1", pool="default", seq=1)
+        shell = ms.ShellExecutionAttempt(
+            shell_execution_id="s1", shell_relation="initial", pool="default", seq=1
+        )
         with pytest.raises(Exception):
             shell.pool = "other"  # type: ignore[misc]
 

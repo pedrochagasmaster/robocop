@@ -42,7 +42,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from .impala_monitor import ImpalaObservation, QueryIdentity, Relation
 
@@ -96,12 +96,27 @@ class ShellExecutionAttempt:
     transparent-retry chain)."""
 
     shell_execution_id: str
+    shell_relation: ShellRelation
     pool: str
     seq: int
     started_at: str | None = None
     finished_at: str | None = None
     returncode: int | None = None
     queries: tuple[QueryAttempt, ...] = field(default_factory=tuple)
+
+
+ShellRelation = Literal["initial", "orchestrator_pool_fallback", "unknown_legacy"]
+
+
+@dataclass(frozen=True)
+class OrchestratorCallAttempt:
+    """One manifest orchestrator call and its explicitly related shells."""
+
+    call_id: str
+    index: int | None
+    script: str | None
+    seq: int
+    shell_executions: tuple[ShellExecutionAttempt, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -115,13 +130,13 @@ class MonitorSnapshot:
     job_id: str
     available: bool
     unavailable_reason: str | None
-    shell_executions: tuple[ShellExecutionAttempt, ...] = field(default_factory=tuple)
+    orchestrator_calls: tuple[OrchestratorCallAttempt, ...] = field(default_factory=tuple)
     generation: int = 0
 
 
 def _unavailable_snapshot(job_id: str, reason: str) -> MonitorSnapshot:
     return MonitorSnapshot(
-        job_id=job_id, available=False, unavailable_reason=reason, shell_executions=()
+        job_id=job_id, available=False, unavailable_reason=reason, orchestrator_calls=()
     )
 
 
@@ -158,6 +173,7 @@ class _MutableQuery:
 class _MutableShell:
     shell_execution_id: str
     pool: str
+    shell_relation: ShellRelation
     seq: int
     started_at: str | None = None
     finished_at: str | None = None
@@ -167,12 +183,31 @@ class _MutableShell:
     def freeze(self) -> ShellExecutionAttempt:
         return ShellExecutionAttempt(
             shell_execution_id=self.shell_execution_id,
+            shell_relation=self.shell_relation,
             pool=self.pool,
             seq=self.seq,
             started_at=self.started_at,
             finished_at=self.finished_at,
             returncode=self.returncode,
             queries=tuple(query.freeze() for query in self.queries),
+        )
+
+
+@dataclass
+class _MutableCall:
+    call_id: str
+    index: int | None
+    script: str | None
+    seq: int
+    shells: list[_MutableShell] = field(default_factory=list)
+
+    def freeze(self) -> OrchestratorCallAttempt:
+        return OrchestratorCallAttempt(
+            call_id=self.call_id,
+            index=self.index,
+            script=self.script,
+            seq=self.seq,
+            shell_executions=tuple(shell.freeze() for shell in self.shells),
         )
 
 
@@ -204,7 +239,9 @@ class _HierarchyBuilder:
 
     def __init__(self) -> None:
         self._shells: dict[str, _MutableShell] = {}
-        self._shell_order: list[str] = []
+        self._shell_calls: dict[str, str] = {}
+        self._calls: dict[str, _MutableCall] = {}
+        self._call_order: list[str] = []
         self._seq_counter = 0
 
     def feed_line(self, line: str) -> None:
@@ -217,7 +254,8 @@ class _HierarchyBuilder:
             return
         if not isinstance(event, dict):
             return
-        if event.get("v") != 1:
+        version = event.get("v")
+        if version not in (1, 2):
             # Unknown/future event version: skip, don't crash.
             return
         event_type = event.get("type")
@@ -230,8 +268,12 @@ class _HierarchyBuilder:
         self._seq_counter += 1
         seq = self._seq_counter
 
+        call = self._call_for_event(version, shell_execution_id, event, seq)
+        if call is None:
+            return
+
         if event_type == "shell_started":
-            self._handle_shell_started(shell_execution_id, event, seq)
+            self._handle_shell_started(call, shell_execution_id, event, seq, version)
         elif event_type == "shell_finished":
             self._handle_shell_finished(shell_execution_id, event)
         elif event_type == "query_discovered":
@@ -239,28 +281,76 @@ class _HierarchyBuilder:
         elif event_type == "query_retried":
             self._handle_query_retried(shell_execution_id, event, seq)
 
-    def _handle_shell_started(self, shell_execution_id: str, event: dict, seq: int) -> None:
+    def _call_for_event(
+        self, version: int, shell_execution_id: str, event: dict, seq: int
+    ) -> _MutableCall | None:
+        if version == 1:
+            call_id = self._shell_calls.get(shell_execution_id)
+            if call_id is None:
+                call_id = f"legacy-{len(self._call_order) + 1:04d}-{shell_execution_id}"
+                self._calls[call_id] = _MutableCall(call_id, None, None, seq)
+                self._call_order.append(call_id)
+                self._shell_calls[shell_execution_id] = call_id
+            return self._calls[call_id]
+
+        call_id = event.get("orchestrator_call_id")
+        index = event.get("orchestrator_call_index")
+        script = event.get("orchestrator_script")
+        if (
+            not isinstance(call_id, str)
+            or not call_id
+            or not isinstance(index, int)
+            or isinstance(index, bool)
+            or index < 1
+            or not isinstance(script, str)
+            or not script
+        ):
+            return None
+        existing_shell_call = self._shell_calls.get(shell_execution_id)
+        if existing_shell_call is not None and existing_shell_call != call_id:
+            return None
+        call = self._calls.get(call_id)
+        if call is None:
+            call = _MutableCall(call_id, index, script, seq)
+            self._calls[call_id] = call
+            self._call_order.append(call_id)
+        elif call.index != index or call.script != script:
+            return None
+        self._shell_calls[shell_execution_id] = call_id
+        return call
+
+    def _handle_shell_started(
+        self, call: _MutableCall, shell_execution_id: str, event: dict, seq: int, version: int
+    ) -> None:
         if shell_execution_id in self._shells:
             return
         pool = event.get("pool")
         pool = pool if isinstance(pool, str) else ""
         ts = event.get("ts")
         ts = ts if isinstance(ts, str) else None
+        relation: ShellRelation = "unknown_legacy"
+        if version == 2:
+            candidate = event.get("shell_relation")
+            if candidate not in ("initial", "orchestrator_pool_fallback"):
+                return
+            relation = candidate
         self._shells[shell_execution_id] = _MutableShell(
-            shell_execution_id=shell_execution_id, pool=pool, seq=seq, started_at=ts
+            shell_execution_id=shell_execution_id,
+            pool=pool,
+            shell_relation=relation,
+            seq=seq,
+            started_at=ts,
         )
-        self._shell_order.append(shell_execution_id)
+        call.shells.append(self._shells[shell_execution_id])
 
-    def _ensure_shell(self, shell_execution_id: str, seq: int) -> _MutableShell:
+    def _ensure_shell(self, shell_execution_id: str, seq: int) -> _MutableShell | None:
         # A shell can legitimately be referenced by a query event before its
         # shell_started line is written (e.g. truncated tail catching up
         # mid-write); tolerate that by lazily creating the shell record
         # rather than dropping the event.
         shell = self._shells.get(shell_execution_id)
         if shell is None:
-            shell = _MutableShell(shell_execution_id=shell_execution_id, pool="", seq=seq)
-            self._shells[shell_execution_id] = shell
-            self._shell_order.append(shell_execution_id)
+            return None
         return shell
 
     def _handle_shell_finished(self, shell_execution_id: str, event: dict) -> None:
@@ -280,6 +370,8 @@ class _HierarchyBuilder:
         ts = event.get("ts")
         ts = ts if isinstance(ts, str) else ""
         shell = self._ensure_shell(shell_execution_id, seq)
+        if shell is None:
+            return
         shell.queries.append(
             _MutableQuery(
                 query_id=qid,
@@ -316,8 +408,28 @@ class _HierarchyBuilder:
             )
         )
 
-    def shells(self) -> list[_MutableShell]:
-        return [self._shells[shell_id] for shell_id in self._shell_order]
+    def calls(self) -> list[_MutableCall]:
+        """Return all orchestrator calls in first-event order."""
+        return [self._calls[call_id] for call_id in self._call_order]
+
+    def shells(self, call: _MutableCall) -> list[_MutableShell]:
+        """Return every shell explicitly owned by ``call`` in event order."""
+        return list(call.shells)
+
+    def query_nodes(self) -> list[_MutableQuery]:
+        """Return all query nodes recursively, including superseded parents."""
+        nodes: list[_MutableQuery] = []
+
+        def visit(query: _MutableQuery) -> None:
+            nodes.append(query)
+            for retry in query.retries:
+                visit(retry)
+
+        for call in self.calls():
+            for shell in self.shells(call):
+                for query in shell.queries:
+                    visit(query)
+        return nodes
 
     def leaf_queries(self) -> list[_MutableQuery]:
         """Return every query attempt that should currently be polled.
@@ -327,9 +439,14 @@ class _HierarchyBuilder:
         retries is itself the live leaf.
         """
         leaves: list[_MutableQuery] = []
-        for shell in self.shells():
-            for query in shell.queries:
-                leaves.append(query.retries[-1] if query.retries else query)
+
+        def leaf(query: _MutableQuery) -> _MutableQuery:
+            return leaf(query.retries[-1]) if query.retries else query
+
+        for call in self.calls():
+            for shell in self.shells(call):
+                for query in shell.queries:
+                    leaves.append(leaf(query))
         return leaves
 
 
@@ -626,7 +743,7 @@ class MonitorService:
             job_id=job_id,
             available=True,
             unavailable_reason=None,
-            shell_executions=tuple(shell.freeze() for shell in builder.shells()),
+            orchestrator_calls=tuple(call.freeze() for call in builder.calls()),
             generation=state.generation,
         )
 
@@ -768,7 +885,7 @@ class MonitorService:
             job_id=job_id,
             available=True,
             unavailable_reason=None,
-            shell_executions=tuple(shell.freeze() for shell in state.builder.shells()),
+            orchestrator_calls=tuple(call.freeze() for call in state.builder.calls()),
             generation=state.generation,
         )
 
