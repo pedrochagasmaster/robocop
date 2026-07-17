@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
@@ -34,6 +36,13 @@ _SIZE_COLUMN_WIDTH = 10
 _NAME_COLUMN_MIN_WIDTH = 4
 _COLUMN_COUNT = 4
 _SEL_COLUMN_INDEX = 0
+
+
+class _TableRow(TypedDict):
+    name: str
+    type: str
+    size_display: str
+    size_bytes: int | None
 
 
 class BrowserTable(DataTable):
@@ -91,7 +100,7 @@ class BrowserScreen(Screen[None]):
         super().__init__()
         self._auto_load = auto_load
         self._tables: list[str] = []
-        self._table_rows: list[dict[str, object]] = []
+        self._table_rows: list[_TableRow] = []
         self._sort_mode = "name"
         self._sort_reverse = False
         self._checked: set[str] = set()
@@ -422,7 +431,7 @@ class BrowserScreen(Screen[None]):
         except CellDoesNotExist:
             pass
 
-    def _sorted_rows(self) -> list[dict[str, object]]:
+    def _sorted_rows(self) -> list[_TableRow]:
         rows = list(self._table_rows)
         rows.sort(key=self._sort_key, reverse=self._sort_reverse)
         return rows
@@ -469,13 +478,11 @@ class BrowserScreen(Screen[None]):
         # reserved and columns stay within the visible width.
         self._sync_column_widths()
 
-    def _sort_key(self, row: dict[str, object]) -> tuple[object, ...]:
+    def _sort_key(self, row: _TableRow) -> tuple[object, ...]:
         if self._sort_mode == "size":
-            size_bytes = row.get("size_bytes")
-            missing = not isinstance(size_bytes, int)
-            size_value = size_bytes if isinstance(size_bytes, int) else 0
-            return (missing, -size_value, str(row.get("name", "")).lower())
-        return (str(row.get("name", "")).lower(),)
+            size_bytes = row["size_bytes"]
+            return (size_bytes is None, -(size_bytes or 0), row["name"].lower())
+        return (row["name"].lower(),)
 
     def action_cycle_sort(self) -> None:
         idx = self.SORT_MODES.index(self._sort_mode)
@@ -617,24 +624,15 @@ class BrowserScreen(Screen[None]):
             self._drop_flow(), name="drop-flow", group="drop-flow", exclusive=True
         )
 
-    async def _drop_flow(self) -> None:
-        tables = self._checked_full_tables()
-        if not tables:
-            self.notify("Select one or more tables to drop.", severity="warning")
-            return
-
-        confirmed = await self._confirm_drop(tables)
-        if not confirmed:
-            return
-
+    async def _drop_tables(self, tables: list[str]) -> tuple[list[str], list[str]]:
         short_names_by_full = {self._qualify_table(name): name for name in self._tables}
         dropped: list[str] = []
         errors: list[str] = []
-        for full in tables:
+        for full_table in tables:
             try:
-                await impala.drop_table(full)
-                dropped.append(full)
-                short_name = short_names_by_full.get(full)
+                await impala.drop_table(full_table)
+                dropped.append(full_table)
+                short_name = short_names_by_full.get(full_table)
                 if short_name:
                     self._checked.discard(short_name)
             except (
@@ -643,10 +641,12 @@ class BrowserScreen(Screen[None]):
                 capacity.CapacityLedgerError,
             ) as exc:
                 self._show_capacity_error("DROP", exc)
-                errors.append(f"{full}: {exc}")
+                errors.append(f"{full_table}: {exc}")
             except Exception as exc:
-                errors.append(f"{full}: {exc}")
+                errors.append(f"{full_table}: {exc}")
+        return dropped, errors
 
+    def _notify_drop_results(self, dropped: list[str], errors: list[str]) -> None:
         if dropped:
             self.notify(
                 f"Dropped {len(dropped)} table(s): {', '.join(dropped)}",
@@ -655,21 +655,35 @@ class BrowserScreen(Screen[None]):
         if errors:
             self.notify(f"DROP failed for {len(errors)} table(s).", severity="error")
 
-        # Optimistically remove dropped tables and re-sync with Impala (PR #9).
+    def _show_drop_results(self, dropped: list[str], errors: list[str]) -> None:
+        if errors and not dropped:
+            self._show_detail_message("\n".join(errors), severity="error")
+        elif errors:
+            summary = "Dropped:\n" + "\n".join(f"  • {name}" for name in dropped)
+            summary += "\n\nFailed:\n" + "\n".join(f"  • {message}" for message in errors)
+            self._show_detail_message(summary, severity="error")
+        elif dropped:
+            summary = "Dropped:\n" + "\n".join(f"  • {name}" for name in dropped)
+            self._show_detail_message(summary, severity="success")
+
+    async def _drop_flow(self) -> None:
+        tables = self._checked_full_tables()
+        if not tables:
+            self.notify("Select one or more tables to drop.", severity="warning")
+            return
+        if not await self._confirm_drop(tables):
+            return
+
+        dropped, errors = await self._drop_tables(tables)
+        self._notify_drop_results(dropped, errors)
+
+        # Remove successful drops immediately, then confirm the list with Impala.
         if dropped:
             await self._refresh_after_successful_drop(dropped)
         else:
             await self.action_show_tables(describe_selection=False)
 
-        if errors and not dropped:
-            self._show_detail_message("\n".join(errors), severity="error")
-        elif errors:
-            summary = "Dropped:\n" + "\n".join(f"  • {name}" for name in dropped)
-            summary += "\n\nFailed:\n" + "\n".join(f"  • {msg}" for msg in errors)
-            self._show_detail_message(summary, severity="error")
-        elif dropped:
-            summary = "Dropped:\n" + "\n".join(f"  • {name}" for name in dropped)
-            self._show_detail_message(summary, severity="success")
+        self._show_drop_results(dropped, errors)
 
     async def _refresh_after_successful_drop(self, dropped_full_names: list[str]) -> None:
         """Refresh the Browse table list after DROP succeeds."""

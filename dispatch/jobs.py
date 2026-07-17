@@ -3,25 +3,27 @@
 from __future__ import annotations
 
 import logging
-import os
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
-from . import capacity, config, manifest
+from . import capacity, config, job_lifecycle, manifest
 
 logger = logging.getLogger("dispatch.jobs")
 
 ACTIVE_WINDOW = timedelta(days=7)
 RUNNING_CAP = 2
 LAUNCH_SLOT_STATES = {"Pending", "Running"}
-PENDING_ORPHAN_GRACE = timedelta(minutes=5)
+PENDING_ORPHAN_GRACE = job_lifecycle.PENDING_ORPHAN_GRACE
 LAUNCH_WAIT_TIMEOUT_SECONDS = 30.0
 
 _manifest_cache: dict[Path, tuple[float, manifest.JobManifest]] = {}
 
 
 LaunchSlotUnavailable = capacity.CapacityBusy
+pid_is_alive = job_lifecycle.pid_is_alive
 
 
 def parse_time(value: str | None) -> datetime | None:
@@ -94,26 +96,6 @@ def list_manifests(root: Path | None = None) -> list[manifest.JobManifest]:
     return loaded
 
 
-def pid_is_alive(pid: int) -> bool:
-    """Return whether ``pid`` still names a live process.
-
-    ``os.kill(pid, 0)`` performs the conservative POSIX liveness probe without
-    sending a signal. A permission failure means a process exists but cannot be
-    signalled by this user, so it is treated as alive.
-    """
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
 def _append_dispatch_log(job_dir: Path, line: str) -> None:
     log_path = job_dir / "run.log"
     if not log_path.exists():
@@ -126,47 +108,26 @@ def _append_dispatch_log(job_dir: Path, line: str) -> None:
 
 
 def reconcile_manifest(path: Path) -> manifest.JobManifest | None:
-    """Load and conservatively reconcile one manifest.
-
-    ``Running`` Jobs with a stored PID are failed when the PID no longer
-    exists. ``Pending`` Jobs with ``pid=None`` are failed only after the
-    manifest file has remained untouched past ``PENDING_ORPHAN_GRACE``.
-    """
+    """Load one manifest and persist the shared stale-Job transition."""
     item = _load_manifest_cached(path)
-    pid = item.get("pid")
-    if item["state"] != "Running" or pid is None or pid_is_alive(pid):
-        if item["state"] != "Pending" or pid is not None:
-            return item
+    modified_at: datetime | None = None
+    if item["state"] == "Pending" and item.get("pid") is None:
         try:
-            manifest_mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            modified_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
         except OSError as exc:
             raise ValueError(str(exc)) from exc
-        now = datetime.now(timezone.utc)
-        if now - manifest_mtime <= PENDING_ORPHAN_GRACE:
-            return item
-        updated = manifest.update(
-            path,
-            state="Failed",
-            exit_code=-1,
-            finished_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        )
-        _manifest_cache.pop(path, None)
-        _append_dispatch_log(
-            path.parent,
-            "[dispatch] Pending job exceeded startup grace; manifest marked Failed",
-        )
-        return updated
+    reconciliation = job_lifecycle.reconcile(item, modified_at, pid_probe=pid_is_alive)
+    if reconciliation is None:
+        return item
+
     updated = manifest.update(
         path,
-        state="Failed",
-        exit_code=-1,
-        finished_at=manifest.now_utc(),
+        state=reconciliation.manifest["state"],
+        exit_code=reconciliation.manifest["exit_code"],
+        finished_at=reconciliation.manifest["finished_at"],
     )
     _manifest_cache.pop(path, None)
-    _append_dispatch_log(
-        path.parent,
-        f"[dispatch] stale runner pid {pid} not found; manifest marked Failed",
-    )
+    _append_dispatch_log(path.parent, reconciliation.log_message)
     return updated
 
 
@@ -228,6 +189,25 @@ def can_launch(root: Path | None = None) -> bool:
     return count_launch_slot_jobs(root) < RUNNING_CAP
 
 
+def _pending_job_creator(
+    source: manifest.Source,
+    destination: manifest.Destination,
+    params: dict[str, Any],
+    launch_cwd: Path,
+    sql_text: str,
+    user: str | None,
+) -> Callable[[], tuple[Path, manifest.JobManifest]]:
+    return partial(
+        manifest.create_job,
+        source=source,
+        destination=destination,
+        params=params,
+        launch_cwd=launch_cwd,
+        sql_text=sql_text,
+        user=user,
+    )
+
+
 def create_job_if_slot_available(
     source: manifest.Source,
     destination: manifest.Destination,
@@ -238,19 +218,8 @@ def create_job_if_slot_available(
     timeout: float = LAUNCH_WAIT_TIMEOUT_SECONDS,
 ) -> tuple[Path, manifest.JobManifest]:
     """Atomically admit and create one Pending Job through shared capacity."""
-
-    def create_pending() -> tuple[Path, manifest.JobManifest]:
-        return manifest.create_job(
-            source=source,
-            destination=destination,
-            params=params,
-            launch_cwd=launch_cwd,
-            sql_text=sql_text,
-            user=user,
-        )
-
     return capacity.admit_launch(
-        create_pending,
+        _pending_job_creator(source, destination, params, launch_cwd, sql_text, user),
         timeout=timeout,
         root=config.data_root(user),
     )
@@ -270,19 +239,8 @@ async def create_job_when_capacity_available(
     The capacity module owns FIFO identity, 250ms waits, deadline enforcement,
     and the cancellation-safe callback commit boundary.
     """
-
-    def create_pending() -> tuple[Path, manifest.JobManifest]:
-        return manifest.create_job(
-            source=source,
-            destination=destination,
-            params=params,
-            launch_cwd=launch_cwd,
-            sql_text=sql_text,
-            user=user,
-        )
-
     return await capacity.admit_launch_async(
-        create_pending,
+        _pending_job_creator(source, destination, params, launch_cwd, sql_text, user),
         timeout=timeout,
         root=config.data_root(user),
     )

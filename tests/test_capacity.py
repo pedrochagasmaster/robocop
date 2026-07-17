@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from dispatch import capacity, manifest
+from dispatch import capacity, job_lifecycle, manifest
 from dispatch.capacity import (
     CapacityBusy,
     CapacityLedgerError,
@@ -207,15 +207,15 @@ def test_windows_pid_probe_does_not_call_os_kill(monkeypatch: pytest.MonkeyPatch
             return True
 
     kernel32 = Kernel32()
-    monkeypatch.setattr(capacity, "_WINDOWS", True, raising=False)
-    monkeypatch.setattr(capacity, "_WINDOWS_KERNEL32", kernel32, raising=False)
+    monkeypatch.setattr(job_lifecycle, "_WINDOWS", True)
+    monkeypatch.setattr(job_lifecycle, "_WINDOWS_KERNEL32", kernel32)
 
     def destructive_probe(pid: int, signal: int) -> None:
         raise AssertionError(f"os.kill({pid}, {signal}) must not run on Windows")
 
-    monkeypatch.setattr(capacity.os, "kill", destructive_probe)
+    monkeypatch.setattr(job_lifecycle.os, "kill", destructive_probe)
 
-    assert capacity._pid_is_alive(4242)
+    assert job_lifecycle.pid_is_alive(4242)
     assert kernel32.closed == [99]
 
 
@@ -254,18 +254,8 @@ def test_launch_intents_are_admitted_fifo_across_processes(tmp_path: Path) -> No
     assert sorted(observed) == [("admitted", "first"), ("admitted", "second")]
 
 
-def test_waiting_launch_has_priority_over_new_stats_lease(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    launch_waiting = threading.Event()
-    resume_launch = threading.Event()
+def test_waiting_launch_has_priority_over_new_stats_lease(tmp_path: Path) -> None:
     outcome: list[str] = []
-
-    def controlled_wait() -> None:
-        launch_waiting.set()
-        assert resume_launch.wait(PROCESS_TIMEOUT)
-
-    monkeypatch.setattr(capacity, "_wait_for_retry", controlled_wait, raising=False)
     first_lease = try_acquire_metadata("describe", tmp_path)
     second_lease = try_acquire_metadata("describe", tmp_path)
 
@@ -274,14 +264,12 @@ def test_waiting_launch_has_priority_over_new_stats_lease(
 
     launch = threading.Thread(target=launch_target)
     launch.start()
-    assert launch_waiting.wait(PROCESS_TIMEOUT)
-    assert len(_read_ledger(tmp_path)["launch_intents"]) == 1
+    _wait_for_intent_pids(tmp_path, [os.getpid()])
 
     first_lease.release()
     with pytest.raises(CapacityBusy):
         try_acquire_metadata("stats", tmp_path)
 
-    resume_launch.set()
     second_lease.release()
     launch.join(PROCESS_TIMEOUT)
     assert not launch.is_alive()

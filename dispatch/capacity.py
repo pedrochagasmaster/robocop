@@ -8,7 +8,6 @@ rules so none of those details leak into jobs or Impala call sites.
 from __future__ import annotations
 
 import asyncio
-import ctypes
 import errno
 import json
 import math
@@ -19,8 +18,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from ctypes import wintypes
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict, TypeVar, cast
 
@@ -30,7 +28,7 @@ except ImportError:  # Windows
     fcntl = None  # type: ignore[assignment]
     import msvcrt
 
-from . import config, manifest
+from . import config, job_lifecycle, manifest
 from .asyncio_utils import await_uncancellable
 
 T = TypeVar("T")
@@ -47,24 +45,11 @@ __all__ = [
 
 CAPACITY_LIMIT = 2
 LEDGER_VERSION = 2
-# This is the one lifecycle value that cannot be imported from ``jobs``:
-# Task 3 makes jobs depend on this module. Manifest validation, timestamps, and
-# atomic state writes remain delegated to ``manifest`` instead of being copied.
-_PENDING_ORPHAN_GRACE = timedelta(minutes=5)
 _POLL_SECONDS = 0.05
 _ASYNC_POLL_SECONDS = 0.25
 _LOCK_POLL_SECONDS = 0.01
 _METADATA_LOCK_TIMEOUT_SECONDS = 0.25
 _MIGRATED_INTENT_TTL_SECONDS = 30.0
-_WINDOWS = os.name == "nt"
-_WINDOWS_KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True) if _WINDOWS else None
-if _WINDOWS_KERNEL32 is not None:
-    _WINDOWS_KERNEL32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    _WINDOWS_KERNEL32.OpenProcess.restype = wintypes.HANDLE
-    _WINDOWS_KERNEL32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, wintypes.LPDWORD]
-    _WINDOWS_KERNEL32.GetExitCodeProcess.restype = wintypes.BOOL
-    _WINDOWS_KERNEL32.CloseHandle.argtypes = [wintypes.HANDLE]
-    _WINDOWS_KERNEL32.CloseHandle.restype = wintypes.BOOL
 
 
 class CapacityBusy(RuntimeError):
@@ -150,7 +135,7 @@ def _new_ledger() -> _Ledger:
 
 
 def _now_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return manifest.now_utc()
 
 
 def _capacity_home(root: Path | None) -> Path:
@@ -212,6 +197,66 @@ def _require_keys(item: Any, keys: set[str], label: str) -> dict[str, Any]:
     return item
 
 
+def _validate_metadata_owners(owners: list[Any]) -> None:
+    seen_tokens: set[str] = set()
+    for raw_owner in owners:
+        owner = _require_keys(
+            raw_owner, {"token", "pid", "operation", "created_at"}, "metadata owner"
+        )
+        if (
+            not isinstance(owner["token"], str)
+            or not owner["token"]
+            or owner["token"] in seen_tokens
+            or not _is_int(owner["pid"])
+            or owner["pid"] <= 0
+            or not isinstance(owner["operation"], str)
+            or not owner["operation"]
+            or not isinstance(owner["created_at"], str)
+            or not owner["created_at"]
+        ):
+            raise CapacityLedgerError("invalid metadata owner in capacity ledger")
+        seen_tokens.add(owner["token"])
+
+
+def _validate_launch_intents(intents: list[Any], intent_keys: set[str]) -> set[int]:
+    seen_sequences: set[int] = set()
+    for raw_intent in intents:
+        intent = _require_keys(raw_intent, intent_keys, "launch intent")
+        if (
+            not _is_int(intent["pid"])
+            or intent["pid"] <= 0
+            or not _is_int(intent["sequence"])
+            or intent["sequence"] < 1
+            or intent["sequence"] in seen_sequences
+            or not isinstance(intent["created_at"], str)
+            or not intent["created_at"]
+        ):
+            raise CapacityLedgerError("invalid launch intent in capacity ledger")
+        if "deadline_at" in intent and (
+            not isinstance(intent["deadline_at"], (int, float))
+            or isinstance(intent["deadline_at"], bool)
+            or not math.isfinite(intent["deadline_at"])
+        ):
+            raise CapacityLedgerError("invalid launch intent in capacity ledger")
+        seen_sequences.add(intent["sequence"])
+    return seen_sequences
+
+
+def _validate_job_reservations(reservations: list[Any]) -> None:
+    seen_jobs: set[str] = set()
+    for raw_reservation in reservations:
+        reservation = _require_keys(raw_reservation, {"job_id", "manifest_path"}, "job reservation")
+        if (
+            not isinstance(reservation["job_id"], str)
+            or not reservation["job_id"]
+            or reservation["job_id"] in seen_jobs
+            or not isinstance(reservation["manifest_path"], str)
+            or not reservation["manifest_path"]
+        ):
+            raise CapacityLedgerError("invalid job reservation in capacity ledger")
+        seen_jobs.add(reservation["job_id"])
+
+
 def _validate_ledger_version(
     data: Any,
     *,
@@ -244,58 +289,9 @@ def _validate_ledger_version(
     ):
         raise CapacityLedgerError("capacity ledger collections must be lists")
 
-    seen_tokens: set[str] = set()
-    for raw_owner in owners:
-        owner = _require_keys(
-            raw_owner, {"token", "pid", "operation", "created_at"}, "metadata owner"
-        )
-        if (
-            not isinstance(owner["token"], str)
-            or not owner["token"]
-            or owner["token"] in seen_tokens
-            or not _is_int(owner["pid"])
-            or owner["pid"] <= 0
-            or not isinstance(owner["operation"], str)
-            or not owner["operation"]
-            or not isinstance(owner["created_at"], str)
-            or not owner["created_at"]
-        ):
-            raise CapacityLedgerError("invalid metadata owner in capacity ledger")
-        seen_tokens.add(owner["token"])
-
-    seen_sequences: set[int] = set()
-    for raw_intent in intents:
-        intent = _require_keys(raw_intent, intent_keys, "launch intent")
-        if (
-            not _is_int(intent["pid"])
-            or intent["pid"] <= 0
-            or not _is_int(intent["sequence"])
-            or intent["sequence"] < 1
-            or intent["sequence"] in seen_sequences
-            or not isinstance(intent["created_at"], str)
-            or not intent["created_at"]
-        ):
-            raise CapacityLedgerError("invalid launch intent in capacity ledger")
-        if "deadline_at" in intent and (
-            not isinstance(intent["deadline_at"], (int, float))
-            or isinstance(intent["deadline_at"], bool)
-            or not math.isfinite(intent["deadline_at"])
-        ):
-            raise CapacityLedgerError("invalid launch intent in capacity ledger")
-        seen_sequences.add(intent["sequence"])
-
-    seen_jobs: set[str] = set()
-    for raw_reservation in reservations:
-        reservation = _require_keys(raw_reservation, {"job_id", "manifest_path"}, "job reservation")
-        if (
-            not isinstance(reservation["job_id"], str)
-            or not reservation["job_id"]
-            or reservation["job_id"] in seen_jobs
-            or not isinstance(reservation["manifest_path"], str)
-            or not reservation["manifest_path"]
-        ):
-            raise CapacityLedgerError("invalid job reservation in capacity ledger")
-        seen_jobs.add(reservation["job_id"])
+    _validate_metadata_owners(owners)
+    seen_sequences = _validate_launch_intents(intents, intent_keys)
+    _validate_job_reservations(reservations)
     if seen_sequences and ledger["next_sequence"] <= max(seen_sequences):
         raise CapacityLedgerError("next sequence does not follow queued launch intents")
 
@@ -420,35 +416,43 @@ def _save_ledger(path: Path, ledger: _Ledger) -> None:
             pass
 
 
-def _lock_file(handle: Any, deadline: float | None = None) -> None:
-    if fcntl is not None:
-        if deadline is None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+def _lock_posix(handle: Any, deadline: float | None) -> None:
+    if deadline is None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        return
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
-        while True:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise _LockDeadline from None
-                time.sleep(min(_LOCK_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
-    elif deadline is None:
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise _LockDeadline from None
+            time.sleep(min(_LOCK_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+
+
+def _lock_windows(handle: Any, deadline: float | None) -> None:
+    if deadline is None:
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
         return
+    while True:
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise
+            if time.monotonic() >= deadline:
+                raise _LockDeadline from None
+            time.sleep(min(_LOCK_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+
+
+def _lock_file(handle: Any, deadline: float | None = None) -> None:
+    if fcntl is not None:
+        _lock_posix(handle, deadline)
     else:
-        while True:
-            handle.seek(0)
-            try:
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                return
-            except OSError as exc:
-                if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
-                    raise
-                if time.monotonic() >= deadline:
-                    raise _LockDeadline from None
-                time.sleep(min(_LOCK_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+        _lock_windows(handle, deadline)
 
 
 def _unlock_file(handle: Any) -> None:
@@ -508,63 +512,24 @@ def _locked_home(root: Path | None, deadline: float | None = None) -> Iterator[P
             handle.close()
 
 
-def _pid_is_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    if _WINDOWS:
-        return _windows_pid_is_alive(pid)
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
-def _windows_pid_is_alive(pid: int) -> bool:
-    """Probe a Windows PID without sending the destructive ``os.kill`` signal."""
-    if _WINDOWS_KERNEL32 is None:
-        return True
-    process_query_limited_information = 0x1000
-    still_active = 259
-    handle = _WINDOWS_KERNEL32.OpenProcess(process_query_limited_information, False, pid)
-    if not handle:
-        # Access denied is evidence that a process exists. Invalid parameter is
-        # Windows' normal response for a PID that no longer exists.
-        return ctypes.get_last_error() != 87
-    try:
-        exit_code = wintypes.DWORD()
-        if not _WINDOWS_KERNEL32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-            return True
-        return exit_code.value == still_active
-    finally:
-        _WINDOWS_KERNEL32.CloseHandle(handle)
-
-
-def _fail_stale_manifest(path: Path, item: manifest.JobManifest) -> None:
-    updated = item.copy()
-    updated["state"] = "Failed"
-    updated["exit_code"] = -1
-    updated["finished_at"] = manifest.now_utc()
+def _write_reconciled_manifest(path: Path, item: manifest.JobManifest) -> None:
     try:
         _require_directory(path.parent, "job directory")
         _require_regular_file(path, "job manifest")
-        manifest.write(path, updated)
+        manifest.write(path, item)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise CapacityLedgerError(f"cannot reconcile job manifest {path}: {exc}") from exc
 
 
-def _load_job_manifest(path: Path) -> manifest.JobManifest | None:
+def _load_job_manifest(path: Path) -> tuple[manifest.JobManifest, datetime] | None:
     if not _require_regular_file(path, "job manifest", missing_ok=True):
         return None
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
         try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
                 raise CapacityLedgerError(f"job manifest is not a regular file: {path}")
             with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
                 descriptor = -1
@@ -573,7 +538,8 @@ def _load_job_manifest(path: Path) -> manifest.JobManifest | None:
             if descriptor >= 0:
                 os.close(descriptor)
         manifest.validate(data)
-        return data
+        modified_at = datetime.fromtimestamp(metadata.st_mtime, tz=timezone.utc)
+        return data, modified_at
     except FileNotFoundError:
         return None
     except CapacityLedgerError:
@@ -584,21 +550,15 @@ def _load_job_manifest(path: Path) -> manifest.JobManifest | None:
 
 def _active_reservation(path: Path) -> _JobReservation | None:
     try:
-        item = _load_job_manifest(path)
-        if item is None:
+        loaded = _load_job_manifest(path)
+        if loaded is None:
             return None
+        item, modified_at = loaded
         state = item["state"]
-        pid = item.get("pid")
-        if state == "Running" and pid is not None and not _pid_is_alive(pid):
-            _fail_stale_manifest(path, item)
+        reconciliation = job_lifecycle.reconcile(item, modified_at)
+        if reconciliation is not None:
+            _write_reconciled_manifest(path, reconciliation.manifest)
             return None
-        if state == "Pending" and pid is None:
-            metadata = _path_metadata(path, "job manifest")
-            assert metadata is not None
-            modified = datetime.fromtimestamp(metadata.st_mtime, tz=timezone.utc)
-            if datetime.now(timezone.utc) - modified > _PENDING_ORPHAN_GRACE:
-                _fail_stale_manifest(path, item)
-                return None
     except (FileNotFoundError, NotADirectoryError):
         return None
     except CapacityLedgerError:
@@ -653,13 +613,13 @@ def _reservation_paths(ledger: _Ledger, jobs_root: Path) -> set[Path]:
 
 def _reconcile(ledger: _Ledger, home: Path) -> None:
     ledger["metadata_owners"] = [
-        owner for owner in ledger["metadata_owners"] if _pid_is_alive(owner["pid"])
+        owner for owner in ledger["metadata_owners"] if job_lifecycle.pid_is_alive(owner["pid"])
     ]
     now = time.time()
     ledger["launch_intents"] = [
         intent
         for intent in ledger["launch_intents"]
-        if _pid_is_alive(intent["pid"]) and intent["deadline_at"] > now
+        if job_lifecycle.pid_is_alive(intent["pid"]) and intent["deadline_at"] > now
     ]
 
     jobs_root = home / "jobs"
@@ -761,10 +721,6 @@ def _discard_launch_intent(
     return True
 
 
-def _wait_for_retry() -> None:
-    time.sleep(_POLL_SECONDS)
-
-
 def _launch_timeout(timeout: float) -> CapacityTimeout:
     return CapacityTimeout(f"Dispatch launch capacity timed out after {timeout:g}s")
 
@@ -778,9 +734,7 @@ def _register_launch_intent(
     try:
         with _locked_home(root, deadline) as home:
             path, ledger = _load_reconciled(home)
-            if len(ledger["job_reservations"]) >= CAPACITY_LIMIT:
-                _save_ledger(path, ledger)
-                raise CapacityBusy("two Dispatch jobs already occupy shared capacity")
+            _ensure_launch_slot_available(path, ledger)
             if time.monotonic() >= deadline:
                 _save_ledger(path, ledger)
                 raise _launch_timeout(timeout)
@@ -800,6 +754,33 @@ def _register_launch_intent(
         raise _launch_timeout(timeout) from None
 
 
+def _ensure_launch_slot_available(path: Path, ledger: _Ledger) -> None:
+    if len(ledger["job_reservations"]) < CAPACITY_LIMIT:
+        return
+    _save_ledger(path, ledger)
+    raise CapacityBusy("two Dispatch jobs already occupy shared capacity")
+
+
+def _commit_pending(
+    create_pending: Callable[[], T],
+    control: _LaunchControl,
+    ledger: _Ledger,
+    home: Path,
+    path: Path,
+    *,
+    sequence: int | None = None,
+    deadline: float | None = None,
+) -> T:
+    if not control.begin_commit(deadline):
+        raise _LaunchCancelled
+    result = create_pending()
+    if sequence is not None:
+        _remove_intent(ledger, sequence)
+    _reconcile(ledger, home)
+    _save_ledger(path, ledger)
+    return result
+
+
 def _try_admit_registered_launch(
     create_pending: Callable[[], T],
     sequence: int,
@@ -811,9 +792,7 @@ def _try_admit_registered_launch(
     try:
         with _locked_home(root, deadline) as home:
             path, ledger = _load_reconciled(home)
-            if len(ledger["job_reservations"]) >= CAPACITY_LIMIT:
-                _save_ledger(path, ledger)
-                raise CapacityBusy("two Dispatch jobs already occupy shared capacity")
+            _ensure_launch_slot_available(path, ledger)
             if time.monotonic() >= deadline:
                 _save_ledger(path, ledger)
                 raise _launch_timeout(timeout)
@@ -826,13 +805,15 @@ def _try_admit_registered_launch(
             if not is_first or _occupied(ledger) >= CAPACITY_LIMIT:
                 _save_ledger(path, ledger)
                 return False, None
-            if not control.begin_commit(deadline):
-                raise _LaunchCancelled
-
-            result = create_pending()
-            _remove_intent(ledger, sequence)
-            _reconcile(ledger, home)
-            _save_ledger(path, ledger)
+            result = _commit_pending(
+                create_pending,
+                control,
+                ledger,
+                home,
+                path,
+                sequence=sequence,
+                deadline=deadline,
+            )
             return True, result
     except _LockDeadline:
         raise _launch_timeout(timeout) from None
@@ -846,19 +827,11 @@ def _try_admit_immediately(
     try:
         with _locked_home(root, time.monotonic()) as home:
             path, ledger = _load_reconciled(home)
-            if len(ledger["job_reservations"]) >= CAPACITY_LIMIT:
-                _save_ledger(path, ledger)
-                raise CapacityBusy("two Dispatch jobs already occupy shared capacity")
+            _ensure_launch_slot_available(path, ledger)
             if ledger["launch_intents"] or _occupied(ledger) >= CAPACITY_LIMIT:
                 _save_ledger(path, ledger)
                 raise _launch_timeout(0)
-            if not control.begin_commit():
-                raise _LaunchCancelled
-
-            result = create_pending()
-            _reconcile(ledger, home)
-            _save_ledger(path, ledger)
-            return result
+            return _commit_pending(create_pending, control, ledger, home, path)
     except _LockDeadline:
         raise _launch_timeout(0) from None
 
@@ -897,7 +870,7 @@ def admit_launch(
             if admitted:
                 sequence = None
                 return cast(T, result)
-            _wait_for_retry()
+            time.sleep(_POLL_SECONDS)
     finally:
         if sequence is not None:
             _discard_launch_intent(root, sequence, time.monotonic())
@@ -918,6 +891,57 @@ async def _discard_launch_intent_async(
         raise
 
 
+async def _admit_immediately_async(
+    create_pending: Callable[[], T],
+    root: Path | None,
+) -> T:
+    control = _LaunchControl()
+    attempt: asyncio.Task[T] = asyncio.create_task(
+        asyncio.to_thread(_try_admit_immediately, create_pending, root, control)
+    )
+    try:
+        return await asyncio.shield(attempt)
+    except asyncio.CancelledError as cancelled:
+        if control.cancel_before_commit():
+            try:
+                await await_uncancellable(attempt)
+            except (_LaunchCancelled, CapacityBusy, CapacityTimeout):
+                pass
+            raise cancelled
+        return await await_uncancellable(attempt)
+
+
+async def _try_admit_registered_launch_async(
+    create_pending: Callable[[], T],
+    sequence: int,
+    root: Path | None,
+    deadline: float,
+    timeout: float,
+    control: _LaunchControl,
+) -> tuple[bool, T | None]:
+    attempt: asyncio.Task[tuple[bool, T | None]] = asyncio.create_task(
+        asyncio.to_thread(
+            _try_admit_registered_launch,
+            create_pending,
+            sequence,
+            root,
+            deadline,
+            timeout,
+            control,
+        )
+    )
+    try:
+        return await asyncio.shield(attempt)
+    except asyncio.CancelledError as cancelled:
+        if control.cancel_before_commit():
+            try:
+                await await_uncancellable(attempt)
+            except (_LaunchCancelled, CapacityBusy, CapacityTimeout):
+                pass
+            raise cancelled
+        return await await_uncancellable(attempt)
+
+
 async def admit_launch_async(
     create_pending: Callable[[], T],
     timeout: float = 30,
@@ -933,20 +957,7 @@ async def admit_launch_async(
     if timeout < 0:
         raise ValueError("timeout must not be negative")
     if timeout == 0:
-        control = _LaunchControl()
-        immediate_attempt: asyncio.Task[T] = asyncio.create_task(
-            asyncio.to_thread(_try_admit_immediately, create_pending, root, control)
-        )
-        try:
-            return await asyncio.shield(immediate_attempt)
-        except asyncio.CancelledError as cancelled:
-            if control.cancel_before_commit():
-                try:
-                    await await_uncancellable(immediate_attempt)
-                except (_LaunchCancelled, CapacityBusy, CapacityTimeout):
-                    pass
-                raise cancelled
-            return await await_uncancellable(immediate_attempt)
+        return await _admit_immediately_async(create_pending, root)
     deadline = time.monotonic() + timeout
     deadline_at = time.time() + timeout
     control = _LaunchControl()
@@ -974,9 +985,8 @@ async def admit_launch_async(
             raise cancelled
 
         while True:
-            admission_attempt: asyncio.Task[tuple[bool, T | None]] = asyncio.create_task(
-                asyncio.to_thread(
-                    _try_admit_registered_launch,
+            try:
+                admitted, result = await _try_admit_registered_launch_async(
                     create_pending,
                     sequence,
                     root,
@@ -984,18 +994,9 @@ async def admit_launch_async(
                     timeout,
                     control,
                 )
-            )
-            try:
-                admitted, result = await asyncio.shield(admission_attempt)
-            except asyncio.CancelledError as cancelled:
-                if control.cancel_before_commit():
-                    cleanup_deadline = None
-                    try:
-                        await await_uncancellable(admission_attempt)
-                    except (_LaunchCancelled, CapacityBusy, CapacityTimeout):
-                        pass
-                    raise cancelled
-                admitted, result = await await_uncancellable(admission_attempt)
+            except asyncio.CancelledError:
+                cleanup_deadline = None
+                raise
             if admitted:
                 sequence = None
                 return cast(T, result)
