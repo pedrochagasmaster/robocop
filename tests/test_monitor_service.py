@@ -954,6 +954,51 @@ class TestIdentityRecovery:
         assert client.coordinator_discovery_calls == [COORD_1]
         assert snapshot.orchestrator_calls[0].shell_executions[1].queries[0].query_id == QID_2
 
+    def test_recovery_refuses_identity_already_attached_elsewhere(self, tmp_path: Path) -> None:
+        self._recoverable_job(tmp_path)
+        write_events(
+            tmp_path / "monitor.events.jsonl",
+            [
+                v2_event_line(
+                    "shell_started",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="known",
+                ),
+                v2_event_line(
+                    "query_discovered",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="known",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_1,
+                ),
+                v2_event_line(
+                    "shell_started",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-recover",
+                    shell_relation="orchestrator_pool_fallback",
+                ),
+            ],
+        )
+        client = FakeMonitorClient()
+        client.discovered_identity = im.QueryIdentity(
+            coordinator_base_url=COORD_1,
+            query_id=QID_1,
+            shell_execution_id="shell-recover",
+            relation="initial",
+            discovered_at="2026-07-15T10:00:30Z",
+        )
+        service = ms.MonitorService(client, clock=FakeClock())
+        service.sync_background_jobs({("job-1", tmp_path)})
+        criteria = service.recovery_criteria("job-1", "call-0002")
+        with pytest.raises(ms.IdentityRecoveryError, match="identity unavailable/ambiguous"):
+            service.recover_identity("job-1", "call-0002", criteria)
+
     def test_query_file_call_is_not_eligible(self, tmp_path: Path) -> None:
         self._recoverable_job(tmp_path)
         data = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))

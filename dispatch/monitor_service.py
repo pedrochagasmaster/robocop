@@ -869,9 +869,15 @@ class MonitorService:
             candidates = (
                 [] if call is None else [shell for shell in call.shells if not shell.queries]
             )
+            identity_conflicts = any(
+                query.coordinator_base_url == identity.coordinator_base_url
+                and query.query_id == identity.query_id
+                for query in state.builder.query_nodes()
+            )
             if (
                 len(candidates) != 1
                 or candidates[0].shell_execution_id != identity.shell_execution_id
+                or identity_conflicts
             ):
                 raise IdentityRecoveryError("identity unavailable/ambiguous")
             query = _MutableQuery(
