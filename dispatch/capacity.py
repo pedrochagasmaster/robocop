@@ -11,6 +11,7 @@ import asyncio
 import ctypes
 import errno
 import json
+import math
 import os
 import stat
 import threading
@@ -30,6 +31,7 @@ except ImportError:  # Windows
     import msvcrt
 
 from . import config, manifest
+from .asyncio_utils import await_uncancellable
 
 T = TypeVar("T")
 
@@ -53,6 +55,7 @@ _POLL_SECONDS = 0.05
 _ASYNC_POLL_SECONDS = 0.25
 _LOCK_POLL_SECONDS = 0.01
 _METADATA_LOCK_TIMEOUT_SECONDS = 0.25
+_MIGRATED_INTENT_TTL_SECONDS = 30.0
 _WINDOWS = os.name == "nt"
 _WINDOWS_KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True) if _WINDOWS else None
 if _WINDOWS_KERNEL32 is not None:
@@ -126,11 +129,11 @@ class _LaunchControl:
             self._cancelled = True
             return True
 
-    def begin_commit(self, deadline: float) -> bool:
+    def begin_commit(self, deadline: float | None = None) -> bool:
         with self._lock:
             if self._cancelled:
                 return False
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 raise CapacityTimeout("Dispatch launch capacity timed out before commit")
             self._committing = True
             return True
@@ -209,7 +212,12 @@ def _require_keys(item: Any, keys: set[str], label: str) -> dict[str, Any]:
     return item
 
 
-def _validate_ledger(data: Any) -> _Ledger:
+def _validate_ledger_version(
+    data: Any,
+    *,
+    expected_version: int,
+    intent_keys: set[str],
+) -> dict[str, Any]:
     ledger = _require_keys(
         data,
         {
@@ -221,7 +229,7 @@ def _validate_ledger(data: Any) -> _Ledger:
         },
         "root",
     )
-    if ledger["version"] != LEDGER_VERSION:
+    if ledger["version"] != expected_version:
         raise CapacityLedgerError("unsupported capacity ledger version")
     if not _is_int(ledger["next_sequence"]) or ledger["next_sequence"] < 1:
         raise CapacityLedgerError("invalid next sequence in capacity ledger")
@@ -257,11 +265,7 @@ def _validate_ledger(data: Any) -> _Ledger:
 
     seen_sequences: set[int] = set()
     for raw_intent in intents:
-        intent = _require_keys(
-            raw_intent,
-            {"pid", "sequence", "created_at", "deadline_at"},
-            "launch intent",
-        )
+        intent = _require_keys(raw_intent, intent_keys, "launch intent")
         if (
             not _is_int(intent["pid"])
             or intent["pid"] <= 0
@@ -270,8 +274,12 @@ def _validate_ledger(data: Any) -> _Ledger:
             or intent["sequence"] in seen_sequences
             or not isinstance(intent["created_at"], str)
             or not intent["created_at"]
-            or not isinstance(intent["deadline_at"], (int, float))
+        ):
+            raise CapacityLedgerError("invalid launch intent in capacity ledger")
+        if "deadline_at" in intent and (
+            not isinstance(intent["deadline_at"], (int, float))
             or isinstance(intent["deadline_at"], bool)
+            or not math.isfinite(intent["deadline_at"])
         ):
             raise CapacityLedgerError("invalid launch intent in capacity ledger")
         seen_sequences.add(intent["sequence"])
@@ -291,7 +299,37 @@ def _validate_ledger(data: Any) -> _Ledger:
     if seen_sequences and ledger["next_sequence"] <= max(seen_sequences):
         raise CapacityLedgerError("next sequence does not follow queued launch intents")
 
-    return data
+    return ledger
+
+
+def _normalize_ledger(data: Any) -> Any:
+    if not isinstance(data, dict) or data.get("version") != 1:
+        return data
+    legacy = _validate_ledger_version(
+        data,
+        expected_version=1,
+        intent_keys={"pid", "sequence", "created_at"},
+    )
+    deadline_at = time.time() + _MIGRATED_INTENT_TTL_SECONDS
+    return {
+        "version": LEDGER_VERSION,
+        "next_sequence": legacy["next_sequence"],
+        "metadata_owners": [dict(owner) for owner in legacy["metadata_owners"]],
+        "launch_intents": [
+            {**intent, "deadline_at": deadline_at} for intent in legacy["launch_intents"]
+        ],
+        "job_reservations": [dict(reservation) for reservation in legacy["job_reservations"]],
+    }
+
+
+def _validate_ledger(data: Any) -> _Ledger:
+    normalized = _normalize_ledger(data)
+    validated = _validate_ledger_version(
+        normalized,
+        expected_version=LEDGER_VERSION,
+        intent_keys={"pid", "sequence", "created_at", "deadline_at"},
+    )
+    return cast(_Ledger, validated)
 
 
 def _load_ledger(path: Path) -> _Ledger:
@@ -800,6 +838,31 @@ def _try_admit_registered_launch(
         raise _launch_timeout(timeout) from None
 
 
+def _try_admit_immediately(
+    create_pending: Callable[[], T],
+    root: Path | None,
+    control: _LaunchControl,
+) -> T:
+    try:
+        with _locked_home(root, time.monotonic()) as home:
+            path, ledger = _load_reconciled(home)
+            if len(ledger["job_reservations"]) >= CAPACITY_LIMIT:
+                _save_ledger(path, ledger)
+                raise CapacityBusy("two Dispatch jobs already occupy shared capacity")
+            if ledger["launch_intents"] or _occupied(ledger) >= CAPACITY_LIMIT:
+                _save_ledger(path, ledger)
+                raise _launch_timeout(0)
+            if not control.begin_commit():
+                raise _LaunchCancelled
+
+            result = create_pending()
+            _reconcile(ledger, home)
+            _save_ledger(path, ledger)
+            return result
+    except _LockDeadline:
+        raise _launch_timeout(0) from None
+
+
 def admit_launch(
     create_pending: Callable[[], T],
     timeout: float = 30,
@@ -814,6 +877,8 @@ def admit_launch(
     """
     if timeout < 0:
         raise ValueError("timeout must not be negative")
+    if timeout == 0:
+        return _try_admit_immediately(create_pending, root, _LaunchControl())
     deadline = time.monotonic() + timeout
     deadline_at = time.time() + timeout
     sequence: int | None = None
@@ -849,18 +914,8 @@ async def _discard_launch_intent_async(
     try:
         await asyncio.shield(cleanup)
     except asyncio.CancelledError:
-        await _await_uncancellable(cleanup)
+        await await_uncancellable(cleanup)
         raise
-
-
-async def _await_uncancellable(task: asyncio.Task[T]) -> T:
-    """Return a committed thread result despite repeated task cancellation."""
-    while True:
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if task.done():
-                return task.result()
 
 
 async def admit_launch_async(
@@ -877,6 +932,21 @@ async def admit_launch_async(
     """
     if timeout < 0:
         raise ValueError("timeout must not be negative")
+    if timeout == 0:
+        control = _LaunchControl()
+        immediate_attempt: asyncio.Task[T] = asyncio.create_task(
+            asyncio.to_thread(_try_admit_immediately, create_pending, root, control)
+        )
+        try:
+            return await asyncio.shield(immediate_attempt)
+        except asyncio.CancelledError as cancelled:
+            if control.cancel_before_commit():
+                try:
+                    await await_uncancellable(immediate_attempt)
+                except (_LaunchCancelled, CapacityBusy, CapacityTimeout):
+                    pass
+                raise cancelled
+            return await await_uncancellable(immediate_attempt)
     deadline = time.monotonic() + timeout
     deadline_at = time.time() + timeout
     control = _LaunchControl()
@@ -898,13 +968,13 @@ async def admit_launch_async(
         except asyncio.CancelledError as cancelled:
             cleanup_deadline = None
             try:
-                sequence = await _await_uncancellable(registration)
+                sequence = await await_uncancellable(registration)
             except Exception:
                 raise cancelled
             raise cancelled
 
         while True:
-            attempt = asyncio.create_task(
+            admission_attempt: asyncio.Task[tuple[bool, T | None]] = asyncio.create_task(
                 asyncio.to_thread(
                     _try_admit_registered_launch,
                     create_pending,
@@ -916,16 +986,16 @@ async def admit_launch_async(
                 )
             )
             try:
-                admitted, result = await asyncio.shield(attempt)
+                admitted, result = await asyncio.shield(admission_attempt)
             except asyncio.CancelledError as cancelled:
                 if control.cancel_before_commit():
                     cleanup_deadline = None
                     try:
-                        await _await_uncancellable(attempt)
+                        await await_uncancellable(admission_attempt)
                     except (_LaunchCancelled, CapacityBusy, CapacityTimeout):
                         pass
                     raise cancelled
-                admitted, result = await _await_uncancellable(attempt)
+                admitted, result = await await_uncancellable(admission_attempt)
             if admitted:
                 sequence = None
                 return cast(T, result)

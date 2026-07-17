@@ -338,8 +338,8 @@ def test_two_active_jobs_reject_launch_without_waiting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DISPATCH_DATA_ROOT", str(tmp_path))
-    jobs.create_job_if_slot_available(**_launch_args(tmp_path, "first"), timeout=1)
-    jobs.create_job_if_slot_available(**_launch_args(tmp_path, "second"), timeout=1)
+    jobs.create_job_if_slot_available(**_launch_args(tmp_path, "first"), timeout=0)
+    jobs.create_job_if_slot_available(**_launch_args(tmp_path, "second"), timeout=0)
 
     async def run() -> float:
         started = time.monotonic()
@@ -368,7 +368,7 @@ def test_cancelled_launch_removes_shared_intent(
                 **_launch_args(tmp_path, "cancelled"), timeout=30
             )
         )
-        await asyncio.sleep(0.05)
+        await _wait_for_intent_count(tmp_path, 1)
         task.cancel()
         await asyncio.sleep(0)
         first.release()
@@ -464,7 +464,7 @@ def test_concurrent_launches_atomically_create_only_one_last_pending_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DISPATCH_DATA_ROOT", str(tmp_path))
-    jobs.create_job_if_slot_available(**_launch_args(tmp_path, "existing"), timeout=1)
+    jobs.create_job_if_slot_available(**_launch_args(tmp_path, "existing"), timeout=0)
 
     async def run() -> list[object]:
         return await asyncio.gather(

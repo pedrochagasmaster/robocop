@@ -355,6 +355,94 @@ def test_launch_times_out_and_removes_its_intent(tmp_path: Path) -> None:
     second.release()
 
 
+def test_zero_timeout_performs_one_immediate_admission_when_free(tmp_path: Path) -> None:
+    callback_calls = 0
+
+    def create_pending() -> str:
+        nonlocal callback_calls
+        callback_calls += 1
+        return "created"
+
+    assert admit_launch(create_pending, timeout=0, root=tmp_path) == "created"
+    assert callback_calls == 1
+
+
+def test_zero_timeout_fails_promptly_without_callback_when_busy(tmp_path: Path) -> None:
+    first = try_acquire_metadata("describe", tmp_path)
+    second = try_acquire_metadata("show tables", tmp_path)
+    callback_calls = 0
+
+    def create_pending() -> str:
+        nonlocal callback_calls
+        callback_calls += 1
+        return "created"
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(CapacityTimeout):
+            admit_launch(create_pending, timeout=0, root=tmp_path)
+    finally:
+        first.release()
+        second.release()
+
+    assert time.monotonic() - started < 0.25
+    assert callback_calls == 0
+    assert _read_ledger(tmp_path)["launch_intents"] == []
+
+
+def test_async_zero_timeout_performs_one_immediate_admission_when_free(
+    tmp_path: Path,
+) -> None:
+    callback_calls = 0
+
+    def create_pending() -> str:
+        nonlocal callback_calls
+        callback_calls += 1
+        return "created"
+
+    async def run() -> str:
+        return await capacity.admit_launch_async(
+            create_pending,
+            timeout=0,
+            root=tmp_path,
+        )
+
+    assert asyncio.run(run()) == "created"
+    assert callback_calls == 1
+
+
+def test_async_zero_timeout_fails_promptly_without_callback_when_busy(
+    tmp_path: Path,
+) -> None:
+    first = try_acquire_metadata("describe", tmp_path)
+    second = try_acquire_metadata("show tables", tmp_path)
+    callback_calls = 0
+
+    def create_pending() -> str:
+        nonlocal callback_calls
+        callback_calls += 1
+        return "created"
+
+    async def run() -> None:
+        with pytest.raises(CapacityTimeout):
+            await capacity.admit_launch_async(
+                create_pending,
+                timeout=0,
+                root=tmp_path,
+            )
+
+    started = time.monotonic()
+    try:
+        asyncio.run(run())
+    finally:
+        first.release()
+        second.release()
+
+    assert time.monotonic() - started < 0.25
+    assert callback_calls == 0
+    assert _read_ledger(tmp_path)["launch_intents"] == []
+
+
 def test_launch_deadline_includes_capacity_lock_acquisition(tmp_path: Path) -> None:
     lock_acquired = threading.Event()
     release_lock = threading.Event()
@@ -557,6 +645,114 @@ def test_malformed_ledger_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(CapacityLedgerError):
         admit_launch(create_pending, timeout=0, root=tmp_path)
     assert not callback_called
+
+
+def test_version_one_ledger_is_normalized_without_losing_valid_entries(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_job(tmp_path, "migrated")
+    home = tmp_path / ".dispatch"
+    legacy = {
+        "version": 1,
+        "next_sequence": 2,
+        "metadata_owners": [
+            {
+                "token": "legacy-token",
+                "pid": os.getpid(),
+                "operation": "DESCRIBE",
+                "created_at": manifest.now_utc(),
+            }
+        ],
+        "launch_intents": [
+            {
+                "pid": os.getpid(),
+                "sequence": 1,
+                "created_at": manifest.now_utc(),
+            }
+        ],
+        "job_reservations": [
+            {
+                "job_id": "migrated",
+                "manifest_path": str(manifest_path),
+            }
+        ],
+    }
+    (home / "capacity.json").write_text(
+        json.dumps(legacy),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CapacityBusy):
+        try_acquire_metadata("probe", tmp_path)
+
+    normalized = _read_ledger(tmp_path)
+    assert normalized["version"] == capacity.LEDGER_VERSION
+    assert normalized["metadata_owners"] == legacy["metadata_owners"]
+    assert normalized["job_reservations"] == legacy["job_reservations"]
+    assert normalized["launch_intents"][0]["pid"] == os.getpid()
+    assert normalized["launch_intents"][0]["sequence"] == 1
+    assert normalized["launch_intents"][0]["deadline_at"] > time.time()
+
+
+def test_malformed_version_one_ledger_is_rejected(tmp_path: Path) -> None:
+    home = tmp_path / ".dispatch"
+    home.mkdir()
+    malformed = {
+        "version": 1,
+        "next_sequence": 2,
+        "metadata_owners": [],
+        "launch_intents": [
+            {
+                "pid": os.getpid(),
+                "sequence": 1,
+            }
+        ],
+        "job_reservations": [],
+    }
+    (home / "capacity.json").write_text(
+        json.dumps(malformed),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CapacityLedgerError):
+        try_acquire_metadata("probe", tmp_path)
+
+
+@pytest.mark.parametrize(
+    "deadline_at",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="positive-infinity"),
+        pytest.param(float("-inf"), id="negative-infinity"),
+    ],
+)
+def test_non_finite_launch_intent_deadline_is_rejected(
+    tmp_path: Path,
+    deadline_at: float,
+) -> None:
+    home = tmp_path / ".dispatch"
+    home.mkdir()
+    ledger = {
+        "version": capacity.LEDGER_VERSION,
+        "next_sequence": 2,
+        "metadata_owners": [],
+        "launch_intents": [
+            {
+                "pid": os.getpid(),
+                "sequence": 1,
+                "created_at": manifest.now_utc(),
+                "deadline_at": deadline_at,
+            }
+        ],
+        "job_reservations": [],
+    }
+    (home / "capacity.json").write_text(
+        json.dumps(ledger),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CapacityLedgerError):
+        try_acquire_metadata("probe", tmp_path)
 
 
 def test_release_is_idempotent_and_token_scoped(tmp_path: Path) -> None:

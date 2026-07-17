@@ -5,14 +5,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TypeVar
 
 from . import capacity, process, sql
+from .asyncio_utils import await_uncancellable
 from .formatting import format_data_size, parse_data_size
 
 QUERY_TIMEOUT_SECONDS = 30
 _SIZE_FETCH_BATCH_SIZE = 2
-_T = TypeVar("_T")
 
 IMPALA_BASE_ARGV = (
     "impala-shell",
@@ -28,15 +27,6 @@ IMPALA_BASE_ARGV = (
 
 class ImpalaExecutionError(RuntimeError):
     """An expected impala-shell timeout or non-zero query result."""
-
-
-async def _await_uncancellable(task: asyncio.Task[_T]) -> _T:
-    while True:
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if task.done():
-                return task.result()
 
 
 async def _run_impala_shell(sql: str) -> str:
@@ -60,7 +50,7 @@ async def _release_metadata(lease: capacity.MetadataLease) -> None:
     try:
         await asyncio.shield(release)
     except asyncio.CancelledError:
-        await _await_uncancellable(release)
+        await await_uncancellable(release)
         raise
 
 
@@ -70,7 +60,7 @@ async def _acquire_metadata(operation: str) -> capacity.MetadataLease:
         return await asyncio.shield(acquisition)
     except asyncio.CancelledError as cancelled:
         try:
-            lease = await _await_uncancellable(acquisition)
+            lease = await await_uncancellable(acquisition)
         except Exception:
             raise cancelled
         await _release_metadata(lease)

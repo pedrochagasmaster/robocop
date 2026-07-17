@@ -30,6 +30,7 @@ from textual.worker import Worker
 from .. import capacity, config, jobs, kerberos, manifest, process, sql, telemetry
 from ..advisor import analyze, analyze_form, analyze_sql, combine_analysis
 from ..advisor.models import AnalysisResult, badge_markup
+from ..asyncio_utils import await_uncancellable
 from .advisor_gate import AdvisorLaunchGate
 from .confirm import ConfirmScreen
 from .preview import PreviewScreen
@@ -41,12 +42,7 @@ logger = logging.getLogger("dispatch.new_job")
 async def _launch_runner_after_commit(job_dir: Path) -> int:
     """Finish runner handoff after Pending commit despite task cancellation."""
     launch = asyncio.create_task(process.launch_runner(job_dir))
-    while True:
-        try:
-            return await asyncio.shield(launch)
-        except asyncio.CancelledError:
-            if launch.done():
-                return launch.result()
+    return await await_uncancellable(launch)
 
 
 def _refusal_reason(error: str) -> telemetry.RefusalReason:
