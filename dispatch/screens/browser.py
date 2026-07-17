@@ -67,7 +67,8 @@ class BrowserTable(DataTable):
                 self.post_message(self.SelClicked(self, row_key))
                 event.stop()
                 return
-        await super()._on_click(event)
+        # Textual dispatches the inherited DataTable handler after this one.
+        # Calling it here would post header-selection messages twice.
 
 
 class BrowserScreen(Screen[None]):
@@ -78,6 +79,7 @@ class BrowserScreen(Screen[None]):
         ("d", "drop", "Drop"),
         ("s", "show_tables", "Load Tables"),
         ("o", "cycle_sort", "Sort"),
+        ("x", "toggle_check", "Select"),
         ("a", "select_all", "Select All"),
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
@@ -273,7 +275,7 @@ class BrowserScreen(Screen[None]):
         if count:
             text = f"[dim]{count} selected for drop[/]"
         else:
-            text = "[dim]Click [ ] to select · Select All marks every loaded table[/]"
+            text = "[dim]Click [ ] or press X to select · A selects all loaded tables[/]"
         self.query_one("#browser-selection-count", Static).update(text)
 
     def _update_action_state(self) -> None:
@@ -470,8 +472,9 @@ class BrowserScreen(Screen[None]):
     def _sort_key(self, row: dict[str, object]) -> tuple[object, ...]:
         if self._sort_mode == "size":
             size_bytes = row.get("size_bytes")
-            missing = size_bytes is None
-            return (missing, -(size_bytes or 0), str(row.get("name", "")).lower())
+            missing = not isinstance(size_bytes, int)
+            size_value = size_bytes if isinstance(size_bytes, int) else 0
+            return (missing, -size_value, str(row.get("name", "")).lower())
         return (str(row.get("name", "")).lower(),)
 
     def action_cycle_sort(self) -> None:
@@ -592,6 +595,10 @@ class BrowserScreen(Screen[None]):
             self._checked.add(name)
         self._render_table_list(selected_before=name)
         self._update_action_state()
+
+    def action_toggle_check(self) -> None:
+        """Toggle drop-selection for the highlighted table."""
+        self._toggle_check_named(self._selected_table())
 
     def action_select_all(self) -> None:
         if not self._tables:

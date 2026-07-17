@@ -59,8 +59,9 @@ HELP_TEXT = """\
 
 [bold]Browser[/]
   [b]S[/]         Load tables for schema + filter
-  [b]O[/]         Cycle sort: name \u2192 size
-  [b]Click [ ][/] Toggle table selection for bulk drop (shows [X] when selected)
+  [b]O[/]         Cycle sort: name \u2192 size; click Size to reverse
+  [b]X[/]         Toggle highlighted table selection (shows [X] when selected)
+  [b]Click [ ][/] Toggle clicked table selection for bulk drop
   [b]A[/]         Select all loaded tables (toggle)
   [b]Enter[/]     Describe highlighted table
   [b]D[/]         Drop checked tables (type I AM SURE, then DROP)

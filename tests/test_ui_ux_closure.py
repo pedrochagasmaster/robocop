@@ -9,11 +9,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from rich.text import Text
+from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Input
 
 from dispatch import impala, manifest, telemetry
 from dispatch.app import DispatchApp
-from dispatch.screens.browser import CHECKED_MARKER, UNCHECKED_MARKER, BrowserScreen
+from dispatch.screens.browser import (
+    CHECKED_MARKER,
+    UNCHECKED_MARKER,
+    BrowserScreen,
+    BrowserTable,
+)
 from dispatch.screens.history import PAGE_SIZE, HistoryScreen
 from dispatch.screens.job_detail import JobDetailScreen
 from dispatch.screens.new_job import NewJobScreen
@@ -33,6 +39,31 @@ def _prepare_checked_table(screen: BrowserScreen, table_name: str = "danger_tabl
 
 def _sel_plain(cell: object) -> str:
     return cell.plain if isinstance(cell, Text) else str(cell)
+
+
+async def _click_table_cell(pilot, table: DataTable, row: int, column: int) -> None:
+    """Click the rendered center of a DataTable cell through Pilot hit-testing."""
+    region = table._get_cell_region(Coordinate(row, column))
+    content_x = table.content_region.x - table.region.x
+    content_y = table.content_region.y - table.region.y
+    center_x, center_y = region.center
+    clicked = await pilot.click(
+        table,
+        offset=(center_x + content_x, center_y + content_y),
+    )
+    assert clicked is True
+
+
+async def _click_table_header(pilot, table: DataTable, column: int) -> None:
+    """Click the rendered center of a DataTable header through Pilot hit-testing."""
+    region = table._get_column_region(column)
+    content_x = table.content_region.x - table.region.x
+    content_y = table.content_region.y - table.region.y
+    clicked = await pilot.click(
+        table,
+        offset=(region.x + region.width // 2 + content_x, content_y),
+    )
+    assert clicked is True
 
 
 async def _confirm_bulk_drop(pilot, app: DispatchApp) -> None:
@@ -486,8 +517,10 @@ def test_browser_show_tables_failure_replaces_stale_schema_with_error(
     asyncio.run(run())
 
 
-def test_browser_sorts_by_table_size(mock_env_with_config, monkeypatch) -> None:
-    """Browser can cycle sort modes and order rows by on-disk size."""
+def test_browser_size_header_click_sorts_descending_then_ascending(
+    mock_env_with_config, monkeypatch
+) -> None:
+    """The rendered Size header toggles descending and ascending size order."""
 
     async def fake_show_tables(schema: str, pattern: str = "*") -> list[str]:
         return ["dispatch_alpha", "dispatch_zulu"]
@@ -521,40 +554,19 @@ def test_browser_sorts_by_table_size(mock_env_with_config, monkeypatch) -> None:
             assert table.get_row_at(0)[1] == "dispatch_alpha"
             assert table.get_row_at(1)[1] == "dispatch_zulu"
 
-            screen.action_cycle_sort()
+            await _click_table_header(pilot, table, 2)
+            await pilot.pause()
             assert table.get_row_at(0)[1] == "dispatch_zulu"
             assert table.get_row_at(1)[1] == "dispatch_alpha"
             assert table.get_row_at(0)[2] == "1.2 GB"
-            # Largest-first is a descending display, so the arrow points down.
             indicator = str(screen.query_one("#browser-sort-indicator").render())
             assert "Sorted by: size ↓" in indicator
 
-            # Clicking the Size header toggles ascending / descending.
-            assert screen._size_column_key is not None
-            screen.on_data_table_header_selected(
-                DataTable.HeaderSelected(
-                    table,
-                    screen._size_column_key,
-                    2,
-                    table.columns[screen._size_column_key].label,
-                )
-            )
+            await _click_table_header(pilot, table, 2)
             await pilot.pause()
             assert table.get_row_at(0)[1] == "dispatch_alpha"
             assert table.get_row_at(1)[1] == "dispatch_zulu"
             assert "Sorted by: size ↑" in str(screen.query_one("#browser-sort-indicator").render())
-
-            screen.on_data_table_header_selected(
-                DataTable.HeaderSelected(
-                    table,
-                    screen._size_column_key,
-                    2,
-                    table.columns[screen._size_column_key].label,
-                )
-            )
-            await pilot.pause()
-            assert table.get_row_at(0)[1] == "dispatch_zulu"
-            assert "Sorted by: size ↓" in str(screen.query_one("#browser-sort-indicator").render())
 
     asyncio.run(run())
 
@@ -604,8 +616,10 @@ def test_browser_renders_list_before_sizes_and_fills_them_in_background(
     asyncio.run(run())
 
 
-def test_browser_click_sel_toggles_check_space_does_not(mock_env_with_config, monkeypatch) -> None:
-    """Drop-selection is toggled by clicking Sel, not by pressing Space."""
+def test_browser_mouse_and_x_toggle_selection_while_space_does_not(
+    mock_env_with_config, monkeypatch
+) -> None:
+    """Sel-cell clicks and x toggle selection; Space remains inactive."""
 
     async def fake_show_tables(schema: str, pattern: str = "*") -> list[str]:
         return ["dispatch_alpha", "dispatch_zulu"]
@@ -614,8 +628,6 @@ def test_browser_click_sel_toggles_check_space_does_not(mock_env_with_config, mo
     monkeypatch.setattr("dispatch.impala.iter_table_sizes", _fake_iter_table_sizes({}))
 
     async def run() -> None:
-        from dispatch.screens.browser import BrowserTable
-
         app = DispatchApp()
         async with app.run_test(size=(120, 40)) as pilot:
             screen = BrowserScreen(auto_load=False)
@@ -626,24 +638,38 @@ def test_browser_click_sel_toggles_check_space_does_not(mock_env_with_config, mo
 
             table = screen.query_one("#browser-table", BrowserTable)
             assert screen._checked == set()
-            assert "Click [ ] to select" in str(
+
+            await _click_table_cell(pilot, table, 0, 0)
+            await pilot.pause()
+            assert screen._checked == {"dispatch_alpha"}
+            assert _sel_plain(table.get_row_at(0)[0]) == "[X]"
+            assert screen.query_one("#drop").disabled is False
+            assert "1 selected for drop" in str(
                 screen.query_one("#browser-selection-count").render()
             )
 
-            # Space must not toggle selection.
+            await _click_table_cell(pilot, table, 0, 0)
+            await pilot.pause()
+            assert screen._checked == set()
+            assert screen.query_one("#drop").disabled is True
+
             await pilot.press("space")
             await pilot.pause()
             assert screen._checked == set()
             assert _sel_plain(table.get_row_at(0)[0]) == UNCHECKED_MARKER.plain
 
-            # Clicking the Sel cell toggles the checkbox for that row.
-            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            screen.on_browser_table_sel_clicked(BrowserTable.SelClicked(table, row_key))
+            await pilot.press("x")
             await pilot.pause()
             assert screen._checked == {"dispatch_alpha"}
-            # Selected state must show a visible mark inside the box (not blank).
             assert _sel_plain(table.get_row_at(0)[0]) == "[X]"
             assert screen.query_one("#drop").disabled is False
+
+            await pilot.press("x")
+            await pilot.pause()
+            assert screen._checked == set()
+            assert "Click [ ] or press X to select" in str(
+                screen.query_one("#browser-selection-count").render()
+            )
 
             # Column order is Name then Size.
             assert list(table.columns.keys())  # non-empty
@@ -700,6 +726,7 @@ def test_browser_size_column_visible_on_typical_ssh_width(
 
     async def run() -> None:
         await run_at((100, 30))
+        await run_at((120, 40))
         # 80×24 still exposes the Size header beside Name; data rows may be
         # clipped vertically by the minimum terminal layout, so only assert
         # the header remains on-screen there.
@@ -1011,12 +1038,14 @@ def test_browser_select_all_marks_every_loaded_table(mock_env_with_config) -> No
             screen._render_table_list()
             screen._update_action_state()
 
-            screen.action_select_all()
+            table = screen.query_one("#browser-table", DataTable)
+            table.focus()
+            await pilot.press("a")
             await pilot.pause()
             assert screen._checked == {"alpha", "beta"}
             assert screen.query_one("#drop").disabled is False
 
-            screen.action_select_all()
+            await pilot.press("a")
             await pilot.pause()
             assert screen._checked == set()
             assert screen.query_one("#drop").disabled is True
