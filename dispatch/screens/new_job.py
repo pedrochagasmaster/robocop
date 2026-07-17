@@ -38,6 +38,17 @@ from .sidebar import Sidebar
 logger = logging.getLogger("dispatch.new_job")
 
 
+async def _launch_runner_after_commit(job_dir: Path) -> int:
+    """Finish runner handoff after Pending commit despite task cancellation."""
+    launch = asyncio.create_task(process.launch_runner(job_dir))
+    while True:
+        try:
+            return await asyncio.shield(launch)
+        except asyncio.CancelledError:
+            if launch.done():
+                return launch.result()
+
+
 def _refusal_reason(error: str) -> telemetry.RefusalReason:
     lowered = error.lower()
     if "concurrency cap" in lowered:
@@ -645,10 +656,6 @@ class NewJobScreen(Screen[None]):
         email = self._input_value("email")
         if email and ("@" not in email or "." not in email.split("@")[-1]):
             issues.append("Invalid email format")
-        if not jobs.can_launch():
-            issues.append(
-                f"At the {jobs.RUNNING_CAP}-Job concurrency cap \u2014 wait for one to finish"
-            )
         if self.kerberos_ttl is None:
             issues.append("Kerberos ticket missing \u2014 press K to kinit")
         elif self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS:
@@ -1052,7 +1059,7 @@ class NewJobScreen(Screen[None]):
             destination=destination["type"],
         )
         try:
-            await process.launch_runner(job_dir)
+            await _launch_runner_after_commit(job_dir)
         except OSError as exc:
             manifest.update(
                 job_dir / "manifest.json",

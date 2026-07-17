@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -203,6 +204,46 @@ class TestImpalaTableStatsParsing:
             second.release()
         assert subprocess_called is False
 
+    def test_cancelled_metadata_acquisition_releases_threaded_lease(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DISPATCH_DATA_ROOT", str(tmp_path))
+        acquired = threading.Event()
+        allow_handoff = threading.Event()
+        handed_off = threading.Event()
+        original_acquire = capacity.try_acquire_metadata
+
+        def delayed_acquire(operation: str) -> capacity.MetadataLease:
+            lease = original_acquire(operation)
+            acquired.set()
+            assert allow_handoff.wait(2)
+            handed_off.set()
+            return lease
+
+        async def unexpected_run_exec(*_argv: str, **_kwargs: object) -> tuple[int, str, str]:
+            raise AssertionError("cancelled acquisition must not run impala-shell")
+
+        monkeypatch.setattr(capacity, "try_acquire_metadata", delayed_acquire)
+        monkeypatch.setattr("dispatch.process.run_exec", unexpected_run_exec)
+
+        async def run() -> None:
+            task = asyncio.create_task(impala.show_tables("aa_enc"))
+            assert await asyncio.to_thread(acquired.wait, 2)
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            allow_handoff.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert await asyncio.to_thread(handed_off.wait, 2)
+
+        asyncio.run(run())
+
+        first = original_acquire("probe-one")
+        second = original_acquire("probe-two")
+        first.release()
+        second.release()
+
     def test_stats_map_capacity_busy_to_unknown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -236,6 +277,32 @@ class TestImpalaTableStatsParsing:
         results = asyncio.run(_collect_table_sizes("aa_enc", ["broken"]))
 
         assert results == [("broken", impala.TableStats(None, "—"))]
+
+    def test_impala_execution_failures_use_dedicated_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DISPATCH_DATA_ROOT", str(tmp_path))
+
+        async def failed_run_exec(*_argv: str, **_kwargs: object) -> tuple[int, str, str]:
+            return 1, "", "query rejected"
+
+        monkeypatch.setattr("dispatch.process.run_exec", failed_run_exec)
+
+        with pytest.raises(impala.ImpalaExecutionError, match="query rejected"):
+            asyncio.run(impala.table_stats("aa_enc.broken"))
+
+    def test_stats_do_not_hide_arbitrary_runtime_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DISPATCH_DATA_ROOT", str(tmp_path))
+
+        async def broken_subprocess_adapter(*_argv: str, **_kwargs: object) -> tuple[int, str, str]:
+            raise RuntimeError("subprocess adapter bug")
+
+        monkeypatch.setattr("dispatch.process.run_exec", broken_subprocess_adapter)
+
+        with pytest.raises(RuntimeError, match="subprocess adapter bug"):
+            asyncio.run(_collect_table_sizes("aa_enc", ["broken"]))
 
     def test_stats_surface_capacity_ledger_failures(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

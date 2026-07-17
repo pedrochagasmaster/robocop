@@ -355,6 +355,105 @@ def test_launch_times_out_and_removes_its_intent(tmp_path: Path) -> None:
     second.release()
 
 
+def test_launch_deadline_includes_capacity_lock_acquisition(tmp_path: Path) -> None:
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+    callback_called = False
+    outcome: list[BaseException | str] = []
+
+    def hold_lock() -> None:
+        with capacity._locked_home(tmp_path):
+            lock_acquired.set()
+            assert release_lock.wait(PROCESS_TIMEOUT)
+
+    def create_pending() -> str:
+        nonlocal callback_called
+        callback_called = True
+        return "created"
+
+    def launch() -> None:
+        try:
+            outcome.append(admit_launch(create_pending, timeout=0.05, root=tmp_path))
+        except BaseException as exc:
+            outcome.append(exc)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert lock_acquired.wait(PROCESS_TIMEOUT)
+    waiter = threading.Thread(target=launch)
+    waiter.start()
+    time.sleep(0.1)
+    release_lock.set()
+    holder.join(PROCESS_TIMEOUT)
+    waiter.join(PROCESS_TIMEOUT)
+
+    assert not holder.is_alive()
+    assert not waiter.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], CapacityTimeout)
+    assert callback_called is False
+
+
+def test_async_launch_deadline_includes_capacity_lock_acquisition(tmp_path: Path) -> None:
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+    callback_called = False
+
+    def hold_lock() -> None:
+        with capacity._locked_home(tmp_path):
+            lock_acquired.set()
+            assert release_lock.wait(PROCESS_TIMEOUT)
+
+    def create_pending() -> str:
+        nonlocal callback_called
+        callback_called = True
+        return "created"
+
+    async def run() -> None:
+        with pytest.raises(CapacityTimeout):
+            await capacity.admit_launch_async(
+                create_pending,
+                timeout=0.05,
+                root=tmp_path,
+            )
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert lock_acquired.wait(PROCESS_TIMEOUT)
+    try:
+        asyncio.run(run())
+    finally:
+        release_lock.set()
+        holder.join(PROCESS_TIMEOUT)
+
+    assert not holder.is_alive()
+    assert callback_called is False
+
+
+def test_launch_never_invokes_callback_after_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_load = capacity._load_reconciled
+    callback_called = False
+
+    def delayed_load(home: Path) -> tuple[Path, Any]:
+        result = original_load(home)
+        time.sleep(0.03)
+        return result
+
+    def create_pending() -> str:
+        nonlocal callback_called
+        callback_called = True
+        return "created"
+
+    monkeypatch.setattr(capacity, "_load_reconciled", delayed_load)
+
+    with pytest.raises(CapacityTimeout):
+        admit_launch(create_pending, timeout=0.01, root=tmp_path)
+
+    assert callback_called is False
+
+
 def test_two_active_jobs_reject_launch_without_waiting(tmp_path: Path) -> None:
     admit_launch(lambda: _write_job(tmp_path, "first"), root=tmp_path)
     admit_launch(lambda: _write_job(tmp_path, "second"), root=tmp_path)
@@ -606,6 +705,7 @@ def test_exported_interface_is_explicit_and_small() -> None:
         "CapacityTimeout",
         "MetadataLease",
         "admit_launch",
+        "admit_launch_async",
         "try_acquire_metadata",
     ]
 

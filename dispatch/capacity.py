@@ -7,6 +7,7 @@ rules so none of those details leak into jobs or Impala call sites.
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import errno
 import json
@@ -20,7 +21,7 @@ from contextlib import contextmanager
 from ctypes import wintypes
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, TypedDict, TypeVar
+from typing import Any, TypedDict, TypeVar, cast
 
 try:
     import fcntl
@@ -38,16 +39,20 @@ __all__ = [
     "CapacityTimeout",
     "MetadataLease",
     "admit_launch",
+    "admit_launch_async",
     "try_acquire_metadata",
 ]
 
 CAPACITY_LIMIT = 2
-LEDGER_VERSION = 1
+LEDGER_VERSION = 2
 # This is the one lifecycle value that cannot be imported from ``jobs``:
 # Task 3 makes jobs depend on this module. Manifest validation, timestamps, and
 # atomic state writes remain delegated to ``manifest`` instead of being copied.
 _PENDING_ORPHAN_GRACE = timedelta(minutes=5)
 _POLL_SECONDS = 0.05
+_ASYNC_POLL_SECONDS = 0.25
+_LOCK_POLL_SECONDS = 0.01
+_METADATA_LOCK_TIMEOUT_SECONDS = 0.25
 _WINDOWS = os.name == "nt"
 _WINDOWS_KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True) if _WINDOWS else None
 if _WINDOWS_KERNEL32 is not None:
@@ -82,6 +87,7 @@ class _LaunchIntent(TypedDict):
     pid: int
     sequence: int
     created_at: str
+    deadline_at: float
 
 
 class _JobReservation(TypedDict):
@@ -95,6 +101,39 @@ class _Ledger(TypedDict):
     metadata_owners: list[_MetadataOwner]
     launch_intents: list[_LaunchIntent]
     job_reservations: list[_JobReservation]
+
+
+class _LockDeadline(TimeoutError):
+    """Raised internally when the caller's lock budget expires."""
+
+
+class _LaunchCancelled(RuntimeError):
+    """Raised internally when cancellation wins before commit."""
+
+
+class _LaunchControl:
+    """Synchronize async cancellation with the callback commit boundary."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._committing = False
+
+    def cancel_before_commit(self) -> bool:
+        with self._lock:
+            if self._committing:
+                return False
+            self._cancelled = True
+            return True
+
+    def begin_commit(self, deadline: float) -> bool:
+        with self._lock:
+            if self._cancelled:
+                return False
+            if time.monotonic() >= deadline:
+                raise CapacityTimeout("Dispatch launch capacity timed out before commit")
+            self._committing = True
+            return True
 
 
 def _new_ledger() -> _Ledger:
@@ -218,7 +257,11 @@ def _validate_ledger(data: Any) -> _Ledger:
 
     seen_sequences: set[int] = set()
     for raw_intent in intents:
-        intent = _require_keys(raw_intent, {"pid", "sequence", "created_at"}, "launch intent")
+        intent = _require_keys(
+            raw_intent,
+            {"pid", "sequence", "created_at", "deadline_at"},
+            "launch intent",
+        )
         if (
             not _is_int(intent["pid"])
             or intent["pid"] <= 0
@@ -227,6 +270,8 @@ def _validate_ledger(data: Any) -> _Ledger:
             or intent["sequence"] in seen_sequences
             or not isinstance(intent["created_at"], str)
             or not intent["created_at"]
+            or not isinstance(intent["deadline_at"], (int, float))
+            or isinstance(intent["deadline_at"], bool)
         ):
             raise CapacityLedgerError("invalid launch intent in capacity ledger")
         seen_sequences.add(intent["sequence"])
@@ -337,12 +382,35 @@ def _save_ledger(path: Path, ledger: _Ledger) -> None:
             pass
 
 
-def _lock_file(handle: Any) -> None:
+def _lock_file(handle: Any, deadline: float | None = None) -> None:
     if fcntl is not None:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        if deadline is None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            return
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise _LockDeadline from None
+                time.sleep(min(_LOCK_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+    elif deadline is None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
         return
-    handle.seek(0)
-    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+    else:
+        while True:
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise _LockDeadline from None
+                time.sleep(min(_LOCK_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
 
 
 def _unlock_file(handle: Any) -> None:
@@ -354,7 +422,7 @@ def _unlock_file(handle: Any) -> None:
 
 
 @contextmanager
-def _locked_home(root: Path | None) -> Iterator[Path]:
+def _locked_home(root: Path | None, deadline: float | None = None) -> Iterator[Path]:
     home = _capacity_home(root)
     lock_path = home / "capacity.lock"
     try:
@@ -385,8 +453,10 @@ def _locked_home(root: Path | None) -> Iterator[Path]:
                 handle.write(b"\0")
                 handle.flush()
                 os.fsync(handle.fileno())
-            _lock_file(handle)
+            _lock_file(handle, deadline)
             locked = True
+        except _LockDeadline:
+            raise
         except OSError as exc:
             raise CapacityLedgerError(f"cannot lock capacity ledger: {exc}") from exc
         yield home
@@ -547,8 +617,11 @@ def _reconcile(ledger: _Ledger, home: Path) -> None:
     ledger["metadata_owners"] = [
         owner for owner in ledger["metadata_owners"] if _pid_is_alive(owner["pid"])
     ]
+    now = time.time()
     ledger["launch_intents"] = [
-        intent for intent in ledger["launch_intents"] if _pid_is_alive(intent["pid"])
+        intent
+        for intent in ledger["launch_intents"]
+        if _pid_is_alive(intent["pid"]) and intent["deadline_at"] > now
     ]
 
     jobs_root = home / "jobs"
@@ -608,21 +681,24 @@ def try_acquire_metadata(operation: str, root: Path | None = None) -> MetadataLe
     if not operation:
         raise ValueError("operation must not be empty")
     token = uuid.uuid4().hex
-    with _locked_home(root) as home:
-        path, ledger = _load_reconciled(home)
-        launch_has_priority = _stats_operation(operation) and bool(ledger["launch_intents"])
-        if launch_has_priority or _occupied(ledger) >= CAPACITY_LIMIT:
+    try:
+        with _locked_home(root, time.monotonic() + _METADATA_LOCK_TIMEOUT_SECONDS) as home:
+            path, ledger = _load_reconciled(home)
+            launch_has_priority = _stats_operation(operation) and bool(ledger["launch_intents"])
+            if launch_has_priority or _occupied(ledger) >= CAPACITY_LIMIT:
+                _save_ledger(path, ledger)
+                raise CapacityBusy("Dispatch Impala capacity is busy")
+            ledger["metadata_owners"].append(
+                {
+                    "token": token,
+                    "pid": os.getpid(),
+                    "operation": operation,
+                    "created_at": _now_utc(),
+                }
+            )
             _save_ledger(path, ledger)
-            raise CapacityBusy("Dispatch Impala capacity is busy")
-        ledger["metadata_owners"].append(
-            {
-                "token": token,
-                "pid": os.getpid(),
-                "operation": operation,
-                "created_at": _now_utc(),
-            }
-        )
-        _save_ledger(path, ledger)
+    except _LockDeadline:
+        raise CapacityBusy("Dispatch capacity ledger is busy") from None
     return MetadataLease(token, root)
 
 
@@ -632,15 +708,96 @@ def _remove_intent(ledger: _Ledger, sequence: int) -> None:
     ]
 
 
-def _discard_launch_intent(root: Path | None, sequence: int) -> None:
-    with _locked_home(root) as home:
-        path, ledger = _load_reconciled(home)
-        _remove_intent(ledger, sequence)
-        _save_ledger(path, ledger)
+def _discard_launch_intent(
+    root: Path | None,
+    sequence: int,
+    deadline: float | None = None,
+) -> bool:
+    try:
+        with _locked_home(root, deadline) as home:
+            path, ledger = _load_reconciled(home)
+            _remove_intent(ledger, sequence)
+            _save_ledger(path, ledger)
+    except _LockDeadline:
+        return False
+    return True
 
 
 def _wait_for_retry() -> None:
     time.sleep(_POLL_SECONDS)
+
+
+def _launch_timeout(timeout: float) -> CapacityTimeout:
+    return CapacityTimeout(f"Dispatch launch capacity timed out after {timeout:g}s")
+
+
+def _register_launch_intent(
+    root: Path | None,
+    deadline: float,
+    deadline_at: float,
+    timeout: float,
+) -> int:
+    try:
+        with _locked_home(root, deadline) as home:
+            path, ledger = _load_reconciled(home)
+            if len(ledger["job_reservations"]) >= CAPACITY_LIMIT:
+                _save_ledger(path, ledger)
+                raise CapacityBusy("two Dispatch jobs already occupy shared capacity")
+            if time.monotonic() >= deadline:
+                _save_ledger(path, ledger)
+                raise _launch_timeout(timeout)
+            sequence = ledger["next_sequence"]
+            ledger["next_sequence"] += 1
+            ledger["launch_intents"].append(
+                {
+                    "pid": os.getpid(),
+                    "sequence": sequence,
+                    "created_at": _now_utc(),
+                    "deadline_at": deadline_at,
+                }
+            )
+            _save_ledger(path, ledger)
+            return sequence
+    except _LockDeadline:
+        raise _launch_timeout(timeout) from None
+
+
+def _try_admit_registered_launch(
+    create_pending: Callable[[], T],
+    sequence: int,
+    root: Path | None,
+    deadline: float,
+    timeout: float,
+    control: _LaunchControl,
+) -> tuple[bool, T | None]:
+    try:
+        with _locked_home(root, deadline) as home:
+            path, ledger = _load_reconciled(home)
+            if len(ledger["job_reservations"]) >= CAPACITY_LIMIT:
+                _save_ledger(path, ledger)
+                raise CapacityBusy("two Dispatch jobs already occupy shared capacity")
+            if time.monotonic() >= deadline:
+                _save_ledger(path, ledger)
+                raise _launch_timeout(timeout)
+
+            sequences = [intent["sequence"] for intent in ledger["launch_intents"]]
+            if sequence not in sequences:
+                _save_ledger(path, ledger)
+                raise _launch_timeout(timeout)
+            is_first = sequence == min(sequences)
+            if not is_first or _occupied(ledger) >= CAPACITY_LIMIT:
+                _save_ledger(path, ledger)
+                return False, None
+            if not control.begin_commit(deadline):
+                raise _LaunchCancelled
+
+            result = create_pending()
+            _remove_intent(ledger, sequence)
+            _reconcile(ledger, home)
+            _save_ledger(path, ledger)
+            return True, result
+    except _LockDeadline:
+        raise _launch_timeout(timeout) from None
 
 
 def admit_launch(
@@ -657,43 +814,122 @@ def admit_launch(
     """
     if timeout < 0:
         raise ValueError("timeout must not be negative")
-    started = time.monotonic()
+    deadline = time.monotonic() + timeout
+    deadline_at = time.time() + timeout
     sequence: int | None = None
+    control = _LaunchControl()
     try:
-        with _locked_home(root) as home:
-            path, ledger = _load_reconciled(home)
-            if len(ledger["job_reservations"]) >= CAPACITY_LIMIT:
-                _save_ledger(path, ledger)
-                raise CapacityBusy("two Dispatch jobs already occupy shared capacity")
-            sequence = ledger["next_sequence"]
-            ledger["next_sequence"] += 1
-            ledger["launch_intents"].append(
-                {"pid": os.getpid(), "sequence": sequence, "created_at": _now_utc()}
-            )
-            _save_ledger(path, ledger)
-
-        assert sequence is not None
+        sequence = _register_launch_intent(root, deadline, deadline_at, timeout)
         while True:
-            with _locked_home(root) as home:
-                path, ledger = _load_reconciled(home)
-                if len(ledger["job_reservations"]) >= CAPACITY_LIMIT:
-                    raise CapacityBusy("two Dispatch jobs already occupy shared capacity")
-
-                sequences = [intent["sequence"] for intent in ledger["launch_intents"]]
-                is_first = bool(sequences) and sequence == min(sequences)
-                if is_first and _occupied(ledger) < CAPACITY_LIMIT:
-                    result = create_pending()
-                    _remove_intent(ledger, sequence)
-                    _reconcile(ledger, home)
-                    _save_ledger(path, ledger)
-                    sequence = None
-                    return result
-
-                if time.monotonic() - started >= timeout:
-                    raise CapacityTimeout(f"Dispatch launch capacity timed out after {timeout:g}s")
-
-                _save_ledger(path, ledger)
+            admitted, result = _try_admit_registered_launch(
+                create_pending,
+                sequence,
+                root,
+                deadline,
+                timeout,
+                control,
+            )
+            if admitted:
+                sequence = None
+                return cast(T, result)
             _wait_for_retry()
     finally:
         if sequence is not None:
-            _discard_launch_intent(root, sequence)
+            _discard_launch_intent(root, sequence, time.monotonic())
+
+
+async def _discard_launch_intent_async(
+    root: Path | None,
+    sequence: int,
+    deadline: float | None,
+) -> None:
+    cleanup = asyncio.create_task(
+        asyncio.to_thread(_discard_launch_intent, root, sequence, deadline)
+    )
+    try:
+        await asyncio.shield(cleanup)
+    except asyncio.CancelledError:
+        await _await_uncancellable(cleanup)
+        raise
+
+
+async def _await_uncancellable(task: asyncio.Task[T]) -> T:
+    """Return a committed thread result despite repeated task cancellation."""
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+
+
+async def admit_launch_async(
+    create_pending: Callable[[], T],
+    timeout: float = 30,
+    root: Path | None = None,
+) -> T:
+    """Admit one Pending callback with FIFO async waits and safe cancellation.
+
+    One durable intent survives every 250ms async wait. Cancellation before the
+    commit boundary removes that intent and raises ``CancelledError``. Once the
+    callback has crossed the commit boundary, cancellation is suppressed so the
+    caller receives the Pending result and can finish runner handoff.
+    """
+    if timeout < 0:
+        raise ValueError("timeout must not be negative")
+    deadline = time.monotonic() + timeout
+    deadline_at = time.time() + timeout
+    control = _LaunchControl()
+    sequence: int | None = None
+    cleanup_deadline: float | None = deadline
+
+    registration = asyncio.create_task(
+        asyncio.to_thread(
+            _register_launch_intent,
+            root,
+            deadline,
+            deadline_at,
+            timeout,
+        )
+    )
+    try:
+        try:
+            sequence = await asyncio.shield(registration)
+        except asyncio.CancelledError as cancelled:
+            cleanup_deadline = None
+            try:
+                sequence = await _await_uncancellable(registration)
+            except Exception:
+                raise cancelled
+            raise cancelled
+
+        while True:
+            attempt = asyncio.create_task(
+                asyncio.to_thread(
+                    _try_admit_registered_launch,
+                    create_pending,
+                    sequence,
+                    root,
+                    deadline,
+                    timeout,
+                    control,
+                )
+            )
+            try:
+                admitted, result = await asyncio.shield(attempt)
+            except asyncio.CancelledError as cancelled:
+                if control.cancel_before_commit():
+                    cleanup_deadline = None
+                    try:
+                        await _await_uncancellable(attempt)
+                    except (_LaunchCancelled, CapacityBusy, CapacityTimeout):
+                        pass
+                    raise cancelled
+                admitted, result = await _await_uncancellable(attempt)
+            if admitted:
+                sequence = None
+                return cast(T, result)
+            await asyncio.sleep(min(_ASYNC_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+    finally:
+        if sequence is not None:
+            await _discard_launch_intent_async(root, sequence, cleanup_deadline)

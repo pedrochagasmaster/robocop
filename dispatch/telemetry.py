@@ -27,7 +27,7 @@ from .version import __version__
 
 # Edge Nodes are POSIX, so flock is the real locking path. Windows only runs
 # this module during operator test runs (release verify); there msvcrt takes
-# over, same as dispatch.jobs._launch_lock.
+# over, matching the cross-platform file-lock approach in dispatch.capacity.
 try:
     import fcntl
 except ImportError:  # Windows

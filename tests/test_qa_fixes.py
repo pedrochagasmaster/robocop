@@ -217,7 +217,7 @@ def test_preview_bad_template_dates_does_not_crash(mock_env_with_config, tmp_pat
     asyncio.run(run())
 
 
-def test_validation_summary_reflects_running_cap(
+def test_validation_summary_defers_running_cap_to_authoritative_admission(
     mock_env_with_config, monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setattr(jobs, "pid_is_alive", lambda pid: True)
@@ -234,7 +234,7 @@ def test_validation_summary_reflects_running_cap(
             screen = _new_job_screen(app, tmp_path)
             await pilot.pause(1.0)
             issues = screen._validation_issues()
-            assert any("cap" in i.lower() for i in issues)
+            assert not any("cap" in i.lower() for i in issues)
 
     asyncio.run(run())
 

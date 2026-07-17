@@ -389,7 +389,7 @@ class BrowserScreen(Screen[None]):
         )
 
     async def _load_table_sizes(self, names: list[str]) -> None:
-        """Fetch sizes with adaptive concurrency, updating cells in place."""
+        """Fetch sizes in shared-capacity batches, updating cells in place."""
         rows_by_name = {str(row["name"]): row for row in self._table_rows}
         try:
             async for name, stats in impala.iter_table_sizes(self._schema(), names):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -18,7 +17,6 @@ RUNNING_CAP = 2
 LAUNCH_SLOT_STATES = {"Pending", "Running"}
 PENDING_ORPHAN_GRACE = timedelta(minutes=5)
 LAUNCH_WAIT_TIMEOUT_SECONDS = 30.0
-LAUNCH_RETRY_SECONDS = 0.25
 
 _manifest_cache: dict[Path, tuple[float, manifest.JobManifest]] = {}
 
@@ -267,46 +265,27 @@ async def create_job_when_capacity_available(
     user: str | None = None,
     timeout: float = LAUNCH_WAIT_TIMEOUT_SECONDS,
 ) -> tuple[Path, manifest.JobManifest]:
-    """Wait asynchronously for launch admission without blocking the TUI.
+    """Wait asynchronously for one atomic Pending admission.
 
-    Each blocking shared-ledger attempt lasts at most 250ms. Cancellation
-    shields the active attempt long enough for ``admit_launch`` to remove its
-    FIFO intent in ``finally`` before cancellation propagates.
+    The capacity module owns FIFO identity, 250ms waits, deadline enforcement,
+    and the cancellation-safe callback commit boundary.
     """
-    if timeout < 0:
-        raise ValueError("timeout must not be negative")
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
 
-    while True:
-        remaining = max(0.0, deadline - loop.time())
-        attempt_timeout = min(LAUNCH_RETRY_SECONDS, remaining)
-        attempt = asyncio.create_task(
-            asyncio.to_thread(
-                create_job_if_slot_available,
-                source=source,
-                destination=destination,
-                params=params,
-                launch_cwd=launch_cwd,
-                sql_text=sql_text,
-                user=user,
-                timeout=attempt_timeout,
-            )
+    def create_pending() -> tuple[Path, manifest.JobManifest]:
+        return manifest.create_job(
+            source=source,
+            destination=destination,
+            params=params,
+            launch_cwd=launch_cwd,
+            sql_text=sql_text,
+            user=user,
         )
-        try:
-            return await asyncio.shield(attempt)
-        except capacity.CapacityTimeout:
-            if loop.time() >= deadline:
-                raise capacity.CapacityTimeout(
-                    f"Dispatch launch capacity timed out after {timeout:g}s"
-                ) from None
-            await asyncio.sleep(0)
-        except asyncio.CancelledError:
-            try:
-                await asyncio.shield(attempt)
-            except (asyncio.CancelledError, capacity.CapacityTimeout):
-                pass
-            raise
+
+    return await capacity.admit_launch_async(
+        create_pending,
+        timeout=timeout,
+        root=config.data_root(user),
+    )
 
 
 def active_jobs(root: Path | None = None) -> list[manifest.JobManifest]:

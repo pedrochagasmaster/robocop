@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import TypeVar
 
 from . import capacity, process, sql
 from .formatting import format_data_size, parse_data_size
 
 QUERY_TIMEOUT_SECONDS = 30
 _SIZE_FETCH_BATCH_SIZE = 2
+_T = TypeVar("_T")
 
 IMPALA_BASE_ARGV = (
     "impala-shell",
@@ -24,6 +26,19 @@ IMPALA_BASE_ARGV = (
 )
 
 
+class ImpalaExecutionError(RuntimeError):
+    """An expected impala-shell timeout or non-zero query result."""
+
+
+async def _await_uncancellable(task: asyncio.Task[_T]) -> _T:
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+
+
 async def _run_impala_shell(sql: str) -> str:
     try:
         rc, stdout, stderr = await process.run_exec(
@@ -32,19 +47,43 @@ async def _run_impala_shell(sql: str) -> str:
     except (asyncio.TimeoutError, TimeoutError):
         # str(TimeoutError()) is empty, which would surface as a blank error in
         # the Browser; give the user an actionable message instead.
-        raise RuntimeError(f"impala-shell timed out after {QUERY_TIMEOUT_SECONDS}s") from None
+        raise ImpalaExecutionError(
+            f"impala-shell timed out after {QUERY_TIMEOUT_SECONDS}s"
+        ) from None
     if rc != 0:
-        raise RuntimeError(stderr or stdout or f"impala-shell exited {rc}")
+        raise ImpalaExecutionError(stderr or stdout or f"impala-shell exited {rc}")
     return stdout
+
+
+async def _release_metadata(lease: capacity.MetadataLease) -> None:
+    release = asyncio.create_task(asyncio.to_thread(lease.release))
+    try:
+        await asyncio.shield(release)
+    except asyncio.CancelledError:
+        await _await_uncancellable(release)
+        raise
+
+
+async def _acquire_metadata(operation: str) -> capacity.MetadataLease:
+    acquisition = asyncio.create_task(asyncio.to_thread(capacity.try_acquire_metadata, operation))
+    try:
+        return await asyncio.shield(acquisition)
+    except asyncio.CancelledError as cancelled:
+        try:
+            lease = await _await_uncancellable(acquisition)
+        except Exception:
+            raise cancelled
+        await _release_metadata(lease)
+        raise cancelled
 
 
 async def query(sql: str) -> str:
     """Run one Impala metadata statement under a shared fail-fast lease."""
-    lease = await asyncio.to_thread(capacity.try_acquire_metadata, _operation_name(sql))
+    lease = await _acquire_metadata(_operation_name(sql))
     try:
         return await _run_impala_shell(sql)
     finally:
-        await asyncio.to_thread(lease.release)
+        await _release_metadata(lease)
 
 
 def _operation_name(statement: str) -> str:
@@ -141,9 +180,7 @@ async def iter_table_sizes(
             full_table = table_name if "." in table_name else f"{schema}.{table_name}"
             try:
                 stats = await table_stats(full_table)
-            except capacity.CapacityLedgerError:
-                raise
-            except (capacity.CapacityBusy, RuntimeError):
+            except (capacity.CapacityBusy, ImpalaExecutionError):
                 stats = unknown
             return table_name, stats
 
