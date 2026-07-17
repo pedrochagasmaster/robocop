@@ -7,11 +7,20 @@ import base64
 import json
 import os
 import shutil
+import stat
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, TypedDict
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 
 from . import config, sql
 
@@ -93,14 +102,90 @@ def load(path: Path) -> JobManifest:
     return data
 
 
-def write(path: Path, manifest: JobManifest) -> None:
-    validate(manifest)
+def _lock_manifest(handle: Any) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        return
+    handle.seek(0)
+    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+
+
+def _unlock_manifest(handle: Any) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return
+    handle.seek(0)
+    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+@contextmanager
+def _manifest_write_lock(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(".manifest.lock")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"manifest lock is not a regular file: {lock_path}")
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "r+b") as handle:
+            descriptor = -1
+            if metadata.st_size == 0:
+                handle.write(b"\0")
+                handle.flush()
+            _lock_manifest(handle)
+            try:
+                yield
+            finally:
+                _unlock_manifest(handle)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _write_unlocked(path: Path, item: JobManifest) -> None:
+    validate(item)
     tmp = path.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8") as handle:
-        json.dump(manifest, handle, indent=2, sort_keys=True)
+        json.dump(item, handle, indent=2, sort_keys=True)
         handle.write("\n")
     _replace_manifest(tmp, path)
+
+
+def write(path: Path, item: JobManifest) -> None:
+    with _manifest_write_lock(path):
+        _write_unlocked(path, item)
+
+
+def write_if_unchanged(
+    path: Path,
+    item: JobManifest,
+    loaded_metadata: os.stat_result,
+) -> bool:
+    """Atomically replace ``path`` only while its loaded snapshot is current."""
+    with _manifest_write_lock(path):
+        try:
+            current_metadata = path.lstat()
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(current_metadata.st_mode):
+            raise ValueError(f"manifest is not a regular file: {path}")
+        current_snapshot = (
+            current_metadata.st_dev,
+            current_metadata.st_ino,
+            current_metadata.st_mtime_ns,
+        )
+        loaded_snapshot = (
+            loaded_metadata.st_dev,
+            loaded_metadata.st_ino,
+            loaded_metadata.st_mtime_ns,
+        )
+        if current_snapshot != loaded_snapshot:
+            return False
+        _write_unlocked(path, item)
+        return True
 
 
 def _replace_manifest(tmp: Path, path: Path) -> None:
@@ -116,10 +201,11 @@ def _replace_manifest(tmp: Path, path: Path) -> None:
 
 
 def update(path: Path, **changes: Any) -> JobManifest:
-    manifest = load(path)
-    manifest.update(changes)
-    write(path, manifest)
-    return manifest
+    with _manifest_write_lock(path):
+        item = load(path)
+        item.update(changes)
+        _write_unlocked(path, item)
+        return item
 
 
 def validate(data: Any) -> None:

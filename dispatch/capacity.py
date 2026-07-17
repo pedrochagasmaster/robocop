@@ -538,8 +538,7 @@ def _write_reconciled_manifest(
             raise CapacityLedgerError(f"job manifest is not a regular file: {path}")
         if not _same_manifest_snapshot(current_metadata, loaded_metadata):
             return False
-        manifest.write(path, item)
-        return True
+        return manifest.write_if_unchanged(path, item, loaded_metadata)
     except CapacityLedgerError:
         raise
     except (OSError, ValueError, KeyError, TypeError) as exc:

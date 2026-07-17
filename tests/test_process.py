@@ -3,12 +3,34 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
-from dispatch import process
+from dispatch import capacity, impala, process
+
+PROCESS_TIMEOUT = 2.0
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+async def _wait_for(predicate) -> bool:
+    deadline = time.monotonic() + PROCESS_TIMEOUT
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return predicate()
 
 
 def test_windows_resolver_prefers_exact_python_script_before_pathext_wrapper(
@@ -63,3 +85,106 @@ def test_cancel_process_group_sends_sigterm_to_group(monkeypatch) -> None:
     process.cancel_process_group(4242)
 
     assert calls == [(4242, process.signal.SIGTERM)]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_impala_query_reaps_child_before_releasing_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = tmp_path / "started"
+    terminated = tmp_path / "terminated"
+    allow_exit = tmp_path / "allow-exit"
+    shell = tmp_path / "impala-shell"
+    shell.write_text(
+        f"""#!{sys.executable}
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+started = Path(os.environ["DISPATCH_TEST_CHILD_STARTED"])
+terminated = Path(os.environ["DISPATCH_TEST_CHILD_TERMINATED"])
+allow_exit = Path(os.environ["DISPATCH_TEST_CHILD_ALLOW_EXIT"])
+
+def handle_term(_signum, _frame):
+    terminated.write_text("terminated", encoding="utf-8")
+    while not allow_exit.exists():
+        time.sleep(0.01)
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, handle_term)
+started.write_text(str(os.getpid()), encoding="utf-8")
+while True:
+    signal.pause()
+""",
+        encoding="utf-8",
+    )
+    shell.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("DISPATCH_DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("DISPATCH_TEST_CHILD_STARTED", str(started))
+    monkeypatch.setenv("DISPATCH_TEST_CHILD_TERMINATED", str(terminated))
+    monkeypatch.setenv("DISPATCH_TEST_CHILD_ALLOW_EXIT", str(allow_exit))
+
+    existing = capacity.try_acquire_metadata("existing")
+    task = asyncio.create_task(impala.query("SHOW TABLES IN aa_enc;"))
+    pid = -1
+    probe = None
+    try:
+        assert await _wait_for(started.exists)
+        pid = int(started.read_text(encoding="utf-8"))
+        task.cancel()
+        assert await _wait_for(lambda: terminated.exists() or task.done())
+
+        child_was_orphaned = task.done() and _pid_exists(pid)
+        terminated_before_release = terminated.exists()
+        try:
+            probe = capacity.try_acquire_metadata("must-stay-blocked")
+        except capacity.CapacityBusy:
+            pass
+
+        allow_exit.write_text("exit", encoding="utf-8")
+        if not terminated_before_release and _pid_exists(pid):
+            os.kill(pid, signal.SIGTERM)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await _wait_for(lambda: not _pid_exists(pid))
+
+        assert child_was_orphaned is False
+        assert terminated_before_release is True
+        assert probe is None
+    finally:
+        allow_exit.write_text("exit", encoding="utf-8")
+        if pid > 0 and _pid_exists(pid):
+            os.kill(pid, signal.SIGKILL)
+            await _wait_for(lambda: not _pid_exists(pid))
+        if probe is not None:
+            probe.release()
+        existing.release()
+
+
+@pytest.mark.asyncio
+async def test_run_exec_timeout_still_terminates_and_reaps_child(tmp_path: Path) -> None:
+    started = tmp_path / "timeout-started"
+    terminated = tmp_path / "timeout-terminated"
+    script = (
+        "import os,signal,time\n"
+        "from pathlib import Path\n"
+        f"started=Path({str(started)!r})\n"
+        f"terminated=Path({str(terminated)!r})\n"
+        "def stop(_signum,_frame):\n"
+        "    terminated.write_text('terminated',encoding='utf-8')\n"
+        "    raise SystemExit(0)\n"
+        "signal.signal(signal.SIGTERM,stop)\n"
+        "started.write_text(str(os.getpid()),encoding='utf-8')\n"
+        "while True: time.sleep(1)\n"
+    )
+
+    with pytest.raises(asyncio.TimeoutError):
+        await process.run_exec(sys.executable, "-c", script, timeout=0.1)
+
+    pid = int(started.read_text(encoding="utf-8"))
+    assert terminated.exists()
+    assert not _pid_exists(pid)

@@ -655,6 +655,83 @@ def test_runner_manifest_replacement_during_reconciliation_preserves_reservation
     acquired[0].release()
 
 
+def test_runner_manifest_write_after_snapshot_check_wins_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = admit_launch(lambda: _write_job(tmp_path, "check-write-race"), root=tmp_path)
+    stale = time.time() - 6 * 60
+    os.utime(path, (stale, stale))
+    snapshot_compared = threading.Event()
+    allow_reconcile_write = threading.Event()
+    original_same_snapshot = capacity._same_manifest_snapshot
+
+    def pause_after_successful_comparison(
+        current: os.stat_result,
+        loaded: os.stat_result,
+    ) -> bool:
+        same = original_same_snapshot(current, loaded)
+        if same:
+            snapshot_compared.set()
+            assert allow_reconcile_write.wait(PROCESS_TIMEOUT)
+        return same
+
+    monkeypatch.setattr(capacity, "_same_manifest_snapshot", pause_after_successful_comparison)
+    acquired: list[capacity.MetadataLease] = []
+    failures: list[BaseException] = []
+
+    def acquire_metadata() -> None:
+        try:
+            acquired.append(try_acquire_metadata("describe", tmp_path))
+        except BaseException as exc:
+            failures.append(exc)
+
+    acquisition = threading.Thread(target=acquire_metadata)
+    acquisition.start()
+    assert snapshot_compared.wait(PROCESS_TIMEOUT)
+    manifest.update(
+        path,
+        state="Running",
+        pid=os.getpid(),
+        started_at=manifest.now_utc(),
+    )
+    allow_reconcile_write.set()
+    acquisition.join(PROCESS_TIMEOUT)
+
+    assert not acquisition.is_alive()
+    assert failures == []
+    assert len(acquired) == 1
+    assert manifest.load(path)["state"] == "Running"
+    with pytest.raises(CapacityBusy):
+        try_acquire_metadata("second", tmp_path)
+    acquired[0].release()
+
+
+def test_windows_manifest_lock_uses_same_byte_after_initialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    positions: list[tuple[int, int]] = []
+
+    class FakeMsvcrt:
+        LK_LOCK = 1
+        LK_UNLCK = 2
+
+        @staticmethod
+        def locking(_descriptor: int, mode: int, _count: int) -> None:
+            positions.append((handle.tell(), mode))
+
+    monkeypatch.setattr(manifest, "fcntl", None)
+    monkeypatch.setattr(manifest, "msvcrt", FakeMsvcrt, raising=False)
+    with (tmp_path / "manifest.lock").open("w+b") as handle:
+        handle.write(b"\0")
+        manifest._lock_manifest(handle)
+        handle.seek(1)
+        manifest._unlock_manifest(handle)
+
+    assert positions == [(0, FakeMsvcrt.LK_LOCK), (0, FakeMsvcrt.LK_UNLCK)]
+
+
 def test_dead_running_job_is_failed_and_reclaimed(tmp_path: Path) -> None:
     ctx = multiprocessing.get_context("spawn")
     runner = ctx.Process(target=_exit_cleanly)

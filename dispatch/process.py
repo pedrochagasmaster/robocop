@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from typing import Literal
 
+from .asyncio_utils import await_uncancellable
+
 
 def _resolve_exec_argv(argv: tuple[str, ...], *, windows: bool | None = None) -> tuple[str, ...]:
     """Resolve a command without letting Windows bypass PATH-injected Python mocks."""
@@ -31,6 +33,15 @@ def _resolve_exec_argv(argv: tuple[str, ...], *, windows: bool | None = None) ->
     return (shutil.which(argv[0]) or argv[0], *argv[1:])
 
 
+async def _terminate_and_reap(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is None:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+    await proc.wait()
+
+
 async def run_exec(
     *argv: str, timeout: float | None = None, stdin_data: bytes | None = None
 ) -> tuple[int, str, str]:
@@ -47,9 +58,12 @@ async def run_exec(
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(input=stdin_data), timeout=timeout)
+    except asyncio.CancelledError:
+        cleanup = asyncio.create_task(_terminate_and_reap(proc))
+        await await_uncancellable(cleanup)
+        raise
     except asyncio.TimeoutError:
-        proc.terminate()
-        await proc.wait()
+        await _terminate_and_reap(proc)
         raise
     return proc.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 

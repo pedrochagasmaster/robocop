@@ -106,6 +106,7 @@ class BrowserScreen(Screen[None]):
         self._checked: set[str] = set()
         self._describe_text: str = ""
         self._sizes_loading = False
+        self._size_worker_generation = 0
         self._size_column_key: ColumnKey | None = None
 
     def compose(self) -> ComposeResult:
@@ -384,6 +385,8 @@ class BrowserScreen(Screen[None]):
         Shared capacity admits at most two stats commands. ``exclusive=True``
         cancels any fetch still running from a previous load.
         """
+        self._size_worker_generation += 1
+        generation = self._size_worker_generation
         if not self._tables:
             self._sizes_loading = False
             return
@@ -393,13 +396,13 @@ class BrowserScreen(Screen[None]):
         # Exclusivity is scoped by group; keep this worker out of the default
         # group so it never cancels (or is cancelled by) the drop flow.
         self.run_worker(
-            self._load_table_sizes(names),
+            self._load_table_sizes(names, generation),
             name="table-sizes",
             group="table-sizes",
             exclusive=True,
         )
 
-    async def _load_table_sizes(self, names: list[str]) -> None:
+    async def _load_table_sizes(self, names: list[str], generation: int) -> None:
         """Fetch sizes in shared-capacity batches, updating cells in place."""
         rows_by_name = {str(row["name"]): row for row in self._table_rows}
         try:
@@ -415,10 +418,12 @@ class BrowserScreen(Screen[None]):
         except capacity.CapacityLedgerError as exc:
             self._show_capacity_error("SHOW TABLE STATS", exc)
         finally:
-            self._sizes_loading = False
-        self._update_sort_indicator()
-        if self._sort_mode == "size" and self._table_rows:
-            self._render_table_list(selected_before=self._selected_table())
+            if generation == self._size_worker_generation:
+                self._sizes_loading = False
+        if generation == self._size_worker_generation:
+            self._update_sort_indicator()
+            if self._sort_mode == "size" and self._table_rows:
+                self._render_table_list(selected_before=self._selected_table())
 
     def _update_size_cell(self, name: str, size_display: str) -> None:
         table = self.query_one("#browser-table", DataTable)

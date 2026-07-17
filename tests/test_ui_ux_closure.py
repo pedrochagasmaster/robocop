@@ -630,6 +630,71 @@ def test_browser_renders_list_before_sizes_and_fills_them_in_background(
     asyncio.run(run())
 
 
+def test_replacement_browser_size_worker_owns_loading_state(
+    mock_env_with_config,
+    monkeypatch,
+) -> None:
+    """A cancelled predecessor cannot clear the replacement worker's loading state."""
+
+    async def run() -> None:
+        first_started = asyncio.Event()
+        first_finalizing = asyncio.Event()
+        allow_first_finish = asyncio.Event()
+        first_finished = asyncio.Event()
+        second_started = asyncio.Event()
+        allow_second_finish = asyncio.Event()
+        call_count = 0
+
+        async def gated_sizes(schema: str, table_names: list[str]):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    first_finalizing.set()
+                    await allow_first_finish.wait()
+                    first_finished.set()
+                return
+            second_started.set()
+            await allow_second_finish.wait()
+            for name in table_names:
+                yield name, impala.TableStats(size_bytes=42, size_display="42 B")
+
+        monkeypatch.setattr("dispatch.impala.iter_table_sizes", gated_sizes)
+        app = DispatchApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = BrowserScreen(auto_load=False)
+            app.push_screen(screen)
+            await pilot.pause()
+            screen._tables = ["first"]
+            screen._rebuild_table_rows()
+            screen._render_table_list()
+            screen._start_size_fetch()
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+
+            screen._tables = ["second"]
+            screen._rebuild_table_rows()
+            screen._render_table_list()
+            screen._start_size_fetch()
+            await asyncio.wait_for(first_finalizing.wait(), timeout=1)
+            await asyncio.wait_for(second_started.wait(), timeout=1)
+            allow_first_finish.set()
+            await asyncio.wait_for(first_finished.wait(), timeout=1)
+            await pilot.pause()
+
+            assert screen._sizes_loading is True
+            assert "sizes loading" in str(screen.query_one("#browser-sort-indicator").render())
+
+            allow_second_finish.set()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert screen._sizes_loading is False
+
+    asyncio.run(run())
+
+
 def test_browser_mouse_and_x_toggle_selection_while_space_does_not(
     mock_env_with_config, monkeypatch
 ) -> None:
