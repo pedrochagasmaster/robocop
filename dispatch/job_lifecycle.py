@@ -73,10 +73,9 @@ def reconcile(
     modified_at: datetime | None,
     *,
     pid_probe: Callable[[int], bool] = pid_is_alive,
-    now: datetime | None = None,
 ) -> Reconciliation | None:
     """Return the shared stale-Job transition, without performing file I/O."""
-    current_time = now or datetime.now(timezone.utc)
+    current_time = datetime.now(timezone.utc)
     pid = item.get("pid")
     log_message: str | None = None
 

@@ -254,8 +254,23 @@ def test_launch_intents_are_admitted_fifo_across_processes(tmp_path: Path) -> No
     assert sorted(observed) == [("admitted", "first"), ("admitted", "second")]
 
 
-def test_waiting_launch_has_priority_over_new_stats_lease(tmp_path: Path) -> None:
+def test_waiting_launch_has_priority_over_new_stats_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launch_waiting = threading.Event()
+    resume_launch = threading.Event()
     outcome: list[str] = []
+    original_attempt = capacity._try_admit_registered_launch
+
+    def pause_after_blocked_attempt(*args: Any, **kwargs: Any) -> tuple[bool, Any | None]:
+        result = original_attempt(*args, **kwargs)
+        if not result[0]:
+            launch_waiting.set()
+            assert resume_launch.wait(PROCESS_TIMEOUT)
+        return result
+
+    monkeypatch.setattr(capacity, "_try_admit_registered_launch", pause_after_blocked_attempt)
     first_lease = try_acquire_metadata("describe", tmp_path)
     second_lease = try_acquire_metadata("describe", tmp_path)
 
@@ -264,13 +279,18 @@ def test_waiting_launch_has_priority_over_new_stats_lease(tmp_path: Path) -> Non
 
     launch = threading.Thread(target=launch_target)
     launch.start()
-    _wait_for_intent_pids(tmp_path, [os.getpid()])
-
-    first_lease.release()
-    with pytest.raises(CapacityBusy):
-        try_acquire_metadata("stats", tmp_path)
-
-    second_lease.release()
+    assert launch_waiting.wait(PROCESS_TIMEOUT)
+    try:
+        assert [intent["pid"] for intent in _read_ledger(tmp_path)["launch_intents"]] == [
+            os.getpid()
+        ]
+        first_lease.release()
+        with pytest.raises(CapacityBusy):
+            try_acquire_metadata("stats", tmp_path)
+        assert len(_read_ledger(tmp_path)["launch_intents"]) == 1
+    finally:
+        resume_launch.set()
+        second_lease.release()
     launch.join(PROCESS_TIMEOUT)
     assert not launch.is_alive()
     assert outcome == ["launch"]
@@ -582,6 +602,57 @@ def test_expired_pending_job_is_failed_and_reclaimed(tmp_path: Path) -> None:
     assert manifest.load(path)["state"] == "Failed"
     first.release()
     second.release()
+
+
+def test_runner_manifest_replacement_during_reconciliation_preserves_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = admit_launch(lambda: _write_job(tmp_path, "starting"), root=tmp_path)
+    stale = time.time() - 6 * 60
+    os.utime(path, (stale, stale))
+    snapshot_loaded = threading.Event()
+    runner_replaced_manifest = threading.Event()
+    original_reconcile = job_lifecycle.reconcile
+
+    def pause_after_snapshot(
+        item: manifest.JobManifest,
+        modified_at: datetime | None,
+        **kwargs: Any,
+    ) -> job_lifecycle.Reconciliation | None:
+        snapshot_loaded.set()
+        assert runner_replaced_manifest.wait(PROCESS_TIMEOUT)
+        return original_reconcile(item, modified_at, **kwargs)
+
+    monkeypatch.setattr(job_lifecycle, "reconcile", pause_after_snapshot)
+    acquired: list[capacity.MetadataLease] = []
+    failures: list[BaseException] = []
+
+    def acquire_metadata() -> None:
+        try:
+            acquired.append(try_acquire_metadata("describe", tmp_path))
+        except BaseException as exc:
+            failures.append(exc)
+
+    acquisition = threading.Thread(target=acquire_metadata)
+    acquisition.start()
+    assert snapshot_loaded.wait(PROCESS_TIMEOUT)
+    manifest.update(
+        path,
+        state="Running",
+        pid=os.getpid(),
+        started_at=manifest.now_utc(),
+    )
+    runner_replaced_manifest.set()
+    acquisition.join(PROCESS_TIMEOUT)
+
+    assert not acquisition.is_alive()
+    assert failures == []
+    assert len(acquired) == 1
+    assert manifest.load(path)["state"] == "Running"
+    with pytest.raises(CapacityBusy):
+        try_acquire_metadata("second", tmp_path)
+    acquired[0].release()
 
 
 def test_dead_running_job_is_failed_and_reclaimed(tmp_path: Path) -> None:

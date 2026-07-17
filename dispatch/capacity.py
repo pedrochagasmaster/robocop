@@ -512,16 +512,41 @@ def _locked_home(root: Path | None, deadline: float | None = None) -> Iterator[P
             handle.close()
 
 
-def _write_reconciled_manifest(path: Path, item: manifest.JobManifest) -> None:
+def _same_manifest_snapshot(current: os.stat_result, loaded: os.stat_result) -> bool:
+    return (
+        current.st_dev,
+        current.st_ino,
+        current.st_mtime_ns,
+    ) == (
+        loaded.st_dev,
+        loaded.st_ino,
+        loaded.st_mtime_ns,
+    )
+
+
+def _write_reconciled_manifest(
+    path: Path,
+    item: manifest.JobManifest,
+    loaded_metadata: os.stat_result,
+) -> bool:
     try:
         _require_directory(path.parent, "job directory")
-        _require_regular_file(path, "job manifest")
+        current_metadata = _path_metadata(path, "job manifest", missing_ok=True)
+        if current_metadata is None:
+            return False
+        if not stat.S_ISREG(current_metadata.st_mode):
+            raise CapacityLedgerError(f"job manifest is not a regular file: {path}")
+        if not _same_manifest_snapshot(current_metadata, loaded_metadata):
+            return False
         manifest.write(path, item)
+        return True
+    except CapacityLedgerError:
+        raise
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise CapacityLedgerError(f"cannot reconcile job manifest {path}: {exc}") from exc
 
 
-def _load_job_manifest(path: Path) -> tuple[manifest.JobManifest, datetime] | None:
+def _load_job_manifest(path: Path) -> tuple[manifest.JobManifest, os.stat_result] | None:
     if not _require_regular_file(path, "job manifest", missing_ok=True):
         return None
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -538,8 +563,7 @@ def _load_job_manifest(path: Path) -> tuple[manifest.JobManifest, datetime] | No
             if descriptor >= 0:
                 os.close(descriptor)
         manifest.validate(data)
-        modified_at = datetime.fromtimestamp(metadata.st_mtime, tz=timezone.utc)
-        return data, modified_at
+        return data, metadata
     except FileNotFoundError:
         return None
     except CapacityLedgerError:
@@ -550,15 +574,18 @@ def _load_job_manifest(path: Path) -> tuple[manifest.JobManifest, datetime] | No
 
 def _active_reservation(path: Path) -> _JobReservation | None:
     try:
-        loaded = _load_job_manifest(path)
-        if loaded is None:
-            return None
-        item, modified_at = loaded
-        state = item["state"]
-        reconciliation = job_lifecycle.reconcile(item, modified_at)
-        if reconciliation is not None:
-            _write_reconciled_manifest(path, reconciliation.manifest)
-            return None
+        while True:
+            loaded = _load_job_manifest(path)
+            if loaded is None:
+                return None
+            item, loaded_metadata = loaded
+            state = item["state"]
+            modified_at = datetime.fromtimestamp(loaded_metadata.st_mtime, tz=timezone.utc)
+            reconciliation = job_lifecycle.reconcile(item, modified_at)
+            if reconciliation is None:
+                break
+            if _write_reconciled_manifest(path, reconciliation.manifest, loaded_metadata):
+                return None
     except (FileNotFoundError, NotADirectoryError):
         return None
     except CapacityLedgerError:
@@ -891,14 +918,10 @@ async def _discard_launch_intent_async(
         raise
 
 
-async def _admit_immediately_async(
-    create_pending: Callable[[], T],
-    root: Path | None,
+async def _await_admission_attempt(
+    attempt: asyncio.Task[T],
+    control: _LaunchControl,
 ) -> T:
-    control = _LaunchControl()
-    attempt: asyncio.Task[T] = asyncio.create_task(
-        asyncio.to_thread(_try_admit_immediately, create_pending, root, control)
-    )
     try:
         return await asyncio.shield(attempt)
     except asyncio.CancelledError as cancelled:
@@ -909,6 +932,17 @@ async def _admit_immediately_async(
                 pass
             raise cancelled
         return await await_uncancellable(attempt)
+
+
+async def _admit_immediately_async(
+    create_pending: Callable[[], T],
+    root: Path | None,
+) -> T:
+    control = _LaunchControl()
+    attempt: asyncio.Task[T] = asyncio.create_task(
+        asyncio.to_thread(_try_admit_immediately, create_pending, root, control)
+    )
+    return await _await_admission_attempt(attempt, control)
 
 
 async def _try_admit_registered_launch_async(
@@ -930,16 +964,7 @@ async def _try_admit_registered_launch_async(
             control,
         )
     )
-    try:
-        return await asyncio.shield(attempt)
-    except asyncio.CancelledError as cancelled:
-        if control.cancel_before_commit():
-            try:
-                await await_uncancellable(attempt)
-            except (_LaunchCancelled, CapacityBusy, CapacityTimeout):
-                pass
-            raise cancelled
-        return await await_uncancellable(attempt)
+    return await _await_admission_attempt(attempt, control)
 
 
 async def admit_launch_async(
