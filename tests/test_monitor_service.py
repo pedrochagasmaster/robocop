@@ -567,6 +567,12 @@ class TestEventFileReplay:
         snapshot_root = (
             service.snapshot("job-1").orchestrator_calls[0].shell_executions[0].queries[0]
         )
+        assert [attempt.query_id for attempt in snapshot_root.attempts_depth_first()] == [
+            QID_1,
+            QID_RETRY,
+            QID_RETRY_2,
+        ]
+        assert snapshot_root.latest_retry_leaf().query_id == QID_RETRY_2
         assert snapshot_root.retries[0].retries[0].observation is not None
 
     def test_query_retried_with_no_prior_query_is_dropped_tolerantly(self, tmp_path: Path) -> None:

@@ -605,22 +605,8 @@ class JobDetailScreen(Screen[None]):
                 if not shell.queries:
                     continue
                 query = shell.queries[-1]
-                return JobDetailScreen._latest_retry_leaf(query)
+                return query.latest_retry_leaf()
         return None
-
-    @staticmethod
-    def _latest_retry_leaf(query: QueryAttempt) -> QueryAttempt:
-        """Follow the newest transparent-retry branch to its deepest leaf."""
-        while query.retries:
-            query = query.retries[-1]
-        return query
-
-    @staticmethod
-    def _query_attempts_depth_first(query: QueryAttempt) -> list[QueryAttempt]:
-        attempts = [query]
-        for retry in query.retries:
-            attempts.extend(JobDetailScreen._query_attempts_depth_first(retry))
-        return attempts
 
     def _format_current_attempt(self, leaf: QueryAttempt | None) -> str:
         if leaf is None:
@@ -682,7 +668,7 @@ class JobDetailScreen(Screen[None]):
         truth. Only the last attempt in the chain (no further retry) may
         report a terminal outcome as such.
         """
-        chain = self._query_attempts_depth_first(query)
+        chain = query.attempts_depth_first()
         described: list[str] = []
         for index, attempt in enumerate(chain):
             has_following = index < len(chain) - 1 or (index == len(chain) - 1 and fallback_follows)

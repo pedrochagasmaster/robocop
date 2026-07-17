@@ -98,6 +98,20 @@ class QueryAttempt:
     def identity_key(self) -> tuple[str, str]:
         return (self.coordinator_base_url, self.query_id)
 
+    def attempts_depth_first(self) -> tuple[QueryAttempt, ...]:
+        """Return this attempt and every transparent retry in event order."""
+        attempts = [self]
+        for retry in self.retries:
+            attempts.extend(retry.attempts_depth_first())
+        return tuple(attempts)
+
+    def latest_retry_leaf(self) -> QueryAttempt:
+        """Follow the newest transparent-retry branch to its deepest leaf."""
+        query = self
+        while query.retries:
+            query = query.retries[-1]
+        return query
+
 
 @dataclass(frozen=True)
 class ShellExecutionAttempt:
