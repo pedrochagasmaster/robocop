@@ -41,27 +41,41 @@ def _sel_plain(cell: object) -> str:
     return cell.plain if isinstance(cell, Text) else str(cell)
 
 
-async def _click_table_cell(pilot, table: DataTable, row: int, column: int) -> None:
-    """Click the rendered center of a DataTable cell through Pilot hit-testing."""
+async def _click_visible_table_cell(pilot, table: DataTable, row: int, column: int) -> None:
+    """Click a visible DataTable cell using its scroll-adjusted rendered center."""
     region = table._get_cell_region(Coordinate(row, column))
     content_x = table.content_region.x - table.region.x
     content_y = table.content_region.y - table.region.y
     center_x, center_y = region.center
+    scroll_x, scroll_y = table.scroll_offset
+    if column >= table.fixed_columns:
+        center_x -= scroll_x
+    if row >= table.fixed_rows:
+        center_y -= scroll_y
+    click_x = center_x + content_x
+    click_y = center_y + content_y
+    assert content_x <= click_x < content_x + table.content_region.width
+    assert content_y <= click_y < content_y + table.content_region.height
     clicked = await pilot.click(
         table,
-        offset=(center_x + content_x, center_y + content_y),
+        offset=(click_x, click_y),
     )
     assert clicked is True
 
 
-async def _click_table_header(pilot, table: DataTable, column: int) -> None:
-    """Click the rendered center of a DataTable header through Pilot hit-testing."""
+async def _click_visible_table_header(pilot, table: DataTable, column: int) -> None:
+    """Click a visible DataTable header using its scroll-adjusted rendered center."""
     region = table._get_column_region(column)
     content_x = table.content_region.x - table.region.x
     content_y = table.content_region.y - table.region.y
+    center_x = region.x + region.width // 2
+    if column >= table.fixed_columns:
+        center_x -= table.scroll_offset.x
+    click_x = center_x + content_x
+    assert content_x <= click_x < content_x + table.content_region.width
     clicked = await pilot.click(
         table,
-        offset=(region.x + region.width // 2 + content_x, content_y),
+        offset=(click_x, content_y),
     )
     assert clicked is True
 
@@ -554,7 +568,7 @@ def test_browser_size_header_click_sorts_descending_then_ascending(
             assert table.get_row_at(0)[1] == "dispatch_alpha"
             assert table.get_row_at(1)[1] == "dispatch_zulu"
 
-            await _click_table_header(pilot, table, 2)
+            await _click_visible_table_header(pilot, table, 2)
             await pilot.pause()
             assert table.get_row_at(0)[1] == "dispatch_zulu"
             assert table.get_row_at(1)[1] == "dispatch_alpha"
@@ -562,7 +576,7 @@ def test_browser_size_header_click_sorts_descending_then_ascending(
             indicator = str(screen.query_one("#browser-sort-indicator").render())
             assert "Sorted by: size ↓" in indicator
 
-            await _click_table_header(pilot, table, 2)
+            await _click_visible_table_header(pilot, table, 2)
             await pilot.pause()
             assert table.get_row_at(0)[1] == "dispatch_alpha"
             assert table.get_row_at(1)[1] == "dispatch_zulu"
@@ -639,7 +653,7 @@ def test_browser_mouse_and_x_toggle_selection_while_space_does_not(
             table = screen.query_one("#browser-table", BrowserTable)
             assert screen._checked == set()
 
-            await _click_table_cell(pilot, table, 0, 0)
+            await _click_visible_table_cell(pilot, table, 0, 0)
             await pilot.pause()
             assert screen._checked == {"dispatch_alpha"}
             assert _sel_plain(table.get_row_at(0)[0]) == "[X]"
@@ -648,7 +662,7 @@ def test_browser_mouse_and_x_toggle_selection_while_space_does_not(
                 screen.query_one("#browser-selection-count").render()
             )
 
-            await _click_table_cell(pilot, table, 0, 0)
+            await _click_visible_table_cell(pilot, table, 0, 0)
             await pilot.pause()
             assert screen._checked == set()
             assert screen.query_one("#drop").disabled is True
@@ -658,10 +672,15 @@ def test_browser_mouse_and_x_toggle_selection_while_space_does_not(
             assert screen._checked == set()
             assert _sel_plain(table.get_row_at(0)[0]) == UNCHECKED_MARKER.plain
 
+            await pilot.press("down")
+            await pilot.pause()
+            assert table.cursor_coordinate.row == 1
+
             await pilot.press("x")
             await pilot.pause()
-            assert screen._checked == {"dispatch_alpha"}
-            assert _sel_plain(table.get_row_at(0)[0]) == "[X]"
+            assert screen._checked == {"dispatch_zulu"}
+            assert _sel_plain(table.get_row_at(0)[0]) == UNCHECKED_MARKER.plain
+            assert _sel_plain(table.get_row_at(1)[0]) == "[X]"
             assert screen.query_one("#drop").disabled is False
 
             await pilot.press("x")
@@ -675,6 +694,44 @@ def test_browser_mouse_and_x_toggle_selection_while_space_does_not(
             assert list(table.columns.keys())  # non-empty
             labels = [str(col.label) for col in table.columns.values()]
             assert labels == ["Sel", "Name", "Size", "Type"]
+
+    asyncio.run(run())
+
+
+def test_browser_sel_hit_testing_accounts_for_scroll_offset(
+    mock_env_with_config, monkeypatch
+) -> None:
+    """Pilot clicks use rendered coordinates after the Browser table scrolls."""
+    table_names = [f"dispatch_{index:02d}" for index in range(24)]
+
+    async def fake_show_tables(schema: str, pattern: str = "*") -> list[str]:
+        return table_names
+
+    monkeypatch.setattr("dispatch.impala.show_tables", fake_show_tables)
+    monkeypatch.setattr("dispatch.impala.iter_table_sizes", _fake_iter_table_sizes({}))
+
+    async def run() -> None:
+        app = DispatchApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            screen = BrowserScreen(auto_load=False)
+            app.push_screen(screen)
+            await pilot.pause()
+            await screen.action_show_tables(describe_selection=False)
+            await pilot.pause()
+
+            table = screen.query_one("#browser-table", BrowserTable)
+            table.focus()
+            for _ in range(20):
+                await pilot.press("down")
+            await pilot.pause()
+
+            assert table.cursor_coordinate.row == 20
+            assert table.scroll_offset.y > 0
+
+            await _click_visible_table_cell(pilot, table, 20, 0)
+            await pilot.pause()
+            assert screen._checked == {"dispatch_20"}
+            assert _sel_plain(table.get_row_at(20)[0]) == "[X]"
 
     asyncio.run(run())
 
