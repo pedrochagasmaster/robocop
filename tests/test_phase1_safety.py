@@ -36,7 +36,7 @@ def test_browser_drop_requires_confirmation(mock_env_with_config, monkeypatch) -
             screen._checked = {"danger_table"}
             table = screen.query_one("#browser-table")
             table.clear()
-            table.add_row("[x]", "danger_table", "table", "12.6 MB")
+            table.add_row("[X]", "danger_table", "12.6 MB", "table", key="danger_table")
             table.cursor_coordinate = (0, 0)
             screen._update_action_state()
 

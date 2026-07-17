@@ -35,6 +35,11 @@ def _args(tmp_path: Path) -> Namespace:
     )
 
 
+def _impala_statements(query: str) -> list[str]:
+    """Split a multi-statement Impala script the way ``impala-shell -q`` does."""
+    return [part.strip() for part in query.split(";") if part.strip()]
+
+
 def test_build_monthly_job_query_keeps_temp_join_and_cleanup_in_one_script(tmp_path: Path) -> None:
     args = _args(tmp_path)
     sql_template = Path(args.sql_file).read_text(encoding="utf-8")
@@ -58,6 +63,101 @@ def test_build_monthly_job_query_keeps_temp_join_and_cleanup_in_one_script(tmp_p
         "CREATE TABLE aa_enc.dispatch_smoke_fulljoin"
     )
     assert "/das/aa/enc/e123456/dispatch_smoke_temp_202605" in query
+
+
+@pytest.mark.parametrize(
+    "sql_template",
+    [
+        # User templates often omit a trailing semicolon.
+        (
+            "select dw_process_date from core.clear_dtl_enc "
+            "where dw_process_date between '{date_inicio}' and '{date_fim}' "
+            "limit 10"
+        ),
+        # And often include one — either way the script must stay separable.
+        (
+            "select dw_process_date from core.clear_dtl_enc "
+            "where dw_process_date between '{date_inicio}' and '{date_fim}' "
+            "limit 10;"
+        ),
+    ],
+)
+def test_build_monthly_job_query_terminates_every_statement_with_semicolon(
+    tmp_path: Path, sql_template: str
+) -> None:
+    """Regression: CREATE fulljoin + cleanup DROP must not share one Impala parse.
+
+    Production SYNTAX_ERROR when the single-coordinator monthly script glued
+    ``CREATE TABLE ..._fulljoin AS ...`` to the following ``DROP TABLE`` without
+    a semicolon between them (user e169744, 2026-07-17).
+    """
+    args = _args(tmp_path)
+    query, temp_tables, final_table = monthly.build_monthly_job_query(args, sql_template)
+    statements = _impala_statements(query)
+
+    def _created_table(statement: str) -> str:
+        # "CREATE TABLE schema.name ..." -> "schema.name"
+        tokens = statement.split()
+        return tokens[2] if len(tokens) >= 3 else ""
+
+    def _dropped_table(statement: str) -> str:
+        # "DROP TABLE IF EXISTS schema.name" -> "schema.name"
+        tokens = statement.split()
+        return tokens[-1] if tokens else ""
+
+    create_temps = [
+        s
+        for s in statements
+        if s.upper().startswith("CREATE TABLE") and "_temp_" in _created_table(s)
+    ]
+    drop_fulljoin = [
+        s
+        for s in statements
+        if s.upper().startswith("DROP TABLE") and _dropped_table(s).endswith("_fulljoin")
+    ]
+    create_fulljoin = [
+        s
+        for s in statements
+        if s.upper().startswith("CREATE TABLE") and _created_table(s).endswith("_fulljoin")
+    ]
+    fulljoin_create_idx = next(
+        i
+        for i, s in enumerate(statements)
+        if s.upper().startswith("CREATE TABLE") and _created_table(s).endswith("_fulljoin")
+    )
+    cleanup_drops = [
+        s
+        for i, s in enumerate(statements)
+        if i > fulljoin_create_idx
+        and s.upper().startswith("DROP TABLE")
+        and "_temp_" in _dropped_table(s)
+    ]
+
+    assert len(create_temps) == 2
+    assert len(drop_fulljoin) == 1
+    assert len(create_fulljoin) == 1
+    assert len(cleanup_drops) == 2
+    assert final_table == "aa_enc.dispatch_smoke_fulljoin"
+    assert temp_tables == [
+        "aa_enc.dispatch_smoke_temp_202605",
+        "aa_enc.dispatch_smoke_temp_202606",
+    ]
+    # Exact production failure mode: one statement containing both.
+    assert all(
+        "\nDROP TABLE" not in s.upper() and not s.upper().endswith("DROP TABLE")
+        for s in create_fulljoin
+    )
+    assert all(
+        s.upper().startswith("DROP TABLE") and "CREATE TABLE" not in s.upper()
+        for s in cleanup_drops
+    )
+    assert all("\nDROP TABLE" not in s.upper() for s in create_temps)
+    # Every statement in the script must be a single verb (no glued peers).
+    for statement in statements:
+        verb_hits = sum(
+            1 for verb in ("CREATE TABLE", "DROP TABLE") if statement.upper().count(verb) > 0
+        )
+        assert verb_hits == 1, statement
 
 
 def test_process_monthly_job_invokes_impala_once_for_whole_job(tmp_path: Path, monkeypatch) -> None:

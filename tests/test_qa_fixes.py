@@ -496,7 +496,7 @@ def test_browser_placeholder_not_actionable(mock_env_with_config) -> None:
             await pilot.pause(0.3)
             table = screen.query_one("#browser-table", DataTable)
             table.clear()
-            table.add_row("[ ]", NO_TABLES_PLACEHOLDER, "", "—")
+            table.add_row("[ ]", NO_TABLES_PLACEHOLDER, "—", "")
             table.cursor_coordinate = (0, 0)
             await pilot.pause(0.1)
             assert screen._full_table() == ""

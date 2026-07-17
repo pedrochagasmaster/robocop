@@ -102,13 +102,16 @@ def build_monthly_job_query(args, sql_template: str) -> tuple[str, list[str], st
         date_inicio_str, date_fim_str = str(date.date()), str(month_end_date.date())
         dt_ano_mes = date.strftime('%Y%m')
         temp_table_name = f"{args.schema}.{args.table_name}_temp_{dt_ano_mes}"
-        monthly_sql = render_monthly_sql(sql_template, date_inicio_str, date_fim_str)
+        # Strip a trailing ';' from the user template so we always emit exactly
+        # one terminator after CREATE ... AS <select>.  Without it, the next
+        # DROP/CREATE is glued into the same Impala parse (SYNTAX_ERROR).
+        monthly_sql = render_monthly_sql(sql_template, date_inicio_str, date_fim_str).rstrip().rstrip(";")
         statements.append(f"""
             DROP TABLE IF EXISTS {temp_table_name};
             CREATE TABLE {temp_table_name}
             STORED AS parquet LOCATION '/das/{schema_prefix}/enc/{args.user}/{args.table_name}_temp_{dt_ano_mes}'
             AS
-            {monthly_sql}
+            {monthly_sql};
         """)
 
     union_query_parts = [f"SELECT * FROM {table}" for table in planned_temp_tables]
@@ -117,11 +120,11 @@ def build_monthly_job_query(args, sql_template: str) -> tuple[str, list[str], st
         DROP TABLE IF EXISTS {final_table_name};
         CREATE TABLE {final_table_name}
         STORED AS parquet LOCATION '/das/{schema_prefix}/enc/{args.user}/{args.table_name}_fulljoin' AS
-        {union_query}
+        {union_query};
     """)
 
     for table in planned_temp_tables:
-        statements.append(f"DROP TABLE IF EXISTS {table}")
+        statements.append(f"DROP TABLE IF EXISTS {table};")
 
     return "\n".join(statements), planned_temp_tables, final_table_name
 
