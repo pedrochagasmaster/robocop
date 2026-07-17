@@ -111,6 +111,9 @@ class FakeMonitorClient:
 
     def __init__(self) -> None:
         self.calls: list[im.QueryIdentity] = []
+        self.coordinator_discovery_calls: list[str] = []
+        self.discovery_criteria_calls: list[im.DiscoveryCriteria] = []
+        self.discovered_identity: im.QueryIdentity | None = None
         self.responses: dict[tuple[str, str], list[im.ImpalaObservation]] = {}
         self.default_response: im.ImpalaObservation | None = None
 
@@ -131,6 +134,16 @@ class FakeMonitorClient:
         if self.default_response is not None:
             return self.default_response
         return make_observation()
+
+    def discover_coordinators(self, seed_base_url: str) -> list[str]:
+        self.coordinator_discovery_calls.append(seed_base_url)
+        return [seed_base_url]
+
+    def discover(self, criteria: im.DiscoveryCriteria) -> im.QueryIdentity:
+        self.discovery_criteria_calls.append(criteria)
+        if self.discovered_identity is None:
+            raise RuntimeError("no discovery result")
+        return self.discovered_identity
 
 
 class FakeClock:
@@ -706,6 +719,255 @@ class TestPolling:
         clock.advance(10.0)
         service.run_pending()
         assert [call.query_id for call in client.calls].count(QID_1) == 2
+
+
+class TestBackgroundRegistration:
+    def test_background_cadence_tightens_for_detail_without_duplicate_poller(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                event_line("shell_started"),
+                event_line("query_discovered", coordinator_base_url=COORD_1, query_id=QID_1),
+            ],
+        )
+        client = FakeMonitorClient()
+        clock = FakeClock()
+        service = ms.MonitorService(client, clock=clock)
+
+        service.sync_background_jobs({("job-1", tmp_path)})
+        service.run_pending()
+        assert len(client.calls) == 1
+        assert service.poller_count("job-1") == 1
+        clock.advance(29)
+        service.run_pending()
+        assert len(client.calls) == 1
+        clock.advance(1)
+        service.run_pending()
+        assert len(client.calls) == 2
+
+        service.subscribe("job-1", tmp_path)
+        assert service.poller_count("job-1") == 1
+        clock.advance(2)
+        service.run_pending()
+        assert len(client.calls) == 3
+        service.unsubscribe("job-1")
+        clock.advance(2)
+        service.run_pending()
+        assert len(client.calls) == 3
+        clock.advance(28)
+        service.run_pending()
+        assert len(client.calls) == 4
+
+    def test_unlisted_terminal_job_prunes_after_final_confirmation(self, tmp_path: Path) -> None:
+        events_path = tmp_path / "monitor.events.jsonl"
+        write_events(
+            events_path,
+            [
+                event_line("shell_started"),
+                event_line("query_discovered", coordinator_base_url=COORD_1, query_id=QID_1),
+            ],
+        )
+        terminal = make_observation(phase="succeeded", raw_state="FINISHED")
+        client = FakeMonitorClient()
+        client.queue(COORD_1, QID_1, terminal, terminal)
+        clock = FakeClock()
+        service = ms.MonitorService(client, clock=clock)
+        service.sync_background_jobs({("job-1", tmp_path)})
+        service.run_pending()
+        service.sync_background_jobs(set())
+        assert service.snapshot("job-1").available
+        clock.advance(30)
+        service.run_pending()
+        assert not service.snapshot("job-1").available
+
+
+class TestIdentityRecovery:
+    def _job_with_one_running_query(self, tmp_path: Path) -> Path:
+        return TestPolling._job_with_one_running_query(self, tmp_path)
+
+    def _recoverable_job(self, tmp_path: Path) -> None:
+        job_manifest = {
+            "schema_version": 1,
+            "id": "job-1",
+            "tool": "dispatch",
+            "user": "user_a",
+            "source": {"type": "SqlFile", "sql_path_at_launch": "input.sql"},
+            "destination": {
+                "type": "Table+Csv",
+                "schema": "db_a",
+                "table_name": "table_a",
+                "csv_path": "out.csv",
+            },
+            "params": {},
+            "orchestrator_calls": [
+                {"script": "Query_Impala_Parametrized.py", "argv": ["python", "first.py"]},
+                {
+                    "script": "download_to_csv.py",
+                    "argv": [
+                        "python",
+                        "download_to_csv.py",
+                        "--table-name",
+                        "db_a.table_a",
+                        "--output-file",
+                        "out.csv",
+                    ],
+                },
+            ],
+            "state": "Running",
+            "pid": 123,
+            "started_at": "2026-07-15T10:00:00Z",
+            "finished_at": None,
+            "exit_code": None,
+        }
+        (tmp_path / "manifest.json").write_text(json.dumps(job_manifest), encoding="utf-8")
+        write_events(
+            tmp_path / "monitor.events.jsonl",
+            [
+                v2_event_line(
+                    "shell_started",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-recover",
+                )
+            ],
+        )
+
+    def test_criteria_are_exactly_derived_and_unique_identity_is_attached(
+        self, tmp_path: Path
+    ) -> None:
+        self._recoverable_job(tmp_path)
+        client = FakeMonitorClient()
+        client.discovered_identity = im.QueryIdentity(
+            coordinator_base_url=COORD_1,
+            query_id=QID_1,
+            shell_execution_id="shell-recover",
+            relation="initial",
+            discovered_at="2026-07-15T10:00:30Z",
+        )
+        service = ms.MonitorService(client, clock=FakeClock())
+        service.sync_background_jobs({("job-1", tmp_path)})
+
+        criteria = service.recovery_criteria("job-1", "call-0002")
+        assert criteria.statement_prefix == "select * from db_a.table_a;"
+        assert criteria.statement_type == "QUERY"
+        assert criteria.database == "db_a"
+        assert criteria.orchestrator_call_id == "call-0002"
+        assert criteria.orchestrator_call_index == 2
+        snapshot = service.recover_identity("job-1", "call-0002", criteria, seed_url=COORD_1)
+
+        query = snapshot.orchestrator_calls[0].shell_executions[0].queries[0]
+        assert query.query_id == QID_1
+        assert client.coordinator_discovery_calls == [COORD_1]
+        assert client.discovery_criteria_calls == [criteria]
+        with (tmp_path / "monitor.events.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(
+                v2_event_line(
+                    "shell_finished",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-recover",
+                    returncode=0,
+                )
+            )
+        service.run_pending()
+        assert service.snapshot("job-1").orchestrator_calls[0].shell_executions[0].queries
+
+        # A bounded truncation replay reattaches only the in-memory recovery;
+        # a fresh process would have no such map and must recover again.
+        write_events(
+            tmp_path / "monitor.events.jsonl",
+            [
+                v2_event_line(
+                    "shell_started",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-recover",
+                )
+            ],
+        )
+        service.run_pending()
+        assert service.snapshot("job-1").orchestrator_calls[0].shell_executions[0].queries
+
+    def test_recovery_refuses_weakened_or_context_free_criteria(self, tmp_path: Path) -> None:
+        self._recoverable_job(tmp_path)
+        client = FakeMonitorClient()
+        service = ms.MonitorService(client, clock=FakeClock())
+        service.sync_background_jobs({("job-1", tmp_path)})
+        criteria = service.recovery_criteria("job-1", "call-0002")
+        weakened = im.DiscoveryCriteria(**{**criteria.__dict__, "statement_prefix": "select *"})
+        with pytest.raises(ms.IdentityRecoveryError, match="identity unavailable/ambiguous"):
+            service.recover_identity("job-1", "call-0002", weakened, seed_url=COORD_1)
+
+    def test_one_missing_fallback_shell_is_recoverable_from_captured_seed(
+        self, tmp_path: Path
+    ) -> None:
+        self._recoverable_job(tmp_path)
+        write_events(
+            tmp_path / "monitor.events.jsonl",
+            [
+                v2_event_line(
+                    "shell_started",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-initial",
+                ),
+                v2_event_line(
+                    "query_discovered",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-initial",
+                    coordinator_base_url=COORD_1,
+                    query_id=QID_1,
+                ),
+                v2_event_line(
+                    "shell_started",
+                    call_id="call-0002",
+                    call_index=2,
+                    script="download_to_csv.py",
+                    shell_execution_id="shell-recover",
+                    shell_relation="orchestrator_pool_fallback",
+                ),
+            ],
+        )
+        client = FakeMonitorClient()
+        client.discovered_identity = im.QueryIdentity(
+            coordinator_base_url=COORD_2,
+            query_id=QID_2,
+            shell_execution_id="shell-recover",
+            relation="initial",
+            discovered_at="2026-07-15T10:00:30Z",
+        )
+        service = ms.MonitorService(client, clock=FakeClock())
+        service.sync_background_jobs({("job-1", tmp_path)})
+        criteria = service.recovery_criteria("job-1", "call-0002")
+
+        snapshot = service.recover_identity("job-1", "call-0002", criteria)
+
+        assert client.coordinator_discovery_calls == [COORD_1]
+        assert snapshot.orchestrator_calls[0].shell_executions[1].queries[0].query_id == QID_2
+
+    def test_query_file_call_is_not_eligible(self, tmp_path: Path) -> None:
+        self._recoverable_job(tmp_path)
+        data = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+        data["orchestrator_calls"][1]["argv"] = [
+            "python",
+            "download_to_csv.py",
+            "--query-file",
+            "job.sql",
+        ]
+        (tmp_path / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+        service = ms.MonitorService(FakeMonitorClient(), clock=FakeClock())
+        service.sync_background_jobs({("job-1", tmp_path)})
+        with pytest.raises(ms.IdentityRecoveryError, match="identity unavailable/ambiguous"):
+            service.recovery_criteria("job-1", "call-0002")
 
     def test_poller_shared_across_two_subscribers_one_client_call_stream(
         self, tmp_path: Path

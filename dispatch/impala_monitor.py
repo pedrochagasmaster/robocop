@@ -69,6 +69,22 @@ class QueryIdentity:
 
 
 @dataclass(frozen=True)
+class DiscoveryCriteria:
+    """Exact bounded criteria for explicit operator identity recovery."""
+
+    user: str
+    statement_prefix: str
+    statement_type: str
+    database: str
+    started_after: str
+    started_before: str
+    shell_execution_id: str
+    relation: Relation = "initial"
+    orchestrator_call_id: str | None = None
+    orchestrator_call_index: int | None = None
+
+
+@dataclass(frozen=True)
 class ProgressCounter:
     """A defensively-parsed ``n / total`` counter with the original text."""
 

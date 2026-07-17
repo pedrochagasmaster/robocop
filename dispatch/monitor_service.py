@@ -41,10 +41,12 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Protocol
 
-from .impala_monitor import ImpalaObservation, QueryIdentity, Relation
+from . import config, manifest, sql
+from .impala_monitor import DiscoveryCriteria, ImpalaObservation, QueryIdentity, Relation
 
 logger = logging.getLogger("dispatch.monitor_service")
 
@@ -64,6 +66,14 @@ class MonitorClient(Protocol):
     """
 
     def observe(self, identity: QueryIdentity) -> ImpalaObservation: ...
+
+    def discover_coordinators(self, seed_base_url: str) -> list[str]: ...
+
+    def discover(self, criteria: DiscoveryCriteria) -> QueryIdentity: ...
+
+
+class IdentityRecoveryError(Exception):
+    """Sanitized refusal from explicit operator identity recovery."""
 
 
 # --------------------------------------------------------------------------
@@ -561,6 +571,8 @@ class _JobState:
     generation: int = 0
     builder: _HierarchyBuilder | None = None
     tail: _TailState = field(default_factory=_TailState)
+    background_registered: bool = False
+    recovered_identities: dict[str, QueryIdentity] = field(default_factory=dict)
     snapshot: MonitorSnapshot = field(
         default_factory=lambda: _unavailable_snapshot("", "monitoring unavailable")
     )
@@ -661,6 +673,7 @@ class MonitorService:
             state.subscriber_count = max(0, state.subscriber_count - 1)
             if was_foreground and state.subscriber_count == 0:
                 self._reschedule_job_pollers_locked(job_id, tighten=False)
+                self._prune_job_if_finished_locked(job_id)
         self._wake_event.set()
 
     def _reschedule_job_pollers_locked(self, job_id: str, *, tighten: bool) -> None:
@@ -719,10 +732,162 @@ class MonitorService:
             if state is None:
                 state = _JobState(job_dir=job_dir)
                 self._jobs[job_id] = state
+            state.background_registered = True
             self._refresh_job_locked(job_id, state)
             snapshot = state.snapshot
         self._wake_event.set()
         return snapshot
+
+    def sync_background_jobs(self, active_jobs: set[tuple[str, Path]]) -> None:
+        """Synchronize Dashboard-provided active manifests without rescanning."""
+        normalized = {(job_id, Path(job_dir)) for job_id, job_dir in active_jobs}
+        active_ids = {job_id for job_id, _ in normalized}
+        with self._lock:
+            for state in self._jobs.values():
+                state.background_registered = False
+            for job_id, job_dir in normalized:
+                state = self._jobs.get(job_id)
+                if state is None:
+                    state = _JobState(job_dir=job_dir)
+                    self._jobs[job_id] = state
+                else:
+                    state.job_dir = job_dir
+                state.background_registered = True
+                self._refresh_job_locked(job_id, state)
+            for job_id in list(self._jobs):
+                if job_id not in active_ids:
+                    self._prune_job_if_finished_locked(job_id)
+        self._wake_event.set()
+
+    def recovery_criteria(self, job_id: str, call_id: str) -> DiscoveryCriteria:
+        """Derive exact criteria for the one safely recoverable generated call."""
+        with self._lock:
+            state = self._jobs.get(job_id)
+            if state is None or state.builder is None:
+                raise IdentityRecoveryError("identity unavailable/ambiguous")
+            calls = [call for call in state.builder.calls() if call.call_id == call_id]
+            if len(calls) != 1:
+                raise IdentityRecoveryError("identity unavailable/ambiguous")
+            call = calls[0]
+            missing_shells = [shell for shell in call.shells if not shell.queries]
+            if (
+                call.index is None
+                or call.call_id.startswith("legacy-")
+                or call.script != "download_to_csv.py"
+                or len(missing_shells) != 1
+            ):
+                raise IdentityRecoveryError("identity unavailable/ambiguous")
+            shell = missing_shells[0]
+            job_dir = state.job_dir
+
+        try:
+            job_manifest = manifest.load(job_dir / "manifest.json")
+            source = job_manifest["source"]
+            destination = job_manifest["destination"]
+            calls_data = job_manifest["orchestrator_calls"]
+            started_at = job_manifest["started_at"]
+            user = job_manifest["user"]
+            if (
+                source.get("type") != "SqlFile"
+                or destination.get("type") != "Table+Csv"
+                or not isinstance(started_at, str)
+                or not isinstance(user, str)
+                or not user
+                or call.index > len(calls_data)
+            ):
+                raise ValueError
+            call_data = calls_data[call.index - 1]
+            if call_data.get("script") != call.script:
+                raise ValueError
+            argv = call_data.get("argv")
+            if not isinstance(argv, list) or "--query-file" in argv:
+                raise ValueError
+            positions = [index for index, value in enumerate(argv) if value == "--table-name"]
+            if len(positions) != 1 or positions[0] + 1 >= len(argv):
+                raise ValueError
+            full_table = argv[positions[0] + 1]
+            if not isinstance(full_table, str) or sql.validate_full_table(full_table):
+                raise ValueError
+            database, _ = full_table.split(".", 1)
+            started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            started = started.astimezone(timezone.utc)
+        except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
+            raise IdentityRecoveryError("identity unavailable/ambiguous") from exc
+
+        def impala_time(value: datetime) -> str:
+            return value.strftime("%Y-%m-%d %H:%M:%S.000000000")
+
+        return DiscoveryCriteria(
+            user=user,
+            statement_prefix=f"select * from {full_table};",
+            statement_type="QUERY",
+            database=database,
+            started_after=impala_time(started - timedelta(minutes=5)),
+            started_before=impala_time(started + timedelta(minutes=5)),
+            shell_execution_id=shell.shell_execution_id,
+            relation="initial",
+            orchestrator_call_id=call.call_id,
+            orchestrator_call_index=call.index,
+        )
+
+    def recover_identity(
+        self,
+        job_id: str,
+        call_id: str,
+        criteria: DiscoveryCriteria,
+        *,
+        seed_url: str | None = None,
+    ) -> MonitorSnapshot:
+        """Explicitly discover and attach one identity without durable writes."""
+        expected = self.recovery_criteria(job_id, call_id)
+        if criteria != expected:
+            raise IdentityRecoveryError("identity unavailable/ambiguous")
+        with self._lock:
+            state = self._jobs[job_id]
+            captured = [query.coordinator_base_url for query in state.builder.query_nodes()]  # type: ignore[union-attr]
+        seed = seed_url or (captured[0] if captured else config.impala_monitor_seed_url())
+        if not seed:
+            raise IdentityRecoveryError("identity unavailable/ambiguous")
+        try:
+            self._client.discover_coordinators(seed)
+            identity = self._client.discover(criteria)
+        except Exception as exc:
+            raise IdentityRecoveryError("identity unavailable/ambiguous") from exc
+        if (
+            identity.shell_execution_id != criteria.shell_execution_id
+            or identity.relation != "initial"
+        ):
+            raise IdentityRecoveryError("identity unavailable/ambiguous")
+
+        with self._lock:
+            state = self._jobs.get(job_id)
+            if state is None or state.builder is None:
+                raise IdentityRecoveryError("identity unavailable/ambiguous")
+            call = next((item for item in state.builder.calls() if item.call_id == call_id), None)
+            candidates = (
+                [] if call is None else [shell for shell in call.shells if not shell.queries]
+            )
+            if (
+                len(candidates) != 1
+                or candidates[0].shell_execution_id != identity.shell_execution_id
+            ):
+                raise IdentityRecoveryError("identity unavailable/ambiguous")
+            query = _MutableQuery(
+                query_id=identity.query_id,
+                coordinator_base_url=identity.coordinator_base_url,
+                relation=identity.relation,
+                shell_execution_id=identity.shell_execution_id,
+                discovered_at=identity.discovered_at,
+                seq=max((node.seq for node in state.builder.query_nodes()), default=0) + 1,
+            )
+            candidates[0].queries.append(query)
+            state.recovered_identities[call_id] = identity
+            state.generation += 1
+            state.snapshot = self._freeze_snapshot(job_id, state)
+            self._sync_pollers_locked(job_id, state, state.builder)
+            return state.snapshot
 
     # -- internal: replay + snapshot rebuild ------------------------------
 
@@ -764,6 +929,7 @@ class MonitorService:
             return
 
         builder = state.tail.builder
+        self._reattach_recovered_identities(state, builder)
         for query in builder.query_nodes():
             key = (query.coordinator_base_url, query.query_id)
             if key in previous_observations:
@@ -771,15 +937,41 @@ class MonitorService:
 
         state.builder = builder
         state.generation += 1
-        state.snapshot = MonitorSnapshot(
+        state.snapshot = self._freeze_snapshot(job_id, state)
+
+        self._sync_pollers_locked(job_id, state, builder)
+
+    def _reattach_recovered_identities(self, state: _JobState, builder: _HierarchyBuilder) -> None:
+        for call_id, identity in state.recovered_identities.items():
+            call = next((item for item in builder.calls() if item.call_id == call_id), None)
+            if call is None:
+                continue
+            candidates = [
+                shell
+                for shell in call.shells
+                if shell.shell_execution_id == identity.shell_execution_id and not shell.queries
+            ]
+            if len(candidates) == 1:
+                candidates[0].queries.append(
+                    _MutableQuery(
+                        query_id=identity.query_id,
+                        coordinator_base_url=identity.coordinator_base_url,
+                        relation=identity.relation,
+                        shell_execution_id=identity.shell_execution_id,
+                        discovered_at=identity.discovered_at,
+                        seq=max((node.seq for node in builder.query_nodes()), default=0) + 1,
+                    )
+                )
+
+    def _freeze_snapshot(self, job_id: str, state: _JobState) -> MonitorSnapshot:
+        assert state.builder is not None
+        return MonitorSnapshot(
             job_id=job_id,
             available=True,
             unavailable_reason=None,
-            orchestrator_calls=tuple(call.freeze() for call in builder.calls()),
+            orchestrator_calls=tuple(call.freeze() for call in state.builder.calls()),
             generation=state.generation,
         )
-
-        self._sync_pollers_locked(job_id, state, builder)
 
     def _tail_event_file(self, path: Path, tail: _TailState) -> tuple[bool, str | None]:
         """Advance one bounded per-job cursor without reopening unchanged files."""
@@ -871,6 +1063,19 @@ class MonitorService:
                 poller.superseded_final_pending = True
                 poller.next_poll_at = self._clock.monotonic()
 
+    def _prune_job_if_finished_locked(self, job_id: str) -> None:
+        state = self._jobs.get(job_id)
+        if state is None or state.background_registered or state.subscriber_count:
+            return
+        if any(
+            key.job_id == job_id and not poller.stopped for key, poller in self._pollers.items()
+        ):
+            return
+        self._pollers = {
+            key: poller for key, poller in self._pollers.items() if key.job_id != job_id
+        }
+        self._jobs.pop(job_id, None)
+
     # -- internal: background loop ----------------------------------------
 
     def _cadence_for(self, job_id: str) -> float:
@@ -913,6 +1118,8 @@ class MonitorService:
             self._poll_one(poller)
 
         with self._lock:
+            for job_id in list(self._jobs):
+                self._prune_job_if_finished_locked(job_id)
             upcoming = [p.next_poll_at for p in self._pollers.values() if not p.stopped]
         if not upcoming:
             return self._background_poll_seconds
@@ -965,13 +1172,7 @@ class MonitorService:
                 leaf.observation = observation
                 break
         state.generation += 1
-        state.snapshot = MonitorSnapshot(
-            job_id=job_id,
-            available=True,
-            unavailable_reason=None,
-            orchestrator_calls=tuple(call.freeze() for call in state.builder.calls()),
-            generation=state.generation,
-        )
+        state.snapshot = self._freeze_snapshot(job_id, state)
 
     # -- test/introspection helpers ---------------------------------------
 

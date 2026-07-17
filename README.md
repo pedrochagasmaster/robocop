@@ -58,6 +58,11 @@ dispatch
 
 Dispatch captures the launch-time CWD once. CSV destinations are resolved relative to that directory for the entire session.
 
+Operators may set `DISPATCH_IMPALA_MONITOR_SEED_URL` to a validated Impala
+coordinator base URL for explicit query-identity recovery. This optional seed
+does not bypass host validation. HTTPS remains the default; plaintext HTTP is
+still restricted to the existing development/mock opt-in.
+
 ## Usage telemetry
 
 Dispatch records offline usage events (sessions, screens, Job launches, refusals)

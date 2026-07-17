@@ -32,6 +32,7 @@ Security posture (never relaxed here or by any caller):
 from __future__ import annotations
 
 import dataclasses
+import http.client
 import json
 import random
 import ssl
@@ -46,6 +47,7 @@ from urllib.parse import urlsplit
 from . import config
 from .impala_monitor import MAX_BODY_BYTES as MAX_BODY_BYTES_TRANSPORT
 from .impala_monitor import (
+    DiscoveryCriteria,
     ImpalaObservation,
     QueryIdentity,
     Relation,
@@ -111,24 +113,6 @@ class Transport(Protocol):
         unbounded response before the caller gets a chance to reject it.
         """
         ...
-
-
-@dataclass(frozen=True)
-class DiscoveryCriteria:
-    """Bounded recovery-discovery criteria for ``ImpalaMonitorClient.discover``.
-
-    Operator-triggered only; never called from a refresh loop (plan §Slice
-    3 / research note "Query identity and coordinator discovery").
-    """
-
-    user: str
-    statement_prefix: str
-    statement_type: str
-    database: str
-    started_after: str  # ISO-8601 UTC, inclusive
-    started_before: str  # ISO-8601 UTC, inclusive
-    shell_execution_id: str
-    relation: Relation = "initial"
 
 
 def _utc_now_iso() -> str:
@@ -210,16 +194,14 @@ class UrllibTransport:
 
     def fetch(self, url: str, timeout: tuple[float, float]) -> FetchResult:
         connect_timeout, read_timeout = timeout
-        # urllib.request has one socket timeout knob; use the larger of the
-        # two so a slow-but-connecting host isn't cut off mid-read, while
-        # still bounding total wait time to a small multiple of read_timeout.
-        socket_timeout = max(connect_timeout, read_timeout)
         request = urllib.request.Request(url, method="GET")
         opener = urllib.request.build_opener(
-            _NoRedirectHandler(), urllib.request.HTTPSHandler(context=self._ssl_context)
+            _NoRedirectHandler(),
+            _TimeoutHTTPHandler(read_timeout),
+            _TimeoutHTTPSHandler(read_timeout, self._ssl_context),
         )
         try:
-            response = opener.open(request, timeout=socket_timeout)
+            response = opener.open(request, timeout=connect_timeout)
         except urllib.error.HTTPError as exc:
             body = _read_capped(exc, MAX_BODY_BYTES_TRANSPORT)
             return FetchResult(
@@ -237,6 +219,55 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
         return None
+
+
+class _ReadTimeoutHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args: object, read_timeout: float, **kwargs: object) -> None:
+        self._read_timeout = read_timeout
+        super().__init__(*args, **kwargs)
+
+    def connect(self) -> None:
+        super().connect()
+        if self.sock is not None:
+            self.sock.settimeout(self._read_timeout)
+
+
+class _ReadTimeoutHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args: object, read_timeout: float, **kwargs: object) -> None:
+        self._read_timeout = read_timeout
+        super().__init__(*args, **kwargs)
+
+    def connect(self) -> None:
+        super().connect()
+        if self.sock is not None:
+            self.sock.settimeout(self._read_timeout)
+
+
+class _TimeoutHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, read_timeout: float) -> None:
+        super().__init__()
+        self._read_timeout = read_timeout
+
+    def http_open(self, request: urllib.request.Request):  # type: ignore[no-untyped-def]
+        def connection(host: str, **kwargs: object) -> _ReadTimeoutHTTPConnection:
+            return _ReadTimeoutHTTPConnection(host, read_timeout=self._read_timeout, **kwargs)
+
+        return self.do_open(connection, request)
+
+
+class _TimeoutHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, read_timeout: float, context: ssl.SSLContext) -> None:
+        super().__init__(context=context)
+        self._read_timeout = read_timeout
+        self._context = context
+
+    def https_open(self, request: urllib.request.Request):  # type: ignore[no-untyped-def]
+        def connection(host: str, **kwargs: object) -> _ReadTimeoutHTTPSConnection:
+            return _ReadTimeoutHTTPSConnection(
+                host, read_timeout=self._read_timeout, context=self._context, **kwargs
+            )
+
+        return self.do_open(connection, request)
 
 
 def _read_capped(response: object, max_bytes: int) -> bytes:

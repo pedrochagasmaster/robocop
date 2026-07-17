@@ -244,6 +244,88 @@ def test_hidden_dashboard_refresh_returns_without_listing_jobs(
     asyncio.run(run())
 
 
+def test_dashboard_syncs_running_and_pending_jobs_from_loaded_snapshot(
+    mock_env_with_config, monkeypatch
+) -> None:
+    data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+    jobs_dir = data_root / ".dispatch" / "jobs"
+    running = _seed_job(jobs_dir, "20260520T120000Z_runmon", "Running", pid=4242)
+    pending = _seed_job(jobs_dir, "20260520T120001Z_pendmn", "Pending")
+    _seed_job(jobs_dir, "20260520T120002Z_done02", "Succeeded")
+    monkeypatch.setattr(jobs, "pid_is_alive", lambda pid: True)
+    original_active_jobs = jobs.active_jobs
+    active_jobs_calls = 0
+
+    def counted_active_jobs() -> list[dict]:
+        nonlocal active_jobs_calls
+        active_jobs_calls += 1
+        return original_active_jobs()
+
+    monkeypatch.setattr(jobs, "active_jobs", counted_active_jobs)
+
+    class FakeBackgroundMonitor:
+        def __init__(self) -> None:
+            self.sync_calls: list[set[tuple[str, Path]]] = []
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def sync_background_jobs(self, active: set[tuple[str, Path]]) -> None:
+            self.sync_calls.append(set(active))
+
+    service = FakeBackgroundMonitor()
+
+    async def run() -> None:
+        app = DispatchApp()
+        app.monitor_service = service  # type: ignore[assignment]
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.3)
+            assert service.sync_calls
+            assert service.sync_calls[-1] == {
+                (running, jobs_dir / running),
+                (pending, jobs_dir / pending),
+            }
+            calls_after_refresh = active_jobs_calls
+            await pilot.press("slash", "r", "u", "n")
+            await pilot.pause(0.1)
+            assert active_jobs_calls == calls_after_refresh
+
+    asyncio.run(run())
+
+
+def test_dashboard_monitor_sync_failure_does_not_hide_jobs(
+    mock_env_with_config, monkeypatch
+) -> None:
+    data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+    jobs_dir = data_root / ".dispatch" / "jobs"
+    running = _seed_job(jobs_dir, "20260520T120000Z_runmon", "Running", pid=4242)
+    monkeypatch.setattr(jobs, "pid_is_alive", lambda pid: True)
+
+    class FailingBackgroundMonitor:
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def sync_background_jobs(self, active: set[tuple[str, Path]]) -> None:
+            raise RuntimeError("monitor unavailable")
+
+    async def run() -> None:
+        app = DispatchApp()
+        app.monitor_service = FailingBackgroundMonitor()  # type: ignore[assignment]
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.3)
+            table = app.screen.query_one("#jobs-table", DataTable)
+            assert table.row_count == 1
+            assert table.coordinate_to_cell_key((0, 0)).row_key.value == running
+
+    asyncio.run(run())
+
+
 def test_job_detail_refresh_in_flight_skips_overlapping_tick(
     mock_env_with_config, monkeypatch
 ) -> None:
