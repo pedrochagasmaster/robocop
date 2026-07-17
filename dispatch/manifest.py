@@ -208,6 +208,21 @@ def update(path: Path, **changes: Any) -> JobManifest:
         return item
 
 
+def update_if_current(
+    path: Path,
+    expected: JobManifest,
+    **changes: Any,
+) -> tuple[JobManifest, bool]:
+    """Apply changes only if the manifest still matches the loaded snapshot."""
+    with _manifest_write_lock(path):
+        current = load(path)
+        if current != expected:
+            return current, False
+        current.update(changes)
+        _write_unlocked(path, current)
+        return current, True
+
+
 def validate(data: Any) -> None:
     if not isinstance(data, dict):
         raise ValueError("manifest must be a JSON object")

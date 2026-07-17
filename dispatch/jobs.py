@@ -120,14 +120,16 @@ def reconcile_manifest(path: Path) -> manifest.JobManifest | None:
     if reconciliation is None:
         return item
 
-    updated = manifest.update(
+    updated, reconciliation_applied = manifest.update_if_current(
         path,
+        item,
         state=reconciliation.manifest["state"],
         exit_code=reconciliation.manifest["exit_code"],
         finished_at=reconciliation.manifest["finished_at"],
     )
     _manifest_cache.pop(path, None)
-    _append_dispatch_log(path.parent, reconciliation.log_message)
+    if reconciliation_applied:
+        _append_dispatch_log(path.parent, reconciliation.log_message)
     return updated
 
 

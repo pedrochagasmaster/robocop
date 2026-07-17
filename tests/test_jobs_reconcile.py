@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from pathlib import Path
 
 from dispatch import jobs, manifest, process
@@ -102,6 +103,58 @@ def test_fresh_pending_without_pid_stays_pending(mock_env, tmp_path: Path) -> No
     assert reconciled is not None
     assert reconciled["state"] == "Pending"
     assert manifest.load(manifest_path)["state"] == "Pending"
+
+
+def test_runner_transition_after_jobs_reconciliation_snapshot_is_preserved(
+    mock_env,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    jobs._manifest_cache.clear()
+    job_dir = _create_csv_job(tmp_path)
+    manifest_path = job_dir / "manifest.json"
+    old_enough = manifest_path.stat().st_mtime - jobs.PENDING_ORPHAN_GRACE.total_seconds() - 5
+    os.utime(manifest_path, (old_enough, old_enough))
+    snapshot_evaluated = threading.Event()
+    allow_reconciliation_write = threading.Event()
+    original_reconcile = jobs.job_lifecycle.reconcile
+
+    def pause_after_pending_evaluation(*args, **kwargs):
+        reconciliation = original_reconcile(*args, **kwargs)
+        if args[0]["state"] == "Pending" and reconciliation is not None:
+            snapshot_evaluated.set()
+            assert allow_reconciliation_write.wait(2)
+        return reconciliation
+
+    monkeypatch.setattr(jobs.job_lifecycle, "reconcile", pause_after_pending_evaluation)
+    monkeypatch.setattr(jobs, "pid_is_alive", lambda pid: pid == os.getpid())
+    reconciled: list[manifest.JobManifest | None] = []
+    failures: list[BaseException] = []
+
+    def reconcile() -> None:
+        try:
+            reconciled.append(jobs.reconcile_manifest(manifest_path))
+        except BaseException as exc:
+            failures.append(exc)
+
+    reconciliation = threading.Thread(target=reconcile)
+    reconciliation.start()
+    assert snapshot_evaluated.wait(2)
+    manifest.update(
+        manifest_path,
+        state="Running",
+        pid=os.getpid(),
+        started_at=manifest.now_utc(),
+    )
+    allow_reconciliation_write.set()
+    reconciliation.join(2)
+
+    assert not reconciliation.is_alive()
+    assert failures == []
+    assert len(reconciled) == 1
+    assert reconciled[0] is not None
+    assert reconciled[0]["state"] == "Running"
+    assert manifest.load(manifest_path)["state"] == "Running"
 
 
 def test_orphan_pending_frees_launch_slot(mock_env, tmp_path: Path) -> None:
