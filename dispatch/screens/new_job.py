@@ -27,7 +27,7 @@ from textual.widgets import (
 )
 from textual.worker import Worker
 
-from .. import config, jobs, kerberos, manifest, process, sql, telemetry
+from .. import capacity, config, jobs, kerberos, manifest, process, sql, telemetry
 from ..advisor import analyze, analyze_form, analyze_sql, combine_analysis
 from ..advisor.models import AnalysisResult, badge_markup
 from .advisor_gate import AdvisorLaunchGate
@@ -1027,16 +1027,22 @@ class NewJobScreen(Screen[None]):
             self.notify(error, severity="error")
             return
         try:
-            job_dir, _job_manifest = jobs.create_job_if_slot_available(
+            job_dir, _job_manifest = await jobs.create_job_when_capacity_available(
                 source=source,
                 destination=destination,
                 params=self._params(),
                 launch_cwd=self.launch_cwd,
                 sql_text=sql_text,
             )
-        except jobs.LaunchSlotUnavailable as exc:
+        except capacity.CapacityBusy as exc:
             error = str(exc)
             telemetry.note_launch_refused("slot_cap")
+            self._show_message(error, "error")
+            self.notify(error, severity="error")
+            return
+        except (capacity.CapacityTimeout, capacity.CapacityLedgerError) as exc:
+            error = str(exc)
+            telemetry.note_launch_refused("validation")
             self._show_message(error, "error")
             self.notify(error, severity="error")
             return

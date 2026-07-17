@@ -71,7 +71,7 @@ def test_clone_prefill_reads_params_email_subject_and_dates() -> None:
 # ── Impala timeout message (F10 / IMP-06) ────────────────────────────────
 
 
-def test_impala_query_timeout_has_message(monkeypatch) -> None:
+def test_impala_query_timeout_has_message(mock_env, monkeypatch) -> None:
     async def fake_run_exec(*argv, timeout=None):
         raise asyncio.TimeoutError()
 

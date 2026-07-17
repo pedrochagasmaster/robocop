@@ -15,7 +15,7 @@ from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 from textual.widgets.data_table import CellDoesNotExist, ColumnKey
 from textual.worker import Worker
 
-from .. import impala
+from .. import capacity, impala
 from .confirm import ConfirmScreen
 from .sidebar import Sidebar
 
@@ -232,6 +232,16 @@ class BrowserScreen(Screen[None]):
         body.display = True
         self.query_one("#describe-table").display = False
 
+    def _show_capacity_error(
+        self,
+        operation: str,
+        error: capacity.CapacityBusy | capacity.CapacityTimeout | capacity.CapacityLedgerError,
+    ) -> None:
+        message = f"{operation} failed: {error}"
+        self.query_one("#browser-action-status", Static).update(f"[red]{message}[/]")
+        self._show_detail_message(message, severity="error")
+        self.notify(message, severity="error")
+
     def _schema(self) -> str:
         return self.query_one("#schema", Input).value.strip()
 
@@ -329,6 +339,13 @@ class BrowserScreen(Screen[None]):
             schema = self._schema()
             filter_val = self.query_one("#filter", Input).value.strip() or "*"
             self._tables = await impala.show_tables(schema, filter_val)
+        except (
+            capacity.CapacityBusy,
+            capacity.CapacityTimeout,
+            capacity.CapacityLedgerError,
+        ) as exc:
+            self._show_capacity_error("SHOW TABLES", exc)
+            return
         except Exception as exc:
             self._show_table_list_message(str(exc), severity="error")
             self.notify(f"SHOW TABLES failed: {exc}", severity="error")
@@ -353,9 +370,8 @@ class BrowserScreen(Screen[None]):
     def _start_size_fetch(self) -> None:
         """Fill the Size column in the background without blocking the list.
 
-        Concurrency is ``max(0, 2 - running_queries)`` (see
-        ``impala.size_fetch_concurrency``). ``exclusive=True`` cancels any fetch
-        still running from a previous load.
+        Shared capacity admits at most two stats commands. ``exclusive=True``
+        cancels any fetch still running from a previous load.
         """
         if not self._tables:
             self._sizes_loading = False
@@ -375,16 +391,20 @@ class BrowserScreen(Screen[None]):
     async def _load_table_sizes(self, names: list[str]) -> None:
         """Fetch sizes with adaptive concurrency, updating cells in place."""
         rows_by_name = {str(row["name"]): row for row in self._table_rows}
-        async for name, stats in impala.iter_table_sizes(self._schema(), names):
-            row = rows_by_name.get(name)
-            if row is None or row not in self._table_rows:
-                # The table was dropped or the list rebuilt while this fetch
-                # was in flight; skip the stale result.
-                continue
-            row["size_display"] = stats.size_display
-            row["size_bytes"] = stats.size_bytes
-            self._update_size_cell(name, stats.size_display)
-        self._sizes_loading = False
+        try:
+            async for name, stats in impala.iter_table_sizes(self._schema(), names):
+                row = rows_by_name.get(name)
+                if row is None or row not in self._table_rows:
+                    # The table was dropped or the list rebuilt while this fetch
+                    # was in flight; skip the stale result.
+                    continue
+                row["size_display"] = stats.size_display
+                row["size_bytes"] = stats.size_bytes
+                self._update_size_cell(name, stats.size_display)
+        except capacity.CapacityLedgerError as exc:
+            self._show_capacity_error("SHOW TABLE STATS", exc)
+        finally:
+            self._sizes_loading = False
         self._update_sort_indicator()
         if self._sort_mode == "size" and self._table_rows:
             self._render_table_list(selected_before=self._selected_table())
@@ -473,6 +493,13 @@ class BrowserScreen(Screen[None]):
         self.query_one("#describe-table").display = False
         try:
             result = await impala.describe_table(full)
+        except (
+            capacity.CapacityBusy,
+            capacity.CapacityTimeout,
+            capacity.CapacityLedgerError,
+        ) as exc:
+            self._show_capacity_error("DESCRIBE", exc)
+            result = str(exc)
         except Exception as exc:
             result = str(exc)
 
@@ -603,6 +630,13 @@ class BrowserScreen(Screen[None]):
                 short_name = short_names_by_full.get(full)
                 if short_name:
                     self._checked.discard(short_name)
+            except (
+                capacity.CapacityBusy,
+                capacity.CapacityTimeout,
+                capacity.CapacityLedgerError,
+            ) as exc:
+                self._show_capacity_error("DROP", exc)
+                errors.append(f"{full}: {exc}")
             except Exception as exc:
                 errors.append(f"{full}: {exc}")
 

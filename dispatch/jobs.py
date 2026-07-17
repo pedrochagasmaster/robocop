@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from . import config, manifest
+from . import capacity, config, manifest
 
 logger = logging.getLogger("dispatch.jobs")
 
@@ -18,12 +17,13 @@ ACTIVE_WINDOW = timedelta(days=7)
 RUNNING_CAP = 2
 LAUNCH_SLOT_STATES = {"Pending", "Running"}
 PENDING_ORPHAN_GRACE = timedelta(minutes=5)
+LAUNCH_WAIT_TIMEOUT_SECONDS = 30.0
+LAUNCH_RETRY_SECONDS = 0.25
 
 _manifest_cache: dict[Path, tuple[float, manifest.JobManifest]] = {}
 
 
-class LaunchSlotUnavailable(RuntimeError):
-    """Raised when a Job cannot be accepted because all launch slots are full."""
+LaunchSlotUnavailable = capacity.CapacityBusy
 
 
 def parse_time(value: str | None) -> datetime | None:
@@ -230,41 +230,6 @@ def can_launch(root: Path | None = None) -> bool:
     return count_launch_slot_jobs(root) < RUNNING_CAP
 
 
-@contextmanager
-def _launch_lock(user: str | None = None) -> Iterator[None]:
-    jobs_path = config.jobs_dir(user)
-    jobs_path.mkdir(parents=True, exist_ok=True)
-    lock_path = jobs_path / ".dispatch-launch.lock"
-    with lock_path.open("a+b") as handle:
-        try:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            return
-        except ImportError:
-            pass
-
-        try:
-            import msvcrt
-        except ImportError as exc:
-            raise RuntimeError(
-                "Dispatch launch locking requires fcntl.flock on POSIX or "
-                "msvcrt.locking on Windows; refusing to run without a real lock."
-            ) from exc
-
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        try:
-            yield
-        finally:
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-
-
 def create_job_if_slot_available(
     source: manifest.Source,
     destination: manifest.Destination,
@@ -272,18 +237,11 @@ def create_job_if_slot_available(
     launch_cwd: Path,
     sql_text: str = "",
     user: str | None = None,
+    timeout: float = LAUNCH_WAIT_TIMEOUT_SECONDS,
 ) -> tuple[Path, manifest.JobManifest]:
-    """Create a Pending Job only if a launch slot is available.
+    """Atomically admit and create one Pending Job through shared capacity."""
 
-    The slot decision and manifest creation happen while holding a filesystem
-    lock so concurrent TUI sessions cannot both consume the last slot.
-    """
-    with _launch_lock(user):
-        root = config.jobs_dir(user)
-        if count_launch_slot_jobs(root=root) >= RUNNING_CAP:
-            raise LaunchSlotUnavailable(
-                f"Already at the {RUNNING_CAP}-Job concurrency cap; wait for one to finish"
-            )
+    def create_pending() -> tuple[Path, manifest.JobManifest]:
         return manifest.create_job(
             source=source,
             destination=destination,
@@ -292,6 +250,63 @@ def create_job_if_slot_available(
             sql_text=sql_text,
             user=user,
         )
+
+    return capacity.admit_launch(
+        create_pending,
+        timeout=timeout,
+        root=config.data_root(user),
+    )
+
+
+async def create_job_when_capacity_available(
+    source: manifest.Source,
+    destination: manifest.Destination,
+    params: dict[str, Any],
+    launch_cwd: Path,
+    sql_text: str = "",
+    user: str | None = None,
+    timeout: float = LAUNCH_WAIT_TIMEOUT_SECONDS,
+) -> tuple[Path, manifest.JobManifest]:
+    """Wait asynchronously for launch admission without blocking the TUI.
+
+    Each blocking shared-ledger attempt lasts at most 250ms. Cancellation
+    shields the active attempt long enough for ``admit_launch`` to remove its
+    FIFO intent in ``finally`` before cancellation propagates.
+    """
+    if timeout < 0:
+        raise ValueError("timeout must not be negative")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+
+    while True:
+        remaining = max(0.0, deadline - loop.time())
+        attempt_timeout = min(LAUNCH_RETRY_SECONDS, remaining)
+        attempt = asyncio.create_task(
+            asyncio.to_thread(
+                create_job_if_slot_available,
+                source=source,
+                destination=destination,
+                params=params,
+                launch_cwd=launch_cwd,
+                sql_text=sql_text,
+                user=user,
+                timeout=attempt_timeout,
+            )
+        )
+        try:
+            return await asyncio.shield(attempt)
+        except capacity.CapacityTimeout:
+            if loop.time() >= deadline:
+                raise capacity.CapacityTimeout(
+                    f"Dispatch launch capacity timed out after {timeout:g}s"
+                ) from None
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(attempt)
+            except (asyncio.CancelledError, capacity.CapacityTimeout):
+                pass
+            raise
 
 
 def active_jobs(root: Path | None = None) -> list[manifest.JobManifest]:
