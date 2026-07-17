@@ -60,7 +60,10 @@ def _strip_terminal_semicolon(sql: str) -> str:
         elif state in {"single_quote", "double_quote"}:
             last_sql_index = index
             quote = "'" if state == "single_quote" else '"'
-            if char == quote:
+            if char == "\\" and next_char:
+                index += 1
+                last_sql_index = index
+            elif char == quote:
                 if next_char == quote:
                     index += 1
                     last_sql_index = index

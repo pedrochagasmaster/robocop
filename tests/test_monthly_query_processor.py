@@ -59,7 +59,10 @@ def _impala_statements(query: str) -> list[str]:
         elif state in {"single_quote", "double_quote"}:
             statement.append(char)
             quote = "'" if state == "single_quote" else '"'
-            if char == quote:
+            if char == "\\" and next_char:
+                statement.append(next_char)
+                index += 1
+            elif char == quote:
                 if next_char == quote:
                     statement.append(next_char)
                     index += 1
@@ -140,6 +143,18 @@ def test_build_monthly_job_query_keeps_temp_join_and_cleanup_in_one_script(tmp_p
         (
             "SELECT ';' AS marker, '{date_inicio}' AS start_dt, '{date_fim}' AS end_dt",
             "SELECT ';' AS marker, '2026-05-01' AS start_dt, '2026-05-31' AS end_dt",
+        ),
+        (
+            r"SELECT 'escaped \'; -- string text' AS marker, "
+            "'{date_inicio}' AS start_dt, '{date_fim}' AS end_dt",
+            r"SELECT 'escaped \'; -- string text' AS marker, "
+            "'2026-05-01' AS start_dt, '2026-05-31' AS end_dt",
+        ),
+        (
+            r'SELECT "escaped \"; -- string text" AS marker, '
+            "'{date_inicio}' AS start_dt, '{date_fim}' AS end_dt",
+            r'SELECT "escaped \"; -- string text" AS marker, '
+            "'2026-05-01' AS start_dt, '2026-05-31' AS end_dt",
         ),
     ],
 )
