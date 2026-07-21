@@ -7,6 +7,7 @@ or the mock environment — they exercise deterministic functions directly.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import stat
 from concurrent.futures import ThreadPoolExecutor
@@ -26,10 +27,19 @@ from dispatch import config, impala, jobs, kerberos, manifest, sql
     ("value", "expected"),
     [
         ("dispatch_smoke_1", None),
+        ("_leading_underscore", None),
+        ("144", "Table name must be a plain Impala identifier"),
+        (
+            "138936_das_curated_gco_cdl_daily_tinkoff",
+            "Table name must be a plain Impala identifier",
+        ),
         ("", "Table name must be a plain Impala identifier"),
         ("bad-name", "Table name must be a plain Impala identifier"),
         ("t;drop", "Table name must be a plain Impala identifier"),
         ("schema.table", "Table name must be a plain Impala identifier"),
+        ("`quoted`", "Table name must be a plain Impala identifier"),
+        ("has space", "Table name must be a plain Impala identifier"),
+        ("a--b", "Table name must be a plain Impala identifier"),
     ],
 )
 def test_plain_impala_identifier_validation(value: str, expected: str | None) -> None:
@@ -40,6 +50,11 @@ def test_plain_impala_identifier_validation(value: str, expected: str | None) ->
     ("value", "expected"),
     [
         ("aa_enc.dispatch_smoke_1", None),
+        (
+            "aa_enc.138936_das_curated_gco_cdl_daily_tinkoff",
+            "Existing table must be schema.table using plain Impala identifiers",
+        ),
+        ("aa_enc.144", "Existing table must be schema.table using plain Impala identifiers"),
         (
             "schema.table.extra",
             "Existing table must be schema.table using plain Impala identifiers",
@@ -53,11 +68,112 @@ def test_full_impala_table_validation(value: str, expected: str | None) -> None:
     assert sql.validate_full_table(value, "Existing table") == expected
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("dispatch_smoke_1", None),
+        ("_leading_underscore", None),
+        ("138936_das_curated_gco_cdl_daily_tinkoff", None),
+        ("144", None),
+        ("", "Table name must be a plain Impala identifier"),
+        ("bad-name", "Table name must be a plain Impala identifier"),
+        ("t;drop", "Table name must be a plain Impala identifier"),
+        ("schema.table", "Table name must be a plain Impala identifier"),
+        ("`quoted`", "Table name must be a plain Impala identifier"),
+        ("has space", "Table name must be a plain Impala identifier"),
+        ("a--b", "Table name must be a plain Impala identifier"),
+    ],
+)
+def test_catalog_identifier_validation(value: str, expected: str | None) -> None:
+    assert sql.validate_catalog_identifier(value, "Table name") == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("aa_enc.dispatch_smoke_1", None),
+        ("aa_enc.138936_das_curated_gco_cdl_daily_tinkoff", None),
+        ("aa_enc.144", None),
+        ("144.ok_table", None),
+        (
+            "schema.table.extra",
+            "Table must be schema.table using plain Impala identifiers",
+        ),
+        ("schema.bad-name", "Table must be schema.table using plain Impala identifiers"),
+        ("aa_enc.`144`", "Table must be schema.table using plain Impala identifiers"),
+        ("aa_enc.table;drop", "Table must be schema.table using plain Impala identifiers"),
+        ("aa_enc.table--x", "Table must be schema.table using plain Impala identifiers"),
+        ("aa_enc.table name", "Table must be schema.table using plain Impala identifiers"),
+        ("", "Table must be schema.table using plain Impala identifiers"),
+    ],
+)
+def test_catalog_full_table_validation(value: str, expected: str | None) -> None:
+    assert sql.validate_catalog_full_table(value, "Table") == expected
+
+
+def test_classic_validation_still_rejects_digit_leading_for_jobs() -> None:
+    """New Job / manifest / CSV shared validators must not accept digit-leading names."""
+    assert sql.validate_identifier("123_enc", "Schema") == (
+        "Schema must be a plain Impala identifier"
+    )
+    assert sql.validate_identifier("144", "Table name") == (
+        "Table name must be a plain Impala identifier"
+    )
+    assert sql.validate_full_table("aa_enc.144", "Existing table") == (
+        "Existing table must be schema.table using plain Impala identifiers"
+    )
+    assert sql.validate_full_table("123_enc.dispatch_smoke_1", "Destination table") == (
+        "Destination table must be schema.table using plain Impala identifiers"
+    )
+
+
+def test_table_wrapper_does_not_accept_digit_leading_via_shared_validation() -> None:
+    """Shared classic validation is the gate before table_wrapper interpolation."""
+    assert sql.validate_identifier("123_enc", "Schema") is not None
+    assert sql.validate_identifier("144", "Table name") is not None
+    # table_wrapper itself does not validate; callers must use classic validators.
+    # Digit-leading values must never pass those shared checks into this path.
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("dispatch_smoke_1", "dispatch_smoke_1"),
+        ("_leading_underscore", "_leading_underscore"),
+        ("138936_das_curated_gco_cdl_daily_tinkoff", "`138936_das_curated_gco_cdl_daily_tinkoff`"),
+        ("144", "`144`"),
+    ],
+)
+def test_quote_identifier_backticks_digit_leading_names(value: str, expected: str) -> None:
+    assert sql.quote_identifier(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("aa_enc.dispatch_smoke_1", "aa_enc.dispatch_smoke_1"),
+        (
+            "aa_enc.138936_das_curated_gco_cdl_daily_tinkoff",
+            "aa_enc.`138936_das_curated_gco_cdl_daily_tinkoff`",
+        ),
+        ("aa_enc.144", "aa_enc.`144`"),
+        ("144.ok_table", "`144`.ok_table"),
+    ],
+)
+def test_format_full_table_sql_quotes_digit_leading_table(value: str, expected: str) -> None:
+    assert sql.format_full_table_sql(value, "Table") == expected
+
+
+def test_format_full_table_sql_rejects_unsafe_before_rendering() -> None:
+    with pytest.raises(ValueError, match="schema.table using plain Impala identifiers"):
+        sql.format_full_table_sql("aa_enc.bad-name", "Table")
+
+
 def test_csv_path_is_confined_to_launch_cwd(tmp_path: Path) -> None:
     assert sql.safe_csv_path(tmp_path, "dispatch_smoke_1") == (
         tmp_path.resolve() / "dispatch_smoke_1.csv"
     )
-    for unsafe_stem in ("", "../escape", r"..\escape", "bad/name", r"bad\name", ".."):
+    for unsafe_stem in ("", "../escape", r"..\escape", "bad/name", r"bad\name", "..", "144"):
         with pytest.raises(ValueError, match="CSV filename stem|plain Impala identifier"):
             sql.safe_csv_path(tmp_path, unsafe_stem)
 
@@ -79,6 +195,22 @@ def test_show_tables_rejects_unsafe_schema_before_query(monkeypatch) -> None:
     assert queries == []
 
 
+def test_show_tables_quotes_digit_leading_schema(monkeypatch) -> None:
+    queries: list[str] = []
+
+    async def fake_query(statement: str) -> str:
+        queries.append(statement)
+        return "name\nok_table\n"
+
+    monkeypatch.setattr(impala, "query", fake_query)
+
+    async def run() -> list[str]:
+        return await impala.show_tables("144")
+
+    assert asyncio.run(run()) == ["ok_table"]
+    assert queries == ["SHOW TABLES IN `144` LIKE '*';"]
+
+
 def test_show_tables_rejects_quoted_pattern_before_query(monkeypatch) -> None:
     queries: list[str] = []
 
@@ -96,7 +228,7 @@ def test_show_tables_rejects_quoted_pattern_before_query(monkeypatch) -> None:
     assert queries == []
 
 
-@pytest.mark.parametrize("helper_name", ["describe_table", "drop_table"])
+@pytest.mark.parametrize("helper_name", ["describe_table", "drop_table", "table_stats"])
 def test_full_table_helpers_reject_unsafe_name_before_query(monkeypatch, helper_name: str) -> None:
     queries: list[str] = []
 
@@ -113,6 +245,164 @@ def test_full_table_helpers_reject_unsafe_name_before_query(monkeypatch, helper_
 
     asyncio.run(run())
     assert queries == []
+
+
+@pytest.mark.parametrize(
+    ("full_table", "expected_fragment"),
+    [
+        ("aa_enc.dispatch_smoke_1", "aa_enc.dispatch_smoke_1"),
+        ("aa_enc.144", "aa_enc.`144`"),
+        (
+            "aa_enc.138936_das_curated_gco_cdl_daily_tinkoff",
+            "aa_enc.`138936_das_curated_gco_cdl_daily_tinkoff`",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("helper_name", "sql_prefix"),
+    [
+        ("describe_table", "DESCRIBE "),
+        ("drop_table", "DROP TABLE IF EXISTS "),
+        ("table_stats", "SHOW TABLE STATS "),
+    ],
+)
+def test_full_table_helpers_quote_digit_leading_names(
+    monkeypatch, helper_name: str, sql_prefix: str, full_table: str, expected_fragment: str
+) -> None:
+    queries: list[str] = []
+
+    async def fake_query(statement: str) -> str:
+        queries.append(statement)
+        if helper_name == "table_stats":
+            return (
+                "#Rows|#Files|Size|Bytes Cached|Format|Incremental stats\n"
+                "-1|1|4.20MB|NOT CACHED|TEXT|false\n"
+            )
+        return "name|type|comment\nid|int|\n"
+
+    monkeypatch.setattr(impala, "query", fake_query)
+
+    async def run() -> None:
+        helper = getattr(impala, helper_name)
+        await helper(full_table)
+
+    asyncio.run(run())
+    assert queries == [f"{sql_prefix}{expected_fragment};"]
+
+
+def _stats_ok_output() -> str:
+    return (
+        "#Rows|#Files|Size|Bytes Cached|Format|Incremental stats\n"
+        "-1|1|4.20MB|NOT CACHED|TEXT|false\n"
+    )
+
+
+def test_iter_table_sizes_isolates_recoverable_failures(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """ValueError and ImpalaExecutionError must not abort later tables in the batch."""
+    monkeypatch.setenv("DISPATCH_DATA_ROOT", str(tmp_path))
+    calls: list[str] = []
+
+    async def fake_run_impala_shell(statement: str) -> str:
+        calls.append(statement)
+        if "`boom`" in statement or statement.endswith("boom;"):
+            raise impala.ImpalaExecutionError("impala-shell exited 1: AnalysisException")
+        return _stats_ok_output()
+
+    monkeypatch.setattr(impala, "_run_impala_shell", fake_run_impala_shell)
+
+    async def run() -> list[tuple[str, impala.TableStats]]:
+        return [
+            item
+            async for item in impala.iter_table_sizes(
+                "aa_enc",
+                [
+                    "ok_table",
+                    "bad-name",
+                    "144",
+                    "boom",
+                    "138936_das_curated_gco_cdl_daily_tinkoff",
+                ],
+            )
+        ]
+
+    with caplog.at_level(logging.WARNING, logger="dispatch.impala"):
+        results = asyncio.run(run())
+
+    by_name = {name: stats for name, stats in results}
+    assert list(by_name) == [
+        "ok_table",
+        "bad-name",
+        "144",
+        "boom",
+        "138936_das_curated_gco_cdl_daily_tinkoff",
+    ]
+    assert by_name["ok_table"].size_bytes == 4_404_019
+    assert by_name["bad-name"].size_bytes is None
+    assert by_name["bad-name"].size_display == "—"
+    assert by_name["144"].size_bytes == 4_404_019
+    assert by_name["boom"].size_bytes is None
+    assert by_name["boom"].size_display == "—"
+    assert by_name["138936_das_curated_gco_cdl_daily_tinkoff"].size_bytes == 4_404_019
+    assert any("aa_enc.bad-name" in record.getMessage() for record in caplog.records)
+    assert any("aa_enc.boom" in record.getMessage() for record in caplog.records)
+    assert any("SHOW TABLE STATS aa_enc.ok_table;" in call for call in calls)
+    assert any("SHOW TABLE STATS aa_enc.`144`;" in call for call in calls)
+    assert any("SHOW TABLE STATS aa_enc.boom;" in call for call in calls)
+    assert any(
+        "SHOW TABLE STATS aa_enc.`138936_das_curated_gco_cdl_daily_tinkoff`;" in call
+        for call in calls
+    )
+    assert not any("bad-name" in call for call in calls)
+
+
+def test_iter_table_sizes_propagates_oserror(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DISPATCH_DATA_ROOT", str(tmp_path))
+
+    async def boom(_statement: str) -> str:
+        raise FileNotFoundError("impala-shell")
+
+    monkeypatch.setattr(impala, "_run_impala_shell", boom)
+
+    async def run() -> None:
+        async for _ in impala.iter_table_sizes("aa_enc", ["ok_table"]):
+            pass
+
+    with pytest.raises(FileNotFoundError, match="impala-shell"):
+        asyncio.run(run())
+
+
+def test_iter_table_sizes_propagates_typeerror(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DISPATCH_DATA_ROOT", str(tmp_path))
+
+    async def boom(_statement: str) -> str:
+        raise TypeError("programmer bug")
+
+    monkeypatch.setattr(impala, "_run_impala_shell", boom)
+
+    async def run() -> None:
+        async for _ in impala.iter_table_sizes("aa_enc", ["ok_table"]):
+            pass
+
+    with pytest.raises(TypeError, match="programmer bug"):
+        asyncio.run(run())
+
+
+def test_iter_table_sizes_propagates_cancellederror(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DISPATCH_DATA_ROOT", str(tmp_path))
+
+    async def boom(_statement: str) -> str:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(impala, "_run_impala_shell", boom)
+
+    async def run() -> None:
+        async for _ in impala.iter_table_sizes("aa_enc", ["ok_table"]):
+            pass
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run())
 
 
 # =============================================================================

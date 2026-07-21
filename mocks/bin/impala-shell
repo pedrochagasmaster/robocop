@@ -162,10 +162,13 @@ def _mock_table_size(table_name: str) -> str:
 
 
 def _parse_drop_table(normalized_query: str) -> str | None:
-    match = re.match(r"drop table if exists\s+([\w.]+)\s*;?", normalized_query)
+    match = re.match(
+        r"drop table if exists\s+((?:`[\w]+`|[\w]+)(?:\.(?:`[\w]+`|[\w]+))?)\s*;?",
+        normalized_query,
+    )
     if not match:
         return None
-    return match.group(1)
+    return match.group(1).replace("`", "")
 
 
 def handle_schema_query(tag: str, normalized_query: str = "") -> int:
@@ -185,6 +188,7 @@ def handle_schema_query(tag: str, normalized_query: str = "") -> int:
         return 0
     if tag == "SHOW_TABLE_STATS":
         table_name = normalized_query.removeprefix("show table stats ").strip().rstrip(";")
+        table_name = table_name.replace("`", "")
         if "." in table_name:
             table_name = table_name.split(".", 1)[1]
         print("#Rows|#Files|Size|Bytes Cached|Format|Incremental stats")
