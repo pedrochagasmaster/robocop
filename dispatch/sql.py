@@ -7,8 +7,16 @@ import re
 from datetime import date, datetime
 from pathlib import Path
 
+# Classic Impala identifiers for New Job, manifest, CSV, and other shared paths:
+# letter or underscore first (unquoted SQL tokens). Digit-leading names are not
+# accepted here — Browse catalog metadata uses CATALOG_* helpers instead.
 IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 FULL_TABLE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*")
+# Catalog identifiers for Impala Browse metadata (SHOW/DESCRIBE/DROP/STATS).
+# Digit-leading names are legal in the catalog but must be backtick-quoted in
+# SQL; separators/comments/whitespace/quotes remain rejected.
+CATALOG_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_]+")
+CATALOG_FULL_TABLE_RE = re.compile(r"[A-Za-z0-9_]+\.[A-Za-z0-9_]+")
 DATE_INICIO_TOKEN = "{date_inicio}"
 DATE_FIM_TOKEN = "{date_fim}"
 
@@ -18,6 +26,45 @@ def validate_identifier(value: str, label: str) -> str | None:
     if not IDENTIFIER_RE.fullmatch(value):
         return f"{label} must be a plain Impala identifier"
     return None
+
+
+def validate_catalog_identifier(value: str, label: str) -> str | None:
+    """Return an error unless ``value`` is a catalog-safe Impala identifier.
+
+    Unlike :func:`validate_identifier`, digit-leading names are allowed so Browse
+    can address catalog tables that are not valid unquoted SQL tokens.
+    """
+    if not CATALOG_IDENTIFIER_RE.fullmatch(value):
+        return f"{label} must be a plain Impala identifier"
+    return None
+
+
+def validate_catalog_full_table(value: str, label: str = "table") -> str | None:
+    """Return an error unless ``value`` is catalog-safe ``schema.table``."""
+    if not CATALOG_FULL_TABLE_RE.fullmatch(value):
+        return f"{label} must be schema.table using plain Impala identifiers"
+    return None
+
+
+def quote_identifier(value: str) -> str:
+    """Render a catalog-validated identifier for Impala SQL.
+
+    Classic names stay bare; digit-leading catalog names are wrapped in
+    backticks. Callers must validate with catalog helpers first — this helper
+    does not accept unchecked input.
+    """
+    if IDENTIFIER_RE.fullmatch(value):
+        return value
+    return f"`{value}`"
+
+
+def format_full_table_sql(value: str, label: str = "table") -> str:
+    """Validate catalog ``schema.table`` and return it rendered for Impala SQL."""
+    error = validate_catalog_full_table(value, label)
+    if error:
+        raise ValueError(error)
+    schema, table = value.split(".", 1)
+    return f"{quote_identifier(schema)}.{quote_identifier(table)}"
 
 
 def eid_table_prefix(eid: str) -> str:

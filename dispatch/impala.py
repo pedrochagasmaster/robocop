@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from . import capacity, process, sql
 from .asyncio_utils import await_uncancellable
 from .formatting import format_data_size, parse_data_size
+
+logger = logging.getLogger("dispatch.impala")
 
 QUERY_TIMEOUT_SECONDS = 30
 _SIZE_FETCH_BATCH_SIZE = 2
@@ -90,12 +93,13 @@ def _operation_name(statement: str) -> str:
 
 
 async def show_tables(schema: str, pattern: str = "*") -> list[str]:
-    schema_error = sql.validate_identifier(schema, "Schema")
+    schema_error = sql.validate_catalog_identifier(schema, "Schema")
     if schema_error:
         raise ValueError(schema_error)
     if "'" in pattern:
         raise ValueError("SHOW TABLES pattern must not contain a single quote")
-    output = await query(f"SHOW TABLES IN {schema} LIKE '{pattern}';")
+    rendered_schema = sql.quote_identifier(schema)
+    output = await query(f"SHOW TABLES IN {rendered_schema} LIKE '{pattern}';")
     tables: list[str] = []
     for raw_line in output.splitlines():
         line = raw_line.strip()
@@ -150,8 +154,8 @@ def parse_table_stats_output(raw: str) -> TableStats:
 
 
 async def table_stats(full_table: str) -> TableStats:
-    _require_full_table(full_table)
-    output = await query(f"SHOW TABLE STATS {full_table};")
+    rendered = _require_full_table(full_table)
+    output = await query(f"SHOW TABLE STATS {rendered};")
     return parse_table_stats_output(output)
 
 
@@ -170,7 +174,21 @@ async def iter_table_sizes(
             full_table = table_name if "." in table_name else f"{schema}.{table_name}"
             try:
                 stats = await table_stats(full_table)
-            except (capacity.CapacityBusy, ImpalaExecutionError):
+            except (capacity.CapacityBusy, ImpalaExecutionError, ValueError) as exc:
+                # Recoverable per-table misses only:
+                # - CapacityBusy: shared ledger has no free metadata slot
+                # - ImpalaExecutionError: timeout or non-zero impala-shell exit
+                # - ValueError: catalog validation / format_full_table_sql reject
+                # Propagate OSError/FileNotFoundError (missing impala-shell is
+                # process-wide), programming errors (e.g. TypeError), ledger
+                # corruption, and CancelledError so exclusive workers stop cleanly.
+                if not isinstance(exc, capacity.CapacityBusy):
+                    logger.warning(
+                        "table stats unavailable for %s (%s): %s",
+                        full_table,
+                        type(exc).__name__,
+                        exc,
+                    )
                 stats = unknown
             return table_name, stats
 
@@ -179,17 +197,21 @@ async def iter_table_sizes(
             yield item
 
 
-def _require_full_table(full_table: str) -> None:
-    full_table_error = sql.validate_full_table(full_table, "Table")
-    if full_table_error:
-        raise ValueError(full_table_error)
+def _require_full_table(full_table: str) -> str:
+    """Validate catalog ``schema.table`` and return Impala SQL (with quoting).
+
+    Shared by ``table_stats``, ``describe_table``, and ``drop_table`` so every
+    Browse metadata statement that interpolates a qualified table uses the same
+    catalog-safe formatter (including digit-leading catalog names).
+    """
+    return sql.format_full_table_sql(full_table, "Table")
 
 
 async def describe_table(full_table: str) -> str:
-    _require_full_table(full_table)
-    return await query(f"DESCRIBE {full_table};")
+    rendered = _require_full_table(full_table)
+    return await query(f"DESCRIBE {rendered};")
 
 
 async def drop_table(full_table: str) -> str:
-    _require_full_table(full_table)
-    return await query(f"DROP TABLE IF EXISTS {full_table};")
+    rendered = _require_full_table(full_table)
+    return await query(f"DROP TABLE IF EXISTS {rendered};")
