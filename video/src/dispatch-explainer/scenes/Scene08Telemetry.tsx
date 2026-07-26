@@ -16,7 +16,13 @@ const SCENARIOS = [
 ];
 
 const SCENE_FROM = 2025;
-const PANELS_FROM = 2033;
+/**
+ * Scene 7 hard cuts into this one, so the panels have to be on screen almost
+ * immediately. A slow entrance here would read as one more crossfade and throw
+ * the cut away.
+ */
+const PANELS_FROM = 2025;
+const PANEL_ENTER_FRAMES = 10;
 const HIGHLIGHT_FRAMES = 24;
 const PANEL_WIDTH = 860;
 const PANEL_GAP = 60;
@@ -28,6 +34,7 @@ export const Scene08Telemetry: React.FC = () => {
   const enter = spring({
     frame: frame - PANELS_FROM,
     fps,
+    durationInFrames: PANEL_ENTER_FRAMES,
     config: { damping: 200 },
   });
   const active =
@@ -38,6 +45,7 @@ export const Scene08Telemetry: React.FC = () => {
       kicker="Telemetry and mocks"
       title="Offline by construction"
       headingFrom={SCENE_FROM}
+      headingFrames={0}
       frame={frame}
     >
       <Interactive.Div
@@ -47,8 +55,9 @@ export const Scene08Telemetry: React.FC = () => {
           gap: PANEL_GAP,
           justifyContent: "center",
           alignItems: "stretch",
-          opacity: interpolate(enter, [0, 1], [0, 1]),
-          translate: interpolate(enter, [0, 1], ["0px 24px", "0px 0px"]),
+          // Scale only, no fade: the panels have to be solid on the cut frame.
+          scale: interpolate(enter, [0, 1], [0.97, 1]),
+          translate: interpolate(enter, [0, 1], ["0px 16px", "0px 0px"]),
         }}
       >
         <Panel
@@ -129,9 +138,13 @@ export const Scene08Telemetry: React.FC = () => {
   );
 };
 
+/**
+ * Sized so the longest line, `DISPATCH_MOCK_SCENARIO=all_queues_full`, still
+ * fits inside the panel.
+ */
 const Command: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   return (
-    <span style={{ fontSize: type.code, whiteSpace: "nowrap" }}>
+    <span style={{ fontSize: type.label, whiteSpace: "nowrap" }}>
       <span style={{ color: colors.textDim }}>$ </span>
       {children}
     </span>

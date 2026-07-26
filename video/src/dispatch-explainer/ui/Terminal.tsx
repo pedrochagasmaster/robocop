@@ -5,9 +5,14 @@ import { colors, mono } from "../theme";
  * One terminal window, shared by the SSH scene and the detached-runner scene so
  * the second one reads as a callback to the first.
  */
+/**
+ * `height` is chosen so that a `TuiMock` rendered at `width` fills the body
+ * exactly, which is what lets the detached-runner scene put the real UI inside
+ * this window at the same size the SSH scene uses.
+ */
 export const TERMINAL = {
-  width: 1080,
-  height: 720,
+  width: 1240,
+  height: 818,
   headerHeight: 60,
   padding: 22,
   fontSize: 26,

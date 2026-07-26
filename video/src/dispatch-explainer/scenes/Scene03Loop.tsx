@@ -125,7 +125,13 @@ const CommandCard: React.FC<{
       style={{
         padding: "22px 30px",
         borderRadius: 12,
-        backgroundColor: colors.panel,
+        backgroundColor: highlighted
+          ? interpolateColors(
+              frame,
+              [CD_HIGHLIGHT_FROM, CD_HIGHLIGHT_FROM + 15],
+              [colors.panel, colors.accentSoft],
+            )
+          : colors.panel,
         borderWidth: 2,
         borderStyle: "solid",
         borderColor: highlighted

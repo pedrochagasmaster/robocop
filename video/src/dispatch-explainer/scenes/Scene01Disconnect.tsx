@@ -21,7 +21,9 @@ const LINES: LogLine[] = [
   { text: "[08:58:04] impala-shell -k -i edge-node-03:21000", tone: "muted" },
   { text: "[08:58:06] CREATE TABLE ads_lab.you_churn_base AS ..." },
   { text: "[09:03:41] fetched    1 200 000 rows", tone: "muted" },
+  { text: "[09:07:19] fetched    4 700 000 rows", tone: "muted" },
   { text: "[09:11:55] fetched    9 400 000 rows", tone: "muted" },
+  { text: "[09:15:26] fetched   16 500 000 rows", tone: "muted" },
   { text: "[09:19:08] fetched   24 100 000 rows", tone: "muted" },
   { text: "[09:26:32] fetched   41 800 000 rows", tone: "muted" },
   { text: "[09:31:47] fetched   58 300 000 rows", tone: "muted" },
@@ -29,6 +31,9 @@ const LINES: LogLine[] = [
   { text: "[09:38:12] writing results to churn_base.csv" },
   { text: "[09:38:12] 0% ..............................", tone: "muted" },
 ];
+
+/** The session history is already on screen when the shot opens. */
+const HISTORY_LINES = 3;
 
 /**
  * Frame at which the stream dies. Nothing moves for the next eight frames: the
@@ -42,7 +47,10 @@ const MESSAGE_FROM = 101;
 export const Scene01Disconnect: React.FC = () => {
   const frame = useAbsoluteFrame();
   const { fps } = useVideoConfig();
-  const visible = LINES.slice(0, Math.floor(Math.min(frame, STREAM_END) / 6));
+  const visible = LINES.slice(
+    0,
+    HISTORY_LINES + Math.floor(Math.min(frame, STREAM_END) / 6),
+  );
   const streaming = frame < STREAM_END;
 
   return (

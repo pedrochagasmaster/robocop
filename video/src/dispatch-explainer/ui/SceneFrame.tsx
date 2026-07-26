@@ -13,9 +13,23 @@ export const SceneFrame: React.FC<{
   title: string;
   /** Composition frame at which the heading starts fading in. */
   headingFrom: number;
+  /**
+   * Length of the heading's entrance. Set it to 0 for a scene that is hard cut
+   * into, so the heading is already at rest on the cut frame.
+   */
+  headingFrames?: number;
   frame: number;
   children: React.ReactNode;
-}> = ({ kicker, title, headingFrom, frame, children }) => {
+}> = ({ kicker, title, headingFrom, headingFrames = 18, frame, children }) => {
+  const headingEnter =
+    headingFrames === 0
+      ? 1
+      : interpolate(frame, [headingFrom, headingFrom + headingFrames], [0, 1], {
+          extrapolateLeft: "clamp",
+          extrapolateRight: "clamp",
+          easing: Easing.bezier(0.16, 1, 0.3, 1),
+        });
+
   return (
     <AbsoluteFill style={{ fontFamily: mono, color: colors.text }}>
       <Backdrop />
@@ -33,25 +47,11 @@ export const SceneFrame: React.FC<{
             display: "flex",
             flexDirection: "column",
             gap: 12,
-            opacity: interpolate(
-              frame,
-              [headingFrom, headingFrom + 18],
-              [0, 1],
-              {
-                extrapolateLeft: "clamp",
-                extrapolateRight: "clamp",
-                easing: Easing.bezier(0.16, 1, 0.3, 1),
-              },
-            ),
+            opacity: headingEnter,
             translate: interpolate(
-              frame,
-              [headingFrom, headingFrom + 18],
+              headingEnter,
+              [0, 1],
               ["0px 14px", "0px 0px"],
-              {
-                extrapolateLeft: "clamp",
-                extrapolateRight: "clamp",
-                easing: Easing.bezier(0.16, 1, 0.3, 1),
-              },
             ),
           }}
         >
