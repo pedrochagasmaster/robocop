@@ -9,7 +9,7 @@ import { colors, mono } from "../theme";
  * Designed at these dimensions and scaled to whatever slot a scene gives it, so
  * the mock is identical in every scene that shows the TUI.
  */
-export const TUI = { width: 1080, height: 700 };
+export const TUI = { width: 1080, height: 660 };
 
 const NAV_ITEMS = [
   { icon: "⌂", label: "Overview" },
@@ -19,32 +19,38 @@ const NAV_ITEMS = [
   { icon: "☰", label: "Browse" },
 ];
 
+/**
+ * IDs are shortened the way `format_job_id` does it, and the Source and
+ * Destination labels follow `_source_label` / `_dest_label`: a file or table
+ * name on the left, and either `schema.table` or the bare destination type on
+ * the right.
+ */
 const JOB_ROWS = [
   {
-    id: "20260726T141203Z",
+    id: "141203Z_k4m2xr",
     source: "churn_base.sql",
-    destination: "ads_lab.you_churn_base + Csv",
+    destination: "ads_lab.churn_base",
     state: "Running",
     elapsed: "04:12",
   },
   {
-    id: "20260726T132251Z",
+    id: "132251Z_p8q1vd",
     source: "regions.sql",
-    destination: "regions.csv",
+    destination: "Csv",
     state: "Finished",
     elapsed: "11:38",
   },
   {
-    id: "20260726T101812Z",
+    id: "101812Z_a2f9ct",
     source: "monthly_spend.sql",
-    destination: "ads_lab.you_monthly_spend",
+    destination: "ads_lab.spend_2026_07",
     state: "Finished",
     elapsed: "26:05",
   },
   {
-    id: "20260725T173044Z",
-    source: "ads_lab.you_dim_geo",
-    destination: "you_dim_geo.csv",
+    id: "173044Z_z7t3bn",
+    source: "ads_lab.dim_geo",
+    destination: "Csv",
     state: "Finished",
     elapsed: "02:57",
   },
@@ -56,12 +62,15 @@ const STATE_COLORS: Record<string, string> = {
   Failed: colors.danger,
 };
 
+/** Sized to exactly fill the main pane: 168+202+248+100+88 plus four 5px gaps. */
+const TABLE_FONT = 19;
+const COLUMN_GAP = 5;
 const COLUMNS = [
-  { key: "id", label: "ID", width: 200 },
-  { key: "source", label: "Source", width: 190 },
-  { key: "destination", label: "Destination", width: 280 },
-  { key: "state", label: "State", width: 110 },
-  { key: "elapsed", label: "Elapsed", width: 90 },
+  { key: "id", label: "ID", width: 168 },
+  { key: "source", label: "Source", width: 202 },
+  { key: "destination", label: "Destination", width: 248 },
+  { key: "state", label: "State", width: 100 },
+  { key: "elapsed", label: "Elapsed", width: 88, align: "right" as const },
 ];
 
 const KEY_HINTS = [
@@ -189,13 +198,17 @@ const StatusStrip: React.FC = () => {
     <div
       style={{
         display: "flex",
-        gap: 34,
+        gap: 26,
         padding: "16px 22px",
+        fontSize: 20,
         borderBottom: `1px solid ${colors.border}`,
       }}
     >
       {cells.map((cell) => (
-        <span key={cell.label} style={{ display: "flex", gap: 10 }}>
+        <span
+          key={cell.label}
+          style={{ display: "flex", gap: 10, whiteSpace: "nowrap" }}
+        >
           <span style={{ color: colors.textDim }}>{cell.label}</span>
           <span style={{ color: cell.tone }}>{cell.value}</span>
         </span>
@@ -218,17 +231,17 @@ const JobsTable: React.FC<{ visibleJobRows: number }> = ({
       <div
         style={{
           display: "flex",
-          gap: 18,
+          gap: COLUMN_GAP,
           paddingBottom: 8,
           borderBottom: `1px solid ${colors.border}`,
           color: colors.textDim,
-          fontSize: 20,
+          fontSize: TABLE_FONT,
         }}
       >
         {COLUMNS.map((column) => (
-          <span key={column.key} style={{ width: column.width }}>
+          <Cell key={column.key} width={column.width} align={column.align}>
             {column.label}
-          </span>
+          </Cell>
         ))}
       </div>
       {JOB_ROWS.map((row, index) => {
@@ -239,35 +252,59 @@ const JobsTable: React.FC<{ visibleJobRows: number }> = ({
             key={row.id}
             style={{
               display: "flex",
-              gap: 18,
+              gap: COLUMN_GAP,
               padding: "9px 0",
+              fontSize: TABLE_FONT,
               opacity: painted ? 1 : 0,
               backgroundColor: selected && painted ? colors.panelRaised : "transparent",
             }}
           >
-            <span style={{ width: COLUMNS[0].width, color: colors.textMuted }}>
+            <Cell width={COLUMNS[0].width} color={colors.textMuted}>
               {row.id}
-            </span>
-            <span style={{ width: COLUMNS[1].width }}>{row.source}</span>
-            <span style={{ width: COLUMNS[2].width, color: colors.textMuted }}>
+            </Cell>
+            <Cell width={COLUMNS[1].width}>{row.source}</Cell>
+            <Cell width={COLUMNS[2].width} color={colors.textMuted}>
               {row.destination}
-            </span>
-            <span
-              style={{
-                width: COLUMNS[3].width,
-                color: STATE_COLORS[row.state],
-                fontWeight: 700,
-              }}
-            >
+            </Cell>
+            <Cell width={COLUMNS[3].width} color={STATE_COLORS[row.state]} bold>
               {row.state}
-            </span>
-            <span style={{ width: COLUMNS[4].width, color: colors.textMuted }}>
+            </Cell>
+            <Cell
+              width={COLUMNS[4].width}
+              color={colors.textMuted}
+              align="right"
+            >
               {row.elapsed}
-            </span>
+            </Cell>
           </div>
         );
       })}
     </div>
+  );
+};
+
+const Cell: React.FC<{
+  width: number;
+  color?: string;
+  bold?: boolean;
+  /** The real table right-justifies Elapsed. */
+  align?: "left" | "right";
+  children: React.ReactNode;
+}> = ({ width, color, bold = false, align = "left", children }) => {
+  return (
+    <span
+      style={{
+        width,
+        flexShrink: 0,
+        color,
+        fontWeight: bold ? 700 : 400,
+        textAlign: align,
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+      }}
+    >
+      {children}
+    </span>
   );
 };
 
@@ -288,10 +325,10 @@ const DetailPane: React.FC<{ logTail: string[] }> = ({ logTail }) => {
         overflow: "hidden",
       }}
     >
-      <span style={{ color: colors.textDim, fontSize: 20 }}>
-        20260726T141203Z · run.log
+      <span style={{ color: colors.textDim, fontSize: 19 }}>
+        141203Z_k4m2xr · run.log
       </span>
-      <div style={{ fontSize: 20, lineHeight: 1.5, color: colors.textMuted }}>
+      <div style={{ fontSize: 19, lineHeight: 1.5, color: colors.textMuted }}>
         {logTail.map((line, index) => (
           <div key={index} style={{ whiteSpace: "pre" }}>
             {line}
@@ -318,16 +355,26 @@ const ActionBar: React.FC = () => {
         padding: "14px 22px",
       }}
     >
-      <span style={{ flex: 1, color: colors.textDim, fontSize: 20 }}>
-        [14:16:04] job 20260726T141203Z launched
+      <span
+        style={{
+          flex: 1,
+          minWidth: 0,
+          color: colors.textDim,
+          fontSize: 19,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+        }}
+      >
+        [14:16:04] job launched
       </span>
       {buttons.map((button) => (
         <span
           key={button.label}
           style={{
-            padding: "7px 16px",
+            padding: "7px 14px",
             borderRadius: 6,
-            fontSize: 20,
+            fontSize: 19,
+            whiteSpace: "nowrap",
             color: button.primary ? colors.bgDeep : colors.textMuted,
             backgroundColor: button.primary ? colors.accent : colors.panelRaised,
             border: `1px solid ${button.primary ? colors.accent : colors.border}`,

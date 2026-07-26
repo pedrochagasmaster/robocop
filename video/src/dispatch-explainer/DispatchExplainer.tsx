@@ -16,9 +16,16 @@ import {
   sequenceFramesOf,
 } from "./timeline";
 import { colors } from "./theme";
+import { Scene01Disconnect } from "./scenes/Scene01Disconnect";
+import { Scene02Title } from "./scenes/Scene02Title";
+import { Scene03Loop } from "./scenes/Scene03Loop";
 import { Scene04Job } from "./scenes/Scene04Job";
 import { Scene05Refusals } from "./scenes/Scene05Refusals";
-import { ScenePlaceholder } from "./scenes/ScenePlaceholder";
+import { Scene06Detached } from "./scenes/Scene06Detached";
+import { Scene07BeforeAfter } from "./scenes/Scene07BeforeAfter";
+import { Scene08Telemetry } from "./scenes/Scene08Telemetry";
+import { Scene09GettingStarted } from "./scenes/Scene09GettingStarted";
+import { Scene10Outro } from "./scenes/Scene10Outro";
 
 export type ExplainerProps = {
   /**
@@ -42,28 +49,28 @@ export const DispatchExplainer: React.FC = () => {
   );
 };
 
-const renderScene = (id: SceneId, start: number): React.ReactNode => {
+const renderScene = (id: SceneId): React.ReactNode => {
   switch (id) {
     case "disconnect":
-      return <ScenePlaceholder label="The disconnect" from={start} />;
+      return <Scene01Disconnect />;
     case "title":
-      return <ScenePlaceholder label="Title" from={start} />;
+      return <Scene02Title />;
     case "loop":
-      return <ScenePlaceholder label="The loop" from={start} />;
+      return <Scene03Loop />;
     case "job":
       return <Scene04Job />;
     case "refusals":
       return <Scene05Refusals />;
     case "detached":
-      return <ScenePlaceholder label="Detached by default" from={start} />;
+      return <Scene06Detached />;
     case "beforeAfter":
-      return <ScenePlaceholder label="Before and after" from={start} />;
+      return <Scene07BeforeAfter />;
     case "telemetry":
-      return <ScenePlaceholder label="Telemetry and mocks" from={start} />;
+      return <Scene08Telemetry />;
     case "gettingStarted":
-      return <ScenePlaceholder label="Getting started" from={start} />;
+      return <Scene09GettingStarted />;
     case "outro":
-      return <ScenePlaceholder label="Outro" from={start} />;
+      return <Scene10Outro />;
     default: {
       const exhaustive: never = id;
       throw new Error(`unhandled scene: ${exhaustive as string}`);
@@ -91,7 +98,7 @@ export const ExplainerVideo: React.FC<ExplainerProps> = ({ voiceover }) => {
         durationInFrames={sequenceFramesOf(scene)}
       >
         <SceneClock start={scene.start} leadIn={leadInOf(scene)}>
-          {renderScene(scene.id, scene.start)}
+          {renderScene(scene.id)}
         </SceneClock>
       </TransitionSeries.Sequence>,
     );

@@ -20,8 +20,10 @@ export const Terminal: React.FC<{
   title: string;
   /** Drawn in the title bar as a hovered close button when true. */
   closing?: boolean;
+  /** Set to 0 for content that should fill the window, like a TUI. */
+  bodyPadding?: number;
   children: React.ReactNode;
-}> = ({ title, closing = false, children }) => {
+}> = ({ title, closing = false, bodyPadding = TERMINAL.padding, children }) => {
   return (
     <div
       style={{
@@ -93,7 +95,7 @@ export const Terminal: React.FC<{
         style={{
           flex: 1,
           minHeight: 0,
-          padding: TERMINAL.padding,
+          padding: bodyPadding,
           display: "flex",
           flexDirection: "column",
         }}
