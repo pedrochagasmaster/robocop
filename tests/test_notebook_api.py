@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import textwrap
 import time
@@ -39,6 +40,15 @@ from dispatch.notebook import (
 
 WAIT_TIMEOUT = 60.0
 POLL_INTERVAL = 0.2
+
+#: ``dispatch job launch`` hands the Job to ``nohup setsid python -m
+#: dispatch.runner``, so a Job can only reach Running where those exist. Tests
+#: that need a Job to actually run are skipped elsewhere; the refusal,
+#: workspace, argv, and Result-parsing tests still run on every platform.
+requires_detached_runner = pytest.mark.skipif(
+    shutil.which("nohup") is None or shutil.which("setsid") is None,
+    reason="runner handoff needs POSIX nohup and setsid",
+)
 
 
 def _dispatch(cwd: Path, **kwargs) -> Dispatch:
@@ -306,6 +316,7 @@ class TestErrorMapping:
 
 
 class TestLaunchAndMonitor:
+    @requires_detached_runner
     def test_launch_wait_reports_success_and_writes_csv(self, mock_env, tmp_path: Path) -> None:
         cwd = tmp_path / "sql"
         _write_sql(cwd)
@@ -322,6 +333,7 @@ class TestLaunchAndMonitor:
         assert job.source == "SqlFile" and job.destination == "Csv"
         assert job.elapsed_seconds is not None
 
+    @requires_detached_runner
     def test_watch_returns_the_terminal_job(self, mock_env, tmp_path: Path) -> None:
         cwd = tmp_path / "sql"
         _write_sql(cwd)
@@ -334,6 +346,7 @@ class TestLaunchAndMonitor:
         assert watched is job
         assert watched.is_terminal
 
+    @requires_detached_runner
     def test_failed_job_is_returned_not_raised(self, mock_env, tmp_path: Path) -> None:
         cwd = tmp_path / "sql"
         _write_sql(cwd)
@@ -346,6 +359,7 @@ class TestLaunchAndMonitor:
         assert job.failed and not job.succeeded
         assert job.exit_code not in (None, 0)
 
+    @requires_detached_runner
     def test_advisor_errors_gate_the_launch_until_acknowledged(
         self, mock_env, tmp_path: Path
     ) -> None:
@@ -391,6 +405,7 @@ class TestLaunchAndMonitor:
 
 
 class TestQueriesAndLogs:
+    @requires_detached_runner
     def test_jobs_lists_and_filters_by_state(self, mock_env, tmp_path: Path) -> None:
         cwd = tmp_path / "sql"
         _write_sql(cwd)
@@ -406,6 +421,7 @@ class TestQueriesAndLogs:
         assert session.jobs(state="Running") == []
         assert listed.to_dicts()[0]["id"] == job.id
 
+    @requires_detached_runner
     def test_logs_and_stream_logs_return_orchestrator_output(
         self, mock_env, tmp_path: Path
     ) -> None:
@@ -424,6 +440,7 @@ class TestQueriesAndLogs:
         assert any("SUCCESS" in line for line in streamed)
         assert len(job.logs(lines=2).splitlines()) <= 2
 
+    @requires_detached_runner
     def test_print_logs_writes_to_stdout(self, mock_env, tmp_path: Path, capfd) -> None:
         cwd = tmp_path / "sql"
         _write_sql(cwd)
@@ -437,6 +454,7 @@ class TestQueriesAndLogs:
 
         assert "runner" in capfd.readouterr().out
 
+    @requires_detached_runner
     def test_job_exposes_manifest_and_params(self, mock_env, tmp_path: Path) -> None:
         cwd = tmp_path / "sql"
         _write_sql(cwd)
@@ -464,6 +482,7 @@ class TestQueriesAndLogs:
         assert job.cancelled
         assert job.is_terminal
 
+    @requires_detached_runner
     def test_cancel_of_a_terminal_job_is_operational(self, mock_env, tmp_path: Path) -> None:
         cwd = tmp_path / "sql"
         _write_sql(cwd)
@@ -480,6 +499,7 @@ class TestQueriesAndLogs:
 class TestInlineSql:
     """``sql()`` writes Inline SQL into the workspace and launches it (ADR-0009)."""
 
+    @requires_detached_runner
     def test_inline_sql_runs_and_loads_a_dataframe(self, mock_env, tmp_path: Path) -> None:
         cwd = tmp_path / "sql"
         cwd.mkdir()
@@ -495,6 +515,7 @@ class TestInlineSql:
         assert job.rows() == [{"id": "1", "value": "mock"}]
         assert notebook.Job.to_pandas is notebook.Job.to_df
 
+    @requires_detached_runner
     def test_result_lands_in_the_workspace_not_the_working_directory(
         self, mock_env, tmp_path: Path
     ) -> None:
@@ -510,6 +531,7 @@ class TestInlineSql:
         assert result.parent.parent == session.workspace
         assert list(cwd.iterdir()) == []
 
+    @requires_detached_runner
     def test_inline_sql_is_saved_beside_its_result(self, mock_env, tmp_path: Path) -> None:
         session = _dispatch(tmp_path)
 
@@ -521,6 +543,7 @@ class TestInlineSql:
         assert saved[0].read_text(encoding="utf-8") == "SELECT 42 AS answer\n"
         assert job.source_detail == str(saved[0])
 
+    @requires_detached_runner
     def test_each_query_gets_its_own_directory(self, mock_env, tmp_path: Path) -> None:
         session = _dispatch(tmp_path)
 
@@ -546,6 +569,7 @@ class TestInlineSql:
 
         assert list(session.workspace.iterdir()) == []
 
+    @requires_detached_runner
     def test_table_destination_has_no_result(self, mock_env, tmp_path: Path) -> None:
         session = _dispatch(tmp_path)
 
@@ -564,6 +588,7 @@ class TestInlineSql:
         with pytest.raises(UsageError, match="explicit table="):
             _dispatch(tmp_path).sql("SELECT 1", destination=destination)
 
+    @requires_detached_runner
     def test_inline_template_passes_the_date_range(self, mock_env, tmp_path: Path) -> None:
         session = _dispatch(tmp_path)
 
@@ -582,6 +607,7 @@ class TestInlineSql:
 
 
 class TestTableReads:
+    @requires_detached_runner
     def test_unlimited_read_uses_the_existing_table_source(self, mock_env, tmp_path: Path) -> None:
         session = _dispatch(tmp_path)
 
@@ -594,6 +620,7 @@ class TestTableReads:
         assert job.result_path.name == "events_existing.csv"
         assert job.result_path.is_relative_to(session.workspace)
 
+    @requires_detached_runner
     def test_limited_read_generates_inline_sql(self, mock_env, tmp_path: Path) -> None:
         session = _dispatch(tmp_path)
 
@@ -616,6 +643,7 @@ class TestTableReads:
             _dispatch(tmp_path).table("aa_enc.events", limit=limit)
 
 
+@requires_detached_runner
 class TestResultReading:
     def test_unsuccessful_job_has_no_result(self, mock_env, tmp_path: Path) -> None:
         session = _dispatch(tmp_path, env={"DISPATCH_MOCK_SCENARIO": "syntax_error"})
@@ -725,6 +753,7 @@ class TestCapacityBackpressure:
 
 
 class TestCleanup:
+    @requires_detached_runner
     def test_old_query_directories_are_removed(self, mock_env, tmp_path: Path) -> None:
         session = _dispatch(tmp_path)
         job = session.sql("SELECT 1").wait(timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
@@ -737,6 +766,7 @@ class TestCleanup:
         assert not query_dir.exists()
         assert "directories=1" in repr(report)
 
+    @requires_detached_runner
     def test_recent_directories_survive_the_default_window(self, mock_env, tmp_path: Path) -> None:
         session = _dispatch(tmp_path)
         job = session.sql("SELECT 1").wait(timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
@@ -776,6 +806,7 @@ class TestWorkspaceLocation:
     def test_explicit_workspace_wins(self, tmp_path: Path) -> None:
         assert Dispatch(tmp_path, workspace=tmp_path / "ws").workspace == tmp_path / "ws"
 
+    @requires_detached_runner
     def test_workspace_is_private(self, mock_env, tmp_path: Path) -> None:
         session = _dispatch(tmp_path)
         session.sql("SELECT 1")
@@ -784,6 +815,7 @@ class TestWorkspaceLocation:
 
 
 class TestSessionConfiguration:
+    @requires_detached_runner
     def test_cwd_decides_where_csv_results_land(self, mock_env, tmp_path: Path) -> None:
         cwd = tmp_path / "elsewhere"
         _write_sql(cwd)
@@ -800,7 +832,7 @@ class TestSessionConfiguration:
         assert Dispatch("~/sql").cwd == Path.home() / "sql"
 
     def test_repr_shows_the_working_directory(self, tmp_path: Path) -> None:
-        assert str(tmp_path) in repr(Dispatch(tmp_path))
+        assert repr(Dispatch(tmp_path)) == f"Dispatch(cwd={str(tmp_path)!r})"
 
 
 # =============================================================================

@@ -254,6 +254,14 @@ refused — the Job ran, and its export is the problem:
 | `MissingResultError` | The Job has no CSV Destination, or its Result file is gone |
 | `ResultParseError` | A line's field count disagrees with the header, or pandas cannot parse the export |
 
+## Platform
+
+Launching needs a POSIX host: `dispatch job launch` hands the Job to
+`nohup setsid python -m dispatch.runner`, which is how a Job survives a
+disconnected terminal. That covers the Edge Node and Linux development. On
+Windows the library imports and every read-only call works, but a launch fails
+at handoff, so the launch-dependent tests are skipped there.
+
 ## Local development
 
 The library needs the same mock layer as the TUI:

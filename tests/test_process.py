@@ -47,7 +47,7 @@ def test_windows_resolver_prefers_exact_python_script_before_pathext_wrapper(
     (tmp_path / "kinit.exe").write_bytes(b"legacy wrapper")
     monkeypatch.setenv("PATH", str(tmp_path))
 
-    resolved = process._resolve_exec_argv(("kinit", "user@REALM"), windows=True)
+    resolved = process.resolve_exec_argv(("kinit", "user@REALM"), windows=True)
 
     assert resolved == (sys.executable, str(script), "user@REALM")
 

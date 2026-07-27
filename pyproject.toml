@@ -77,6 +77,17 @@ warn_redundant_casts = true
 disable_error_code = ["arg-type", "assignment", "attr-defined", "list-item", "typeddict-item"]
 
 [[tool.mypy.overrides]]
+# pandas is an optional import in dispatch.results. Its numpy stubs need
+# python_version >= 3.12 to parse, so type-check against the interface we use
+# rather than following into the installed package.
+module = [
+  "pandas.*",
+  "numpy.*",
+]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
+[[tool.mypy.overrides]]
 module = [
   "dispatch.sql",
   "dispatch.jobs",

@@ -7,6 +7,7 @@ off, a ragged line is an error, and nothing is ever silently dropped.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -87,7 +88,7 @@ class TestMissingResults:
 
     def test_absent_file_names_the_path(self, tmp_path: Path) -> None:
         missing = tmp_path / "gone.csv"
-        with pytest.raises(results.MissingResultError, match=str(missing)):
+        with pytest.raises(results.MissingResultError, match=re.escape(str(missing))):
             results.resolve_result_path(missing)
 
     def test_missing_result_is_a_result_error(self) -> None:

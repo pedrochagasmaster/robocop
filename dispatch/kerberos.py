@@ -94,10 +94,15 @@ async def ticket_ttl_seconds() -> int | None:
 
 
 def ticket_ttl_seconds_sync() -> int | None:
-    """Blocking Kerberos TTL probe for non-interactive CLI launches."""
+    """Blocking Kerberos TTL probe for non-interactive CLI launches.
+
+    Resolves ``klist`` the same way the async probe does: Windows
+    ``CreateProcess`` searches System32 before PATH, so a bare name would reach
+    the OS tool instead of a PATH-injected mock.
+    """
     try:
         completed = subprocess.run(
-            ["klist"],
+            list(process.resolve_exec_argv(("klist",))),
             capture_output=True,
             text=True,
             timeout=5,
