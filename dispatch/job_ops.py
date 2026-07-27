@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import stat
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 from . import capacity, config, jobs, kerberos, manifest, process, sql, telemetry
 from .advisor import analyze
@@ -28,10 +29,15 @@ QUEUE_AUTO = "auto"
 QUEUE_ORDER = ["adhoc_fast", "adhoc_small", "acs_small", "acs_large", "adhoc"]
 QUEUE_VALUES = frozenset(QUEUE_ORDER)
 
+JOB_STATES = ("Pending", "Running", "Succeeded", "Failed", "Cancelled")
 TERMINAL_STATES = frozenset({"Succeeded", "Failed", "Cancelled"})
 CANCELLABLE_STATES = frozenset({"Pending", "Running"})
 
+MSG_KERBEROS_MISSING = "Kerberos ticket missing — run kinit"
+MSG_KERBEROS_TTL_SHORT = "Kerberos ticket TTL is under 5 minutes — renew with kinit"
+
 _JOB_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z_[a-z0-9]+$")
+_LOG_TAIL_BLOCK = 8192
 
 
 class JobOpsError(Exception):
@@ -131,13 +137,13 @@ def normalize_queues(raw: str | list[str] | tuple[str, ...] | None) -> str:
         pieces = [str(part).strip() for part in raw if str(part).strip()]
     if not pieces or (len(pieces) == 1 and pieces[0].lower() == QUEUE_AUTO):
         return QUEUE_AUTO
-    unknown = [queue for queue in pieces if queue not in QUEUE_VALUES]
+    unknown = [pool for pool in pieces if pool not in QUEUE_VALUES]
     if unknown:
         raise ValidationError(
-            f"Unknown queue(s): {', '.join(unknown)}. "
+            f"Unknown Resource Pool(s): {', '.join(unknown)}. "
             f"Choose from: {', '.join(QUEUE_ORDER)} or '{QUEUE_AUTO}'."
         )
-    ordered = [queue for queue in QUEUE_ORDER if queue in set(pieces)]
+    ordered = [pool for pool in QUEUE_ORDER if pool in set(pieces)]
     return ",".join(ordered)
 
 
@@ -223,7 +229,7 @@ def list_jobs(
     items = jobs.reconciled_list_manifests(root)
     if state is None:
         return items
-    if state not in {"Pending", "Running", "Succeeded", "Failed", "Cancelled"}:
+    if state not in JOB_STATES:
         raise ValidationError(
             f"Unknown state filter: {state}. "
             "Choose Pending, Running, Succeeded, Failed, or Cancelled."
@@ -274,13 +280,27 @@ def _destination_detail(destination: dict[str, Any]) -> str | None:
     return None
 
 
-def _refusal_reason(error: str) -> telemetry.RefusalReason:
+def refusal_reason(error: str) -> telemetry.RefusalReason:
+    """Classify a launch-refusal message for telemetry."""
     lowered = error.lower()
     if "concurrency cap" in lowered or "capacity" in lowered:
         return "slot_cap"
     if "kerberos" in lowered:
         return "kerberos"
     return "validation"
+
+
+def raise_for_launch_issue(error: str) -> NoReturn:
+    """Record telemetry and raise the CLI/TUI exception for a launch refusal.
+
+    Kerberos and capacity refusals are operational (exit 4); other validation
+    failures are usage/validation (exit 2).
+    """
+    reason = refusal_reason(error)
+    telemetry.note_launch_refused(reason)
+    if reason in {"kerberos", "slot_cap"}:
+        raise OperationalError(error)
+    raise ValidationError(error)
 
 
 def validation_issues(
@@ -355,9 +375,9 @@ def validation_issues(
         issues.append(str(exc))
 
     if kerberos_ttl is None:
-        issues.append("Kerberos ticket missing — run kinit")
+        issues.append(MSG_KERBEROS_MISSING)
     elif kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS:
-        issues.append("Kerberos ticket TTL is under 5 minutes — renew with kinit")
+        issues.append(MSG_KERBEROS_TTL_SHORT)
 
     if deep and source != "ExistingTable" and resolved_sql is not None and resolved_sql.is_file():
         issues.extend(_sql_content_issues(source, resolved_sql))
@@ -387,9 +407,7 @@ def prepare_launch(
     """Validate inputs and build source/destination/params/analysis."""
     issues = validation_issues(inputs, kerberos_ttl=kerberos_ttl, deep=True)
     if issues:
-        reason = _refusal_reason(issues[0])
-        telemetry.note_launch_refused(reason)
-        raise ValidationError(issues[0])
+        raise_for_launch_issue(issues[0])
 
     eid = inputs.user or config.current_user()
     source_type = inputs.source_type
@@ -409,15 +427,13 @@ def prepare_launch(
         try:
             sql_text = resolved_sql.read_text(encoding="utf-8")
         except OSError as exc:
-            telemetry.note_launch_refused("validation")
-            raise ValidationError(f"Cannot read SQL file: {resolved_sql}\n{exc}") from exc
+            raise_for_launch_issue(f"Cannot read SQL file: {resolved_sql}\n{exc}")
         source = {"type": source_type, "sql_path_at_launch": str(resolved_sql)}
 
     try:
         csv_path = str(sql.safe_csv_path(inputs.launch_cwd, table))
     except ValueError as exc:
-        telemetry.note_launch_refused("validation")
-        raise ValidationError(str(exc)) from exc
+        raise_for_launch_issue(str(exc))
 
     destination: manifest.Destination = {
         "type": destination_type,
@@ -427,7 +443,8 @@ def prepare_launch(
     }
     params = {
         "to_email": inputs.email.strip(),
-        "subject": inputs.subject.strip() or "Dispatch Job",
+        # Preserve empty subject (TUI parity); CLI argparse supplies its own default.
+        "subject": inputs.subject.strip(),
         "queue": normalize_queues(inputs.queue),
     }
     if source_type == "SqlTemplate":
@@ -463,13 +480,15 @@ def launch_summary_text(plan: LaunchPlan) -> str:
     table = destination.get("table_name") or "--"
     csv_path = destination.get("csv_path") or "--"
     queue = plan.params.get("queue", QUEUE_AUTO)
-    queue_label = "Auto (cycle all queues)" if queue == QUEUE_AUTO else queue.replace(",", ", ")
+    pool_label = (
+        "Auto (cycle all Resource Pools)" if queue == QUEUE_AUTO else queue.replace(",", ", ")
+    )
     email = plan.params.get("to_email") or "--"
     return (
         f"Source: {manifest.source_display_label(source_type)}  {source_detail}\n"
         f"Destination: {dest_type}\n"
         f"Target table: {schema}.{table}\n"
-        f"Queue: {queue_label}\n"
+        f"Resource Pool: {pool_label}\n"
         f"CSV path: {csv_path}\n"
         f"Email: {email}"
     )
@@ -504,13 +523,58 @@ def mark_runner_handoff_failed(job_dir: Path, exc: BaseException) -> None:
         exit_code=-1,
         finished_at=manifest.now_utc(),
     )
-    logger.exception("Failed to launch runner for Job %s", job_dir.name)
+    logger.exception(
+        "Failed to launch runner for Job %s: %s",
+        job_dir.name,
+        exc,
+    )
 
 
 async def launch_runner_after_commit(job_dir: Path) -> int:
     """Finish runner handoff after Pending commit despite task cancellation."""
     launch = asyncio.create_task(process.launch_runner(job_dir))
     return await await_uncancellable(launch)
+
+
+def _launch_result_after_handoff(
+    job_dir: Path,
+    job_manifest: manifest.JobManifest,
+    plan: LaunchPlan,
+    *,
+    handoff_error: BaseException | None,
+) -> LaunchResult:
+    """Shared post-admit bookkeeping for sync and async launch paths."""
+    telemetry.note_job_launched(
+        job_id=job_dir.name,
+        source=plan.source["type"],
+        destination=plan.destination["type"],
+    )
+    if handoff_error is not None:
+        mark_runner_handoff_failed(job_dir, handoff_error)
+        failed = manifest.load(job_dir / "manifest.json")
+        return LaunchResult(
+            job_id=job_dir.name,
+            job_dir=job_dir,
+            manifest=failed,
+            handoff_failed=True,
+            handoff_error=f"Could not launch detached runner: {handoff_error}",
+        )
+    logger.info(
+        "Launched Job %s source=%s dest=%s",
+        job_dir.name,
+        plan.source["type"],
+        plan.destination["type"],
+    )
+    return LaunchResult(job_id=job_dir.name, job_dir=job_dir, manifest=job_manifest)
+
+
+def _raise_capacity_error(exc: BaseException) -> NoReturn:
+    if isinstance(exc, capacity.CapacityBusy):
+        raise_for_launch_issue(str(exc))
+    if isinstance(exc, (capacity.CapacityTimeout, capacity.CapacityLedgerError)):
+        telemetry.note_launch_refused("validation")
+        raise OperationalError(str(exc)) from exc
+    raise exc
 
 
 async def execute_launch_async(plan: LaunchPlan) -> LaunchResult:
@@ -524,37 +588,15 @@ async def execute_launch_async(plan: LaunchPlan) -> LaunchResult:
             sql_text=plan.sql_text,
             user=plan.inputs.user,
         )
-    except capacity.CapacityBusy as exc:
-        telemetry.note_launch_refused("slot_cap")
-        raise OperationalError(str(exc)) from exc
-    except (capacity.CapacityTimeout, capacity.CapacityLedgerError) as exc:
-        telemetry.note_launch_refused("validation")
-        raise OperationalError(str(exc)) from exc
+    except (capacity.CapacityBusy, capacity.CapacityTimeout, capacity.CapacityLedgerError) as exc:
+        _raise_capacity_error(exc)
 
-    telemetry.note_job_launched(
-        job_id=job_dir.name,
-        source=plan.source["type"],
-        destination=plan.destination["type"],
-    )
+    handoff_error: BaseException | None = None
     try:
         await launch_runner_after_commit(job_dir)
     except OSError as exc:
-        mark_runner_handoff_failed(job_dir, exc)
-        failed = manifest.load(job_dir / "manifest.json")
-        return LaunchResult(
-            job_id=job_dir.name,
-            job_dir=job_dir,
-            manifest=failed,
-            handoff_failed=True,
-            handoff_error=f"Could not launch detached runner: {exc}",
-        )
-    logger.info(
-        "Launched Job %s source=%s dest=%s",
-        job_dir.name,
-        plan.source["type"],
-        plan.destination["type"],
-    )
-    return LaunchResult(job_id=job_dir.name, job_dir=job_dir, manifest=job_manifest)
+        handoff_error = exc
+    return _launch_result_after_handoff(job_dir, job_manifest, plan, handoff_error=handoff_error)
 
 
 def execute_launch(plan: LaunchPlan) -> LaunchResult:
@@ -568,37 +610,15 @@ def execute_launch(plan: LaunchPlan) -> LaunchResult:
             sql_text=plan.sql_text,
             user=plan.inputs.user,
         )
-    except capacity.CapacityBusy as exc:
-        telemetry.note_launch_refused("slot_cap")
-        raise OperationalError(str(exc)) from exc
-    except (capacity.CapacityTimeout, capacity.CapacityLedgerError) as exc:
-        telemetry.note_launch_refused("validation")
-        raise OperationalError(str(exc)) from exc
+    except (capacity.CapacityBusy, capacity.CapacityTimeout, capacity.CapacityLedgerError) as exc:
+        _raise_capacity_error(exc)
 
-    telemetry.note_job_launched(
-        job_id=job_dir.name,
-        source=plan.source["type"],
-        destination=plan.destination["type"],
-    )
+    handoff_error: BaseException | None = None
     try:
         process.launch_runner_detached(job_dir)
     except OSError as exc:
-        mark_runner_handoff_failed(job_dir, exc)
-        failed = manifest.load(job_dir / "manifest.json")
-        return LaunchResult(
-            job_id=job_dir.name,
-            job_dir=job_dir,
-            manifest=failed,
-            handoff_failed=True,
-            handoff_error=f"Could not launch detached runner: {exc}",
-        )
-    logger.info(
-        "Launched Job %s source=%s dest=%s",
-        job_dir.name,
-        plan.source["type"],
-        plan.destination["type"],
-    )
-    return LaunchResult(job_id=job_dir.name, job_dir=job_dir, manifest=job_manifest)
+        handoff_error = exc
+    return _launch_result_after_handoff(job_dir, job_manifest, plan, handoff_error=handoff_error)
 
 
 def launch_job(
@@ -607,16 +627,27 @@ def launch_job(
     kerberos_ttl: int | None,
     yes: bool = False,
     acknowledge_advisor: bool = False,
+    recheck_ttl: Callable[[], int | None] | None = None,
+    on_plan: Callable[[LaunchPlan], None] | None = None,
 ) -> LaunchResult:
-    """CLI-oriented full launch: prepare, confirm flags, admit, hand off."""
+    """CLI-oriented full launch: prepare, confirm flags, admit, hand off.
+
+    ``on_plan`` is invoked after a successful prepare and before confirmation
+    flags are enforced (CLI uses it to print the human summary). When
+    ``recheck_ttl`` is provided, Kerberos freshness is re-probed after
+    confirmation and before admission; the prepared ``LaunchPlan`` (including
+    ``sql_text``) is never rebuilt, so Advisor acknowledgement applies to the
+    SQL that will launch.
+    """
     plan = prepare_launch(inputs, kerberos_ttl=kerberos_ttl)
+    if on_plan is not None:
+        on_plan(plan)
     require_launch_confirmation(plan, yes=yes, acknowledge_advisor=acknowledge_advisor)
-    # Re-check Kerberos freshness is the caller's responsibility for async TUI;
-    # CLI passes the TTL measured just before this call.
-    issues = validation_issues(inputs, kerberos_ttl=kerberos_ttl, deep=True)
+    ttl = recheck_ttl() if recheck_ttl is not None else kerberos_ttl
+    # Recheck Kerberos / form invariants only — do not re-read SQL into a new plan.
+    issues = validation_issues(inputs, kerberos_ttl=ttl, deep=False)
     if issues:
-        telemetry.note_launch_refused(_refusal_reason(issues[0]))
-        raise ValidationError(issues[0])
+        raise_for_launch_issue(issues[0])
     result = execute_launch(plan)
     if result.handoff_failed:
         raise OperationalError(result.handoff_error or "Detached runner handoff failed")
@@ -692,12 +723,28 @@ def cancel_job(job_id: str, *, yes: bool = False, root: Path | None = None) -> C
 
 def read_log_tail(job_id: str, *, lines: int = 50, root: Path | None = None) -> list[str]:
     """Return the last ``lines`` of the Job log (empty if missing)."""
+    text_lines, _offset = read_log_tail_with_offset(job_id, lines=lines, root=root)
+    return text_lines
+
+
+def read_log_tail_with_offset(
+    job_id: str,
+    *,
+    lines: int = 50,
+    root: Path | None = None,
+) -> tuple[list[str], int]:
+    """Return ``(last lines, byte offset at EOF of the snapshot)``.
+
+    Reads from the end of the file so large ``run.log`` files are not loaded
+    wholesale. The returned offset is the file size captured before the tail
+    read, so callers can follow without dropping or double-emitting lines.
+    """
     if lines < 0:
         raise ValidationError("--lines must be >= 0")
     job_dir = resolve_job_dir(job_id, root=root)
     log_path = job_dir / "run.log"
     if not log_path.exists():
-        return []
+        return [], 0
     try:
         meta = log_path.lstat()
     except OSError as exc:
@@ -705,13 +752,26 @@ def read_log_tail(job_id: str, *, lines: int = 50, root: Path | None = None) -> 
     if stat.S_ISLNK(meta.st_mode):
         raise UnknownJobError(f"Unsafe Job log path (symlink): {job_id}")
     try:
-        content = log_path.read_text(encoding="utf-8", errors="replace")
+        with log_path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            end = handle.tell()
+            if lines == 0 or end == 0:
+                return [], end
+            data = b""
+            pos = end
+            # Need at least ``lines`` separators to guarantee ``lines`` complete
+            # trailing lines when the file ends with a newline; read one extra.
+            needed = lines + 1
+            while pos > 0 and data.count(b"\n") < needed:
+                read_size = min(_LOG_TAIL_BLOCK, pos)
+                pos -= read_size
+                handle.seek(pos)
+                data = handle.read(read_size) + data
     except OSError as exc:
         raise OperationalError(f"Cannot read log for {job_id}: {exc}") from exc
-    if lines == 0:
-        return []
-    all_lines = content.splitlines()
-    return all_lines[-lines:]
+    text = data.decode("utf-8", errors="replace")
+    all_lines = text.splitlines()
+    return all_lines[-lines:], end
 
 
 def follow_logs(
@@ -725,16 +785,10 @@ def follow_logs(
     """Yield new log lines until the Job is terminal and the log is drained."""
     job_dir = resolve_job_dir(job_id, root=root)
     log_path = job_dir / "run.log"
-    # Emit the initial tail first.
-    yield from read_log_tail(job_id, lines=lines, root=root)
-    offset = 0
-    if log_path.exists():
-        try:
-            offset = log_path.stat().st_size
-        except OSError:
-            offset = 0
-    # If we printed a tail, the file offset is at EOF already for follow.
-    # Re-open from EOF so we only stream newly appended bytes.
+    # Capture EOF offset first, then emit the tail of that snapshot so bytes
+    # appended between tail and follow are streamed exactly once.
+    initial_lines, offset = read_log_tail_with_offset(job_id, lines=lines, root=root)
+    yield from initial_lines
     pending = b""
     while True:
         if should_stop is not None and should_stop():

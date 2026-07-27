@@ -106,7 +106,7 @@ dispatch job cancel JOB_ID --yes
 | `--table` | Destination table suffix; the analyst EID prefix is applied |
 | `--start-date` / `--end-date` | SqlTemplate date range (`YYYY-MM-DD`) |
 | `--email` / `--subject` | Notification recipients and subject |
-| `--queue` | `auto` (default) or comma-separated Impala pools |
+| `--queue` | Resource Pool selection: `auto` (default) or comma-separated Impala pools (`params.queue`) |
 | `--yes` | Required confirmation substitute for the TUI launch dialog |
 | `--acknowledge-advisor` | Required when Advisor reports error-severity findings |
 | `--json` | One JSON document on stdout; diagnostics on stderr |

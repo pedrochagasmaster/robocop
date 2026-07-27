@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from dispatch import cli_job, config, job_ops, kerberos, manifest, process, telemetry
+from dispatch.advisor.models import AnalysisResult, Finding
 from dispatch.cli_job import (
     EXIT_JOB_UNSUCCESSFUL,
     EXIT_OK,
@@ -315,7 +316,7 @@ def test_launch_kerberos_refusal(mock_env, tmp_path: Path, monkeypatch) -> None:
         monkeypatch=monkeypatch,
         cwd=launch_cwd,
     )
-    assert result.returncode == EXIT_USAGE
+    assert result.returncode == EXIT_OPERATIONAL
     assert "Kerberos" in result.stderr
     assert telemetry.flush(timeout=1)
     events = [
@@ -490,6 +491,7 @@ def test_logs_tail_and_follow_stops_when_terminal(mock_env, tmp_path: Path, monk
 def test_wait_success_failure_timeout(mock_env, tmp_path: Path, monkeypatch) -> None:
     ok = _seed_job(tmp_path, state="Succeeded", exit_code=0, sql_name="ok.sql")
     bad = _seed_job(tmp_path, state="Failed", exit_code=7, sql_name="bad.sql")
+    cancelled = _seed_job(tmp_path, state="Cancelled", exit_code=0, sql_name="can.sql")
     pending = _seed_job(tmp_path, state="Pending", sql_name="pend.sql")
 
     assert (
@@ -497,6 +499,8 @@ def test_wait_success_failure_timeout(mock_env, tmp_path: Path, monkeypatch) -> 
     )
     failed = _invoke(["job", "wait", bad.name, "--json"], monkeypatch=monkeypatch)
     assert failed.returncode == EXIT_JOB_UNSUCCESSFUL
+    cancelled_wait = _invoke(["job", "wait", cancelled.name, "--json"], monkeypatch=monkeypatch)
+    assert cancelled_wait.returncode == EXIT_JOB_UNSUCCESSFUL
     timed = _invoke(
         ["job", "wait", pending.name, "--timeout", "0.1", "--poll-interval", "0.05", "--json"],
         monkeypatch=monkeypatch,
@@ -504,6 +508,110 @@ def test_wait_success_failure_timeout(mock_env, tmp_path: Path, monkeypatch) -> 
     assert timed.returncode == EXIT_OPERATIONAL
     payload = json.loads(timed.stdout)
     assert payload["timed_out"] is True
+
+
+def test_invalid_queue_is_usage_error(mock_env, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(kerberos, "ticket_ttl_seconds_sync", lambda: 3600)
+    launch_cwd = tmp_path / "cwd"
+    launch_cwd.mkdir()
+    _write_sql(launch_cwd / "q.sql")
+    result = _invoke(
+        [
+            "job",
+            "launch",
+            "--source",
+            "SqlFile",
+            "--destination",
+            "Csv",
+            "--sql",
+            "q.sql",
+            "--queue",
+            "not_a_pool",
+            "--yes",
+        ],
+        monkeypatch=monkeypatch,
+        cwd=launch_cwd,
+    )
+    assert result.returncode == EXIT_USAGE
+    assert "Resource Pool" in result.stderr
+
+
+def test_empty_subject_preserved_in_plan(mock_env, tmp_path: Path) -> None:
+    launch_cwd = tmp_path / "cwd"
+    launch_cwd.mkdir()
+    sql_path = _write_sql(launch_cwd / "q.sql")
+    inputs = job_ops.LaunchInputs(
+        source_type="SqlFile",
+        destination_type="Csv",
+        launch_cwd=launch_cwd,
+        sql_path=str(sql_path),
+        table_name=job_ops.table_name_for_inputs(
+            source_type="SqlFile",
+            destination_type="Csv",
+            table_suffix_or_full="subj",
+        ),
+        subject="   ",
+    )
+    plan = job_ops.prepare_launch(inputs, kerberos_ttl=3600)
+    assert plan.params["subject"] == ""
+
+
+def test_launch_job_keeps_prepared_sql_after_recheck(mock_env, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(kerberos, "ticket_ttl_seconds_sync", lambda: 3600)
+    monkeypatch.setattr(process, "launch_runner_detached", lambda job_dir: 1)
+    launch_cwd = tmp_path / "cwd"
+    launch_cwd.mkdir()
+    sql_path = _write_sql(launch_cwd / "q.sql", "SELECT 1 AS kept\n")
+    inputs = job_ops.LaunchInputs(
+        source_type="SqlFile",
+        destination_type="Csv",
+        launch_cwd=launch_cwd,
+        sql_path=str(sql_path),
+        table_name=job_ops.table_name_for_inputs(
+            source_type="SqlFile",
+            destination_type="Csv",
+            table_suffix_or_full="keep_sql",
+        ),
+    )
+    seen: list[str] = []
+
+    def on_plan(plan: job_ops.LaunchPlan) -> None:
+        seen.append(plan.sql_text)
+        sql_path.write_text("SELECT 2 AS changed\n", encoding="utf-8")
+
+    result = job_ops.launch_job(
+        inputs,
+        kerberos_ttl=3600,
+        yes=True,
+        acknowledge_advisor=True,
+        recheck_ttl=lambda: 3600,
+        on_plan=on_plan,
+    )
+    assert result.job_id
+    assert seen == ["SELECT 1 AS kept\n"]
+    # Manifest job.sql should still be the prepared text, not the rewritten file.
+    job_sql = (config.jobs_dir() / result.job_id / "job.sql").read_text(encoding="utf-8")
+    assert "kept" in job_sql
+    assert "changed" not in job_sql
+
+
+def test_follow_logs_does_not_drop_lines_appended_during_initial_tail(
+    mock_env, tmp_path: Path, monkeypatch
+) -> None:
+    job_dir = _seed_job(tmp_path, state="Succeeded", exit_code=0)
+    log_path = job_dir / "run.log"
+    log_path.write_text("a\nb\nc\n", encoding="utf-8")
+    original = job_ops.read_log_tail_with_offset
+
+    def racey_tail(job_id: str, *, lines: int = 50, root=None):
+        text_lines, offset = original(job_id, lines=lines, root=root)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write("d\n")
+        return text_lines, offset
+
+    monkeypatch.setattr(job_ops, "read_log_tail_with_offset", racey_tail)
+    lines = list(job_ops.follow_logs(job_dir.name, lines=2, poll_interval=0.01))
+    assert "b" in lines and "c" in lines and "d" in lines
 
 
 def test_cancel_pending_and_running(mock_env, tmp_path: Path, monkeypatch) -> None:
@@ -619,10 +727,7 @@ def test_advisor_ack_required(mock_env, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(kerberos, "ticket_ttl_seconds_sync", lambda: 3600)
     launch_cwd = tmp_path / "cwd"
     launch_cwd.mkdir()
-    sql_path = _write_sql(
-        launch_cwd / "bad.sql",
-        "SELECT * FROM aa_enc.a CROSS JOIN aa_enc.b\n",
-    )
+    sql_path = _write_sql(launch_cwd / "q.sql")
     inputs = job_ops.LaunchInputs(
         source_type="SqlFile",
         destination_type="Csv",
@@ -634,8 +739,73 @@ def test_advisor_ack_required(mock_env, tmp_path: Path, monkeypatch) -> None:
             table_suffix_or_full="adv",
         ),
     )
+    fake_errors = (
+        Finding(
+            rule_id="R09",
+            rule_name="cartesian-product",
+            guideline="§8 joins",
+            severity="error",
+            detection="CROSS JOIN detected",
+            remediation="Add an explicit join predicate",
+        ),
+    )
+
+    def fake_prepare(inp, *, kerberos_ttl):
+        plan = real_prepare(inp, kerberos_ttl=kerberos_ttl)
+        return job_ops.LaunchPlan(
+            inputs=plan.inputs,
+            source=plan.source,
+            destination=plan.destination,
+            params=plan.params,
+            sql_text=plan.sql_text,
+            analysis=AnalysisResult(available=True, findings=fake_errors),
+            resolved_sql_path=plan.resolved_sql_path,
+        )
+
+    real_prepare = job_ops.prepare_launch
+    monkeypatch.setattr(job_ops, "prepare_launch", fake_prepare)
     plan = job_ops.prepare_launch(inputs, kerberos_ttl=3600)
-    if not plan.analysis.errors():
-        pytest.skip("Advisor corpus did not flag CROSS JOIN as error in this environment")
+    assert plan.analysis.errors()
     with pytest.raises(job_ops.AdvisorAcknowledgementRequired):
         job_ops.require_launch_confirmation(plan, yes=True, acknowledge_advisor=False)
+
+    denied = _invoke(
+        [
+            "job",
+            "launch",
+            "--source",
+            "SqlFile",
+            "--destination",
+            "Csv",
+            "--sql",
+            "q.sql",
+            "--table",
+            "adv_cli",
+            "--yes",
+        ],
+        monkeypatch=monkeypatch,
+        cwd=launch_cwd,
+    )
+    assert denied.returncode == EXIT_USAGE
+    assert "acknowledge-advisor" in denied.stderr
+
+    monkeypatch.setattr(process, "launch_runner_detached", lambda job_dir: 1)
+    acked = _invoke(
+        [
+            "job",
+            "launch",
+            "--source",
+            "SqlFile",
+            "--destination",
+            "Csv",
+            "--sql",
+            "q.sql",
+            "--table",
+            "adv_cli_ok",
+            "--yes",
+            "--acknowledge-advisor",
+        ],
+        monkeypatch=monkeypatch,
+        cwd=launch_cwd,
+    )
+    assert acked.returncode == EXIT_OK

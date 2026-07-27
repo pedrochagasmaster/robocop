@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, TextIO
 
-from . import job_ops, kerberos, setup_logging, telemetry
+from . import job_ops, kerberos, setup_logging
 from .job_ops import (
     AdvisorAcknowledgementRequired,
     CancelResult,
@@ -106,8 +106,9 @@ def add_job_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParse
         "--queue",
         default=job_ops.QUEUE_AUTO,
         help=(
-            f"Execution queue(s): '{job_ops.QUEUE_AUTO}' (default) or a comma-separated "
-            f"subset of {', '.join(job_ops.QUEUE_ORDER)}."
+            f"Resource Pool selection: '{job_ops.QUEUE_AUTO}' (default) or a comma-separated "
+            f"subset of {', '.join(job_ops.QUEUE_ORDER)}. "
+            "Stored as params.queue for orchestrator compatibility."
         ),
     )
     launch.add_argument(
@@ -126,12 +127,12 @@ def add_job_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParse
     list_parser.add_argument(
         "--state",
         default=None,
-        choices=["Pending", "Running", "Succeeded", "Failed", "Cancelled"],
+        choices=list(job_ops.JOB_STATES),
         help="Filter by Job state.",
     )
     _add_json_flag(list_parser)
 
-    show = job_sub.add_parser("show", help="Show one Job's reconciled status.")
+    show = job_sub.add_parser("show", help="Show one Job's reconciled state.")
     show.add_argument("job_id", help="Job ID.")
     _add_json_flag(show)
 
@@ -242,9 +243,10 @@ def _cmd_launch(args: argparse.Namespace) -> int:
         subject=args.subject,
         queue=args.queue,
     )
-    ttl = kerberos.ticket_ttl_seconds_sync()
-    plan = job_ops.prepare_launch(inputs, kerberos_ttl=ttl)
-    if not args.json_output:
+
+    def _announce(plan: job_ops.LaunchPlan) -> None:
+        if args.json_output:
+            return
         print(job_ops.launch_summary_text(plan), file=sys.stderr)
         errors = plan.analysis.errors()
         if errors:
@@ -252,22 +254,15 @@ def _cmd_launch(args: argparse.Namespace) -> int:
                 f"Advisor errors: {', '.join(sorted({f.rule_id for f in errors}))}",
                 file=sys.stderr,
             )
-    job_ops.require_launch_confirmation(
-        plan,
+
+    result = job_ops.launch_job(
+        inputs,
+        kerberos_ttl=kerberos.ticket_ttl_seconds_sync(),
         yes=args.yes,
         acknowledge_advisor=args.acknowledge_advisor,
+        recheck_ttl=kerberos.ticket_ttl_seconds_sync,
+        on_plan=_announce,
     )
-    # Fresh TTL immediately before admit/handoff.
-    ttl = kerberos.ticket_ttl_seconds_sync()
-    issues = job_ops.validation_issues(inputs, kerberos_ttl=ttl, deep=True)
-    if issues:
-        telemetry.note_launch_refused(
-            "kerberos" if "kerberos" in issues[0].lower() else "validation"
-        )
-        raise ValidationError(issues[0])
-    result = job_ops.execute_launch(plan)
-    if result.handoff_failed:
-        raise OperationalError(result.handoff_error or "Detached runner handoff failed")
     return _emit_launch(result, json_output=args.json_output)
 
 

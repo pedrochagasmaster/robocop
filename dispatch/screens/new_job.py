@@ -38,15 +38,6 @@ from .sidebar import Sidebar
 logger = logging.getLogger("dispatch.new_job")
 
 
-def _refusal_reason(error: str) -> telemetry.RefusalReason:
-    lowered = error.lower()
-    if "concurrency cap" in lowered or "capacity" in lowered:
-        return "slot_cap"
-    if "kerberos" in lowered:
-        return "kerberos"
-    return "validation"
-
-
 _SOURCE_IDS = {
     "src-sqlfile": "SqlFile",
     "src-sqltemplate": "SqlTemplate",
@@ -632,26 +623,13 @@ class NewJobScreen(Screen[None]):
             deep=deep,
         )
         for issue in shared:
-            if issue == "Kerberos ticket missing — run kinit":
+            if issue == job_ops.MSG_KERBEROS_MISSING:
                 issues.append("Kerberos ticket missing \u2014 press K to kinit")
-            elif issue == "Kerberos ticket TTL is under 5 minutes — renew with kinit":
+            elif issue == job_ops.MSG_KERBEROS_TTL_SHORT:
                 issues.append("Kerberos ticket TTL is under 5 minutes \u2014 press K to renew")
             else:
                 issues.append(issue)
         return issues
-
-    def _sql_content_issues(self, source: str) -> list[str]:
-        sql_text = self._read_sql()
-        if sql_text is None:
-            return ["SQL file is unreadable"]
-        if sql.is_malformed_template(sql_text):
-            return ["SQL contains only one of {date_inicio}/{date_fim} \u2014 likely a typo"]
-        if source == "SqlTemplate" and not sql.template_is_complete(sql_text):
-            return [
-                f"{manifest.source_display_label('SqlTemplate')} requires both "
-                "{date_inicio} and {date_fim}"
-            ]
-        return []
 
     def _update_validation_summary(self) -> None:
         issues = self._validation_issues()
@@ -864,38 +842,6 @@ class NewJobScreen(Screen[None]):
         issues = self._validation_issues(deep=True)
         return issues[0] if issues else None
 
-    def _source_destination(self) -> tuple[manifest.Source, manifest.Destination]:
-        source_type = self._selected_source()
-        destination_type = self._selected_destination()
-        schema = self._input_value("schema")
-        table = self._table_name_value()
-        if source_type == "ExistingTable":
-            existing = self._existing_full_table() or f"{schema}.{table}"
-            source: manifest.Source = {"type": "ExistingTable", "table_name": existing}
-            if "." in existing:
-                schema, table = existing.split(".", 1)
-        else:
-            source = {"type": source_type, "sql_path_at_launch": self._input_value("sql-file")}
-        csv_path = str(sql.safe_csv_path(self.launch_cwd, table))
-        destination: manifest.Destination = {
-            "type": destination_type,
-            "schema": schema,
-            "table_name": table,
-            "csv_path": csv_path,
-        }
-        return source, destination
-
-    def _params(self) -> dict[str, str]:
-        params = {
-            "to_email": self._input_value("email"),
-            "subject": self._input_value("subject"),
-            "queue": self._queue_param(),
-        }
-        if self._selected_source() == "SqlTemplate":
-            params["start_date"] = sql.to_orchestrator_date(self._input_value("start-date"))
-            params["end_date"] = sql.to_orchestrator_date(self._input_value("end-date"))
-        return params
-
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "launch":
             self.action_launch()
@@ -967,7 +913,7 @@ class NewJobScreen(Screen[None]):
     async def _launch_flow(self) -> None:
         error = self._validate()
         if error:
-            telemetry.note_launch_refused(_refusal_reason(error))
+            telemetry.note_launch_refused(job_ops.refusal_reason(error))
             self._show_message(error, "error")
             self.notify(error, severity="error")
             return
@@ -976,7 +922,7 @@ class NewJobScreen(Screen[None]):
                 self._launch_inputs(),
                 kerberos_ttl=self.kerberos_ttl,
             )
-        except job_ops.ValidationError as exc:
+        except (job_ops.ValidationError, job_ops.OperationalError) as exc:
             error = str(exc)
             self._show_message(error, "error")
             self.notify(error, severity="error")
@@ -997,19 +943,24 @@ class NewJobScreen(Screen[None]):
                 return
         if hasattr(self.app, "refresh_kerberos"):
             await self.app.refresh_kerberos()
-        error = self._validate()
+        # Recheck Kerberos / form invariants only. Do not rebuild the plan —
+        # the Advisor-acknowledged sql_text must be what launches.
+        error = None
+        issues = job_ops.validation_issues(
+            self._launch_inputs(),
+            kerberos_ttl=self.kerberos_ttl,
+            deep=False,
+        )
+        if issues:
+            issue = issues[0]
+            if issue == job_ops.MSG_KERBEROS_MISSING:
+                error = "Kerberos ticket missing \u2014 press K to kinit"
+            elif issue == job_ops.MSG_KERBEROS_TTL_SHORT:
+                error = "Kerberos ticket TTL is under 5 minutes \u2014 press K to renew"
+            else:
+                error = issue
         if error:
-            telemetry.note_launch_refused(_refusal_reason(error))
-            self._show_message(error, "error")
-            self.notify(error, severity="error")
-            return
-        try:
-            plan = job_ops.prepare_launch(
-                self._launch_inputs(),
-                kerberos_ttl=self.kerberos_ttl,
-            )
-        except job_ops.ValidationError as exc:
-            error = str(exc)
+            telemetry.note_launch_refused(job_ops.refusal_reason(error))
             self._show_message(error, "error")
             self.notify(error, severity="error")
             return
@@ -1041,12 +992,12 @@ class NewJobScreen(Screen[None]):
         table = destination.get("table_name") or "--"
         csv_path = destination.get("csv_path") or "--"
         queues = self._selected_queues()
-        queue_label = ", ".join(queues) if queues else "Auto (cycle all queues)"
+        pool_label = ", ".join(queues) if queues else "Auto (cycle all Resource Pools)"
         return (
             f"Source: [cyan]{manifest.source_display_label(source_type)}[/]  {source_detail}\n"
             f"Destination: [cyan]{dest_type}[/]\n"
             f"Target table: [cyan]{schema}.{table}[/]\n"
-            f"Queue: [cyan]{queue_label}[/]\n"
+            f"Resource Pool: [cyan]{pool_label}[/]\n"
             f"CSV path: {csv_path}\n"
             f"Email: {self._input_value('email') or '--'}"
         )
