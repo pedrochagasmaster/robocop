@@ -173,6 +173,7 @@ manifest, detached runner — so expect minutes, not milliseconds. Refusals rais
 is returned like any other. Loading a Result needs pandas, which is optional:
 `rows()` works with the standard library alone.
 
+Tutorial: [demos/notebook_job_api.ipynb](demos/notebook_job_api.ipynb).
 Full reference: [docs/notebook-api.md](docs/notebook-api.md). Design rationale:
 [ADR-0008](docs/adr/0008-notebook-api-wraps-the-cli.md),
 [ADR-0009](docs/adr/0009-notebook-queries-are-eagerly-submitted-jobs.md),

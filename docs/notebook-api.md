@@ -7,6 +7,11 @@ detached runners, reached through Python objects instead of argv and exit
 codes. See [ADR-0008](adr/0008-notebook-api-wraps-the-cli.md) for why it is a
 wrapper rather than a second entry point into the domain layer.
 
+This page is the reference. If you are new to running Dispatch from a notebook,
+work through the tutorial first:
+[`demos/notebook_job_api.ipynb`](../demos/notebook_job_api.ipynb) covers the
+same ground in order, with runnable cells.
+
 ## Quick start
 
 ```python
@@ -271,4 +276,6 @@ source mocks/dev-env.sh
 jupyter lab
 ```
 
-`demos/notebook_job_api.ipynb` is a runnable tour of the API against the mocks.
+`demos/notebook_job_api.ipynb` is the tutorial: every cell runs against the
+mocks, start to finish, in about twenty seconds. Set `DISPATCH_MOCK_DELAY` to a
+few seconds before starting Jupyter if you want Jobs slow enough to watch.
