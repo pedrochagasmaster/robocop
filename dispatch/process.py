@@ -68,8 +68,8 @@ async def run_exec(
     return proc.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 
-async def launch_runner(job_dir: Path) -> int:
-    proc = await asyncio.create_subprocess_exec(
+def _runner_argv(job_dir: Path) -> tuple[str, ...]:
+    return (
         "nohup",
         "setsid",
         sys.executable,
@@ -77,9 +77,26 @@ async def launch_runner(job_dir: Path) -> int:
         "dispatch.runner",
         "--job-dir",
         str(job_dir),
+    )
+
+
+async def launch_runner(job_dir: Path) -> int:
+    proc = await asyncio.create_subprocess_exec(
+        *_runner_argv(job_dir),
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
+    )
+    return proc.pid
+
+
+def launch_runner_detached(job_dir: Path) -> int:
+    """Synchronous detached runner handoff for non-interactive CLI launches."""
+    proc = subprocess.Popen(
+        _runner_argv(job_dir),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     return proc.pid
 

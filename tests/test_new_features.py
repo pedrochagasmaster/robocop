@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from dispatch import capacity, config, impala, manifest, telemetry
+from dispatch import capacity, config, impala, job_ops, manifest, telemetry
 from dispatch.app import DispatchApp
 from dispatch.screens.browser import BrowserScreen
 from dispatch.screens.help import HelpScreen
@@ -730,7 +730,11 @@ class TestNewJobInlineValidation:
                 app.push_screen(screen)
                 await pilot.pause(0.5)
 
-                _source, destination = screen._source_destination()
+                plan = job_ops.prepare_launch(
+                    screen._launch_inputs(),
+                    kerberos_ttl=screen.kerberos_ttl,
+                )
+                destination = plan.destination
                 eid = config.current_user()
                 assert Path(destination["csv_path"]) == (
                     tmp_path.resolve() / f"{eid}_dispatch_smoke_1.csv"

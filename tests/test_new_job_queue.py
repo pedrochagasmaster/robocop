@@ -74,7 +74,7 @@ def test_queue_defaults_to_auto_when_nothing_selected(mock_env_with_config) -> N
             screen = app.screen
             assert isinstance(screen, NewJobScreen)
             assert screen._selected_queues() == []
-            assert screen._params()["queue"] == _QUEUE_AUTO
+            assert screen._queue_param() == _QUEUE_AUTO
 
     asyncio.run(run())
 
@@ -95,7 +95,7 @@ def test_selecting_single_queue_flows_into_params(mock_env_with_config) -> None:
             screen.query_one("#queue", SelectionList).select("acs_large")
             await pilot.pause(0.1)
             assert screen._selected_queues() == ["acs_large"]
-            assert screen._params()["queue"] == "acs_large"
+            assert screen._queue_param() == "acs_large"
 
     asyncio.run(run())
 
@@ -119,7 +119,7 @@ def test_selecting_multiple_queues_serialises_in_priority_order(mock_env_with_co
             selection.select("adhoc_fast")
             await pilot.pause(0.1)
             assert screen._selected_queues() == ["adhoc_fast", "acs_large"]
-            assert screen._params()["queue"] == "adhoc_fast,acs_large"
+            assert screen._queue_param() == "adhoc_fast,acs_large"
 
     asyncio.run(run())
 
