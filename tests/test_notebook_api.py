@@ -13,21 +13,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import textwrap
+import time
 from datetime import date
 from pathlib import Path
 from typing import get_args
 
 import pytest
 
-from dispatch import cli_job, job_ops, manifest, notebook
+from dispatch import cli_job, job_ops, jobs, manifest, notebook, notebook_display
 from dispatch.notebook import (
     Dispatch,
     DispatchError,
     JobList,
     JobUnsuccessful,
+    MissingResultError,
     OperationalError,
+    ResultParseError,
     UnknownJobError,
     UsageError,
     WaitTimeout,
@@ -84,8 +88,20 @@ def _stub_cli(
 
 def _seed_pending_job(tmp_path: Path, *, table_name: str = "seeded") -> str:
     """Create a Pending Job on disk without a runner, and return its ID."""
+    return _seed_job_dir(tmp_path, table_name=table_name).name
+
+
+def _seed_running_job(tmp_path: Path, *, table_name: str) -> Path:
+    """Create a Job that occupies a launch slot: Running with a live PID."""
+    job_dir = _seed_job_dir(tmp_path, table_name=table_name)
+    manifest.update(job_dir / "manifest.json", state="Running", pid=os.getpid())
+    return job_dir
+
+
+def _seed_job_dir(tmp_path: Path, *, table_name: str = "seeded") -> Path:
+    """Create a Pending Job on disk without a runner, and return its directory."""
     launch_cwd = tmp_path / "seed"
-    sql_path = _write_sql(launch_cwd, "seed.sql")
+    sql_path = _write_sql(launch_cwd, f"{table_name}.sql")
     job_dir, _item = manifest.create_job(
         source={"type": "SqlFile", "sql_path_at_launch": str(sql_path)},
         destination={
@@ -98,7 +114,7 @@ def _seed_pending_job(tmp_path: Path, *, table_name: str = "seeded") -> str:
         launch_cwd=launch_cwd,
         sql_text="SELECT 1",
     )
-    return job_dir.name
+    return job_dir
 
 
 def _job_parser() -> argparse.ArgumentParser:
@@ -461,6 +477,304 @@ class TestQueriesAndLogs:
             job.cancel()
 
 
+class TestInlineSql:
+    """``sql()`` writes Inline SQL into the workspace and launches it (ADR-0009)."""
+
+    def test_inline_sql_runs_and_loads_a_dataframe(self, mock_env, tmp_path: Path) -> None:
+        cwd = tmp_path / "sql"
+        cwd.mkdir()
+        session = _dispatch(cwd)
+
+        job = session.sql("SELECT 1 AS answer")
+        frame = job.to_df(timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
+
+        assert job.succeeded, job.logs()
+        assert list(frame.columns) == ["id", "value"]
+        assert frame.shape == (1, 2)
+        assert job.columns == ["id", "value"]
+        assert job.rows() == [{"id": "1", "value": "mock"}]
+        assert notebook.Job.to_pandas is notebook.Job.to_df
+
+    def test_result_lands_in_the_workspace_not_the_working_directory(
+        self, mock_env, tmp_path: Path
+    ) -> None:
+        cwd = tmp_path / "sql"
+        cwd.mkdir()
+        session = _dispatch(cwd)
+
+        job = session.sql("SELECT 1").wait(timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
+
+        result = job.result_path
+        assert result is not None
+        assert result.is_relative_to(session.workspace)
+        assert result.parent.parent == session.workspace
+        assert list(cwd.iterdir()) == []
+
+    def test_inline_sql_is_saved_beside_its_result(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+
+        job = session.sql("SELECT 42 AS answer")
+
+        query_dir = job.result_path.parent
+        saved = list(query_dir.glob("*.sql"))
+        assert len(saved) == 1
+        assert saved[0].read_text(encoding="utf-8") == "SELECT 42 AS answer\n"
+        assert job.source_detail == str(saved[0])
+
+    def test_each_query_gets_its_own_directory(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+
+        first = session.sql("SELECT 1").wait(timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
+        second = session.sql("SELECT 2").wait(timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
+
+        assert first.result_path != second.result_path
+        assert first.result_path.parent != second.result_path.parent
+
+    def test_empty_sql_is_refused_before_launching(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+
+        with pytest.raises(UsageError, match="empty"):
+            session.sql("   \n")
+
+        assert not session.workspace.exists() or list(session.workspace.iterdir()) == []
+
+    def test_refused_launch_leaves_no_workspace_directory(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+
+        with pytest.raises(UsageError, match="acknowledge"):
+            session.sql("SELECT a.x FROM aa_enc.t1 a CROSS JOIN aa_enc.t2 b")
+
+        assert list(session.workspace.iterdir()) == []
+
+    def test_table_destination_has_no_result(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+
+        job = session.sql("SELECT 1 AS answer", destination="Table", table="inline_out")
+
+        assert job.destination == "Table"
+        assert job.result_path is None
+        with pytest.raises(MissingResultError, match="destination='Csv'"):
+            job.to_df(timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
+
+    def test_inline_template_passes_the_date_range(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+
+        job = session.sql(
+            "SELECT '{date_inicio}' AS a, '{date_fim}' AS b",
+            source="SqlTemplate",
+            destination="Table",
+            table="monthly_out",
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 1, 31),
+        )
+
+        assert job.source == "SqlTemplate"
+        assert job.params["start_date"] == "01/01/2026"
+        assert job.params["end_date"] == "01/31/2026"
+
+
+class TestTableReads:
+    def test_unlimited_read_uses_the_existing_table_source(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+
+        job = session.table("aa_enc.events_existing").wait(
+            timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL
+        )
+
+        assert job.source == "ExistingTable"
+        assert job.succeeded, job.logs()
+        assert job.result_path.name == "events_existing.csv"
+        assert job.result_path.is_relative_to(session.workspace)
+
+    def test_limited_read_generates_inline_sql(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+
+        job = session.table("aa_enc.events_existing", limit=5)
+
+        assert job.source == "SqlFile"
+        saved = list(job.result_path.parent.glob("*.sql"))
+        assert (
+            saved[0].read_text(encoding="utf-8") == "SELECT * FROM aa_enc.events_existing LIMIT 5\n"
+        )
+
+    @pytest.mark.parametrize("name", ["events", "aa_enc.events; DROP TABLE x", "1bad.events", ""])
+    def test_malformed_table_names_are_refused(self, mock_env, tmp_path: Path, name: str) -> None:
+        with pytest.raises(UsageError, match="schema.table"):
+            _dispatch(tmp_path).table(name)
+
+    @pytest.mark.parametrize("limit", [0, -5])
+    def test_non_positive_limits_are_refused(self, mock_env, tmp_path: Path, limit: int) -> None:
+        with pytest.raises(UsageError, match="positive"):
+            _dispatch(tmp_path).table("aa_enc.events", limit=limit)
+
+
+class TestResultReading:
+    def test_unsuccessful_job_has_no_result(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path, env={"DISPATCH_MOCK_SCENARIO": "syntax_error"})
+
+        job = session.sql("SELECT bad syntax")
+
+        with pytest.raises(JobUnsuccessful, match="job.logs()"):
+            job.to_df(timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
+        assert job.failed
+
+    def test_reading_waits_for_a_running_job(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+
+        job = session.sql("SELECT 1")
+        rows = job.rows(timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
+
+        assert job.is_terminal
+        assert rows == [{"id": "1", "value": "mock"}]
+
+    def test_ragged_result_raises_instead_of_shifting_columns(
+        self, mock_env, tmp_path: Path
+    ) -> None:
+        session = _dispatch(tmp_path)
+        job = session.sql("SELECT 1").wait(timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
+        job.result_path.write_text("id,value\n1,a,b\n", encoding="utf-8")
+
+        with pytest.raises(ResultParseError, match="line 2 has 3 fields"):
+            job.rows()
+        with pytest.raises(ResultParseError):
+            job.to_df()
+
+    def test_to_csv_copies_the_result_where_asked(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+        job = session.sql("SELECT 1")
+
+        target = job.to_csv(
+            tmp_path / "exports" / "report.csv",
+            timeout=WAIT_TIMEOUT,
+            poll_interval=POLL_INTERVAL,
+        )
+
+        assert target == tmp_path / "exports" / "report.csv"
+        assert target.read_text(encoding="utf-8") == job.result_path.read_text(encoding="utf-8")
+
+    def test_to_csv_accepts_a_directory(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+        job = session.sql("SELECT 1")
+        destination = tmp_path / "outbox"
+        destination.mkdir()
+
+        target = job.to_csv(destination, timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
+
+        assert target.parent == destination
+        assert target.name == job.result_path.name
+
+    def test_a_cli_launched_csv_job_also_has_a_result(self, mock_env, tmp_path: Path) -> None:
+        """Reading a Result is not notebook-specific (ADR-0010)."""
+        cwd = tmp_path / "sql"
+        _write_sql(cwd)
+        session = _dispatch(cwd)
+
+        job = session.launch(
+            source="SqlFile", destination="Csv", sql="query.sql", table="from_cli"
+        ).wait(timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
+
+        assert job.result_path == cwd / "from_cli.csv"
+        assert job.rows() == [{"id": "1", "value": "mock"}]
+
+
+class TestCapacityBackpressure:
+    def _fill_capacity(self, tmp_path: Path) -> None:
+        for index in range(2):
+            _seed_running_job(tmp_path, table_name=f"active{index}")
+
+    def test_third_launch_is_refused_immediately(self, mock_env, tmp_path: Path) -> None:
+        self._fill_capacity(tmp_path)
+
+        with pytest.raises(OperationalError, match="capacity"):
+            _dispatch(tmp_path).sql("SELECT 1")
+
+    def test_wait_for_slot_retries_until_the_deadline(self, mock_env, tmp_path: Path) -> None:
+        self._fill_capacity(tmp_path)
+        started = time.monotonic()
+
+        with pytest.raises(OperationalError, match="capacity"):
+            _dispatch(tmp_path).sql("SELECT 1", wait_for_slot=0.6)
+
+        assert time.monotonic() - started >= 0.6
+
+    def test_wait_for_slot_does_not_retry_other_refusals(self, tmp_path: Path) -> None:
+        command = _stub_cli(
+            tmp_path,
+            exit_code=4,
+            stderr=json.dumps({"error": job_ops.MSG_KERBEROS_MISSING, "exit_code": 4}),
+        )
+        session = Dispatch(tmp_path, command=command, workspace=tmp_path / "ws")
+        started = time.monotonic()
+
+        with pytest.raises(OperationalError, match="Kerberos"):
+            session.sql("SELECT 1", wait_for_slot=30)
+
+        assert time.monotonic() - started < 10
+
+    def test_negative_wait_for_slot_is_rejected(self, mock_env, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            _dispatch(tmp_path).sql("SELECT 1", wait_for_slot=-1)
+
+
+class TestCleanup:
+    def test_old_query_directories_are_removed(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+        job = session.sql("SELECT 1").wait(timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
+        query_dir = job.result_path.parent
+
+        report = session.cleanup(older_than_days=0)
+
+        assert report.directories == 1
+        assert report.bytes_freed > 0
+        assert not query_dir.exists()
+        assert "directories=1" in repr(report)
+
+    def test_recent_directories_survive_the_default_window(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+        job = session.sql("SELECT 1").wait(timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
+
+        report = session.cleanup()
+
+        assert report.directories == 0
+        assert job.result_path.exists()
+
+    def test_cleanup_without_a_workspace_is_a_no_op(self, mock_env, tmp_path: Path) -> None:
+        session = Dispatch(tmp_path, workspace=tmp_path / "never-created")
+
+        assert session.cleanup().directories == 0
+
+    def test_negative_window_is_rejected(self, mock_env, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            _dispatch(tmp_path).cleanup(older_than_days=-1)
+
+    def test_default_window_matches_the_dashboard(self) -> None:
+        assert notebook.DEFAULT_CLEANUP_DAYS == jobs.ACTIVE_WINDOW.total_seconds() / 86400
+
+
+class TestWorkspaceLocation:
+    def test_workspace_follows_the_data_root(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+
+        assert (
+            session.workspace == Path(os.environ["DISPATCH_DATA_ROOT"]) / ".dispatch" / "notebook"
+        )
+
+    def test_env_override_moves_the_workspace(self, tmp_path: Path) -> None:
+        root = tmp_path / "other-root"
+        session = Dispatch(tmp_path, env={"DISPATCH_DATA_ROOT": str(root)})
+
+        assert session.workspace == root / ".dispatch" / "notebook"
+
+    def test_explicit_workspace_wins(self, tmp_path: Path) -> None:
+        assert Dispatch(tmp_path, workspace=tmp_path / "ws").workspace == tmp_path / "ws"
+
+    def test_workspace_is_private(self, mock_env, tmp_path: Path) -> None:
+        session = _dispatch(tmp_path)
+        session.sql("SELECT 1")
+
+        assert oct(session.workspace.stat().st_mode)[-3:] == "700"
+
+
 class TestSessionConfiguration:
     def test_cwd_decides_where_csv_results_land(self, mock_env, tmp_path: Path) -> None:
         cwd = tmp_path / "elsewhere"
@@ -508,7 +822,7 @@ class TestRendering:
         job_id = _seed_pending_job(tmp_path)
         job = _dispatch(tmp_path).job(job_id)
 
-        markup = notebook._watch_html(job, ["<script>alert(1)</script>"])
+        markup = notebook_display.watch_html(job, ["<script>alert(1)</script>"])
 
         assert "<script>" not in markup
         assert "&lt;script&gt;" in markup
@@ -518,7 +832,7 @@ class TestRendering:
     ) -> None:
         job_id = _seed_pending_job(tmp_path)
         job = _dispatch(tmp_path).job(job_id)
-        view = notebook._LiveView(rich=False)
+        view = notebook_display.LiveView(rich=False)
 
         view.update(job, [])
         view.update(job, [])
@@ -530,7 +844,7 @@ class TestRendering:
         [(None, "--"), (0, "0s"), (42.7, "42s"), (65, "1m 05s"), (3900, "1h 05m")],
     )
     def test_duration_formatting(self, seconds: float | None, expected: str) -> None:
-        assert notebook._format_duration(seconds) == expected
+        assert notebook_display.format_duration(seconds) == expected
 
     @pytest.mark.parametrize("value", ["2026-07-27T17:38:48Z", "20260727T173848Z"])
     def test_both_timestamp_shapes_parse(self, value: str) -> None:

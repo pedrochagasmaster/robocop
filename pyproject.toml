@@ -14,12 +14,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Loading a Job's Result into a DataFrame is optional: Analysts get pandas from
+# the shared runtime or not at all, and dispatch.results degrades to rows().
+notebook = [
+  "pandas>=1.5",
+]
 dev = [
   "pytest",
   "pytest-asyncio",
   "pytest-xdist>=3.6,<4",
   "ruff",
   "mypy",
+  "pandas>=1.5",
 ]
 release = [
   "edge-deploy-core @ git+https://github.com/pedrochagasmaster/edge-deploy-core.git@v1.5.3",

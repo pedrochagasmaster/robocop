@@ -9,23 +9,33 @@ this module reimplements Job behavior, and nothing here imports Textual.
     from dispatch.notebook import Dispatch
 
     d = Dispatch(cwd="~/sql")
+    df = d.sql("SELECT dt, count(*) c FROM aa_enc.events GROUP BY dt").to_df()
+
     job = d.launch(source="SqlFile", destination="Csv", sql="query.sql", table="report")
     job.watch()          # live state and log tail until the Job is terminal
     job.succeeded        # True / False
     d.jobs()             # every Job, rendered as a table in Jupyter
 
+Inline SQL is written to a Dispatch-owned file in the Notebook workspace and
+launched as an ordinary ``SqlFile`` Job, submitted eagerly (ADR-0009). Results
+are read back from the CSV the Job wrote, strictly (ADR-0010). There is no fast
+unaudited query path (ADR-0011).
+
 Refused commands raise: :class:`UsageError` (invalid inputs, Advisor
 acknowledgement), :class:`UnknownJobError`, :class:`OperationalError`
 (Kerberos, capacity, handoff). A Job that ran and failed is data, not an
-exception, so :meth:`Job.wait` returns the Job in every terminal state.
+exception, so :meth:`Job.wait` returns the Job in every terminal state; reading
+the Result of an unsuccessful Job raises :class:`JobUnsuccessful`.
 """
 
 from __future__ import annotations
 
-import html
 import json
 import os
+import re
+import secrets
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -34,13 +44,25 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from .runtime import is_jupyter_notebook
+from . import config, notebook_display, results
+from .results import MissingResultError, ResultError, ResultParseError
 
-try:  # Optional: self-updating rich output exists only inside IPython kernels.
-    from IPython.display import HTML, display
-except ImportError:
-    HTML = None
-    display = None
+__all__ = [
+    "CleanupReport",
+    "Dispatch",
+    "DispatchError",
+    "Job",
+    "JobList",
+    "JobUnsuccessful",
+    "MissingResultError",
+    "OperationalError",
+    "ResultError",
+    "ResultParseError",
+    "UnknownJobError",
+    "UsageError",
+    "WaitTimeout",
+    "cli_command",
+]
 
 SourceType = Literal["SqlFile", "SqlTemplate", "ExistingTable"]
 DestinationType = Literal["Table", "Csv", "Table+Csv"]
@@ -52,16 +74,16 @@ DEFAULT_POLL_INTERVAL = 2.0
 DEFAULT_LOG_LINES = 50
 WATCH_LOG_LINES = 12
 
+#: Notebook Jobs older than this are removed by :meth:`Dispatch.cleanup`,
+#: matching the window the dashboard keeps Jobs active for.
+DEFAULT_CLEANUP_DAYS = 7.0
+
 #: Override the CLI invocation, e.g. ``DISPATCH_CLI=/ads_storage/dispatch/bin/dispatch``.
 CLI_ENV_VAR = "DISPATCH_CLI"
 
-_STATE_COLORS = {
-    "Pending": "#8a6d00",
-    "Running": "#0b5cad",
-    "Succeeded": "#1a7f37",
-    "Failed": "#b42318",
-    "Cancelled": "#57606a",
-}
+_SLOT_RETRY_INTERVAL = 5.0
+_CAPACITY_MARKERS = ("capacity", "concurrency cap")
+_FULL_TABLE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*")
 
 
 class DispatchError(Exception):
@@ -131,6 +153,10 @@ class Dispatch:
     ``cwd`` is the directory the CLI is invoked from, so it decides where
     relative ``sql`` paths resolve and where CSV destinations are written
     (ADR-0003). It defaults to the notebook's working directory.
+
+    ``workspace`` is the Notebook workspace: Inline SQL and the Results of
+    :meth:`sql` and :meth:`table` land in a directory per query underneath it,
+    never in ``cwd`` (ADR-0010).
     """
 
     def __init__(
@@ -140,11 +166,15 @@ class Dispatch:
         command: Sequence[str] | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
+        workspace: str | os.PathLike[str] | None = None,
     ) -> None:
         self._cwd = Path(cwd).expanduser() if cwd is not None else Path.cwd()
         self._command = list(command) if command is not None else cli_command()
         self._env = dict(env or {})
         self._timeout = timeout
+        self._workspace = (
+            Path(workspace).expanduser() if workspace is not None else self._default_workspace()
+        )
 
     @property
     def cwd(self) -> Path:
@@ -155,6 +185,114 @@ class Dispatch:
     def command(self) -> list[str]:
         """CLI invocation this session shells out to."""
         return list(self._command)
+
+    @property
+    def workspace(self) -> Path:
+        """Notebook workspace holding Inline SQL and Results."""
+        return self._workspace
+
+    def sql(
+        self,
+        text: str,
+        *,
+        source: SourceType = "SqlFile",
+        destination: DestinationType = "Csv",
+        table: str | None = None,
+        schema: str | None = None,
+        start_date: str | date | None = None,
+        end_date: str | date | None = None,
+        email: str | None = None,
+        subject: str | None = None,
+        queue: str | Sequence[str] | None = None,
+        acknowledge_advisor: bool = False,
+        wait_for_slot: float | None = None,
+    ) -> Job:
+        """Launch a Job from SQL written here, and return it (ADR-0009).
+
+        The text is saved as Inline SQL in the Notebook workspace and launched
+        like any other ``SqlFile`` Job: same validation, Kerberos check, Advisor
+        gate, capacity cap, manifest, and detached runner. The call submits
+        immediately; read the Result with :meth:`Job.to_df` or monitor it with
+        :meth:`Job.watch`.
+
+        Pass ``source="SqlTemplate"`` with ``start_date``/``end_date`` for
+        ``{date_inicio}``/``{date_fim}`` templates, and ``destination="Table"``
+        with ``table=`` to materialise a table instead of a Result.
+        """
+        if not text.strip():
+            raise UsageError("SQL text is empty")
+        stem = table or _query_stem()
+        query_dir = self._new_query_dir(stem)
+        sql_path = query_dir / f"{stem}.sql"
+        sql_path.write_text(_ensure_trailing_newline(text), encoding="utf-8")
+        session = self._at(query_dir)
+        try:
+            return session.launch(
+                source=source,
+                destination=destination,
+                sql=sql_path,
+                schema=schema,
+                table=stem,
+                start_date=start_date,
+                end_date=end_date,
+                email=email,
+                subject=subject,
+                queue=queue,
+                acknowledge_advisor=acknowledge_advisor,
+                wait_for_slot=wait_for_slot,
+            )
+        except DispatchError:
+            _discard_dir(query_dir)
+            raise
+
+    def table(
+        self,
+        name: str,
+        *,
+        limit: int | None = None,
+        email: str | None = None,
+        subject: str | None = None,
+        queue: str | Sequence[str] | None = None,
+        acknowledge_advisor: bool = False,
+        wait_for_slot: float | None = None,
+    ) -> Job:
+        """Export an existing ``schema.table`` to a Result and return the Job.
+
+        Without ``limit`` this is an ``ExistingTable`` Job and the orchestrator
+        exports the whole table. With ``limit`` Dispatch launches
+        ``SELECT * FROM <name> LIMIT <limit>`` as Inline SQL, which the Advisor
+        analyses like any other SQL (ADR-0009).
+        """
+        if not _FULL_TABLE_RE.fullmatch(name.strip()):
+            raise UsageError(f"Table must be schema.table using plain Impala identifiers: {name!r}")
+        target = name.strip()
+        if limit is not None:
+            if int(limit) <= 0:
+                raise UsageError("limit must be a positive number of rows")
+            return self.sql(
+                f"SELECT * FROM {target} LIMIT {int(limit)}",
+                email=email,
+                subject=subject,
+                queue=queue,
+                acknowledge_advisor=acknowledge_advisor,
+                wait_for_slot=wait_for_slot,
+            )
+        query_dir = self._new_query_dir(target.split(".", 1)[1])
+        session = self._at(query_dir)
+        try:
+            return session.launch(
+                source="ExistingTable",
+                destination="Csv",
+                existing_table=target,
+                email=email,
+                subject=subject,
+                queue=queue,
+                acknowledge_advisor=acknowledge_advisor,
+                wait_for_slot=wait_for_slot,
+            )
+        except DispatchError:
+            _discard_dir(query_dir)
+            raise
 
     def launch(
         self,
@@ -171,6 +309,7 @@ class Dispatch:
         subject: str | None = None,
         queue: str | Sequence[str] | None = None,
         acknowledge_advisor: bool = False,
+        wait_for_slot: float | None = None,
     ) -> Job:
         """Validate, admit, and hand off one Job; return it before it runs.
 
@@ -178,27 +317,54 @@ class Dispatch:
         Advisor error-severity findings still gate the launch: the first call
         raises :class:`UsageError` naming the rules, and passing
         ``acknowledge_advisor=True`` launches the SQL as written.
+
+        Only two Jobs may be Pending or Running at once. Without
+        ``wait_for_slot`` a third launch raises :class:`OperationalError` at
+        once; with it, Dispatch retries until a slot frees or the given number
+        of seconds passes.
         """
-        payload = self._json(
-            _launch_argv(
-                source=source,
-                destination=destination,
-                sql=sql,
-                existing_table=existing_table,
-                schema=schema,
-                table=table,
-                start_date=start_date,
-                end_date=end_date,
-                email=email,
-                subject=subject,
-                queue=queue,
-                acknowledge_advisor=acknowledge_advisor,
-            )
+        argv = _launch_argv(
+            source=source,
+            destination=destination,
+            sql=sql,
+            existing_table=existing_table,
+            schema=schema,
+            table=table,
+            start_date=start_date,
+            end_date=end_date,
+            email=email,
+            subject=subject,
+            queue=queue,
+            acknowledge_advisor=acknowledge_advisor,
         )
+        payload = self._launch_payload(argv, wait_for_slot=wait_for_slot)
         job_id = str(payload.get("job_id") or "")
         if not job_id:
             raise OperationalError(f"Launch returned no Job ID: {payload!r}")
         return Job(self, {"id": job_id, "state": payload.get("state")}).refresh()
+
+    def cleanup(self, *, older_than_days: float = DEFAULT_CLEANUP_DAYS) -> CleanupReport:
+        """Delete Notebook workspace directories older than ``older_than_days``.
+
+        Only the workspace is touched: Job manifests, run logs, and Results the
+        Analyst asked for by name are left alone.
+        """
+        if older_than_days < 0:
+            raise ValueError("older_than_days must be >= 0")
+        if not self._workspace.is_dir():
+            return CleanupReport(directories=0, bytes_freed=0)
+        cutoff = time.time() - older_than_days * 86400
+        directories = 0
+        freed = 0
+        for entry in sorted(self._workspace.iterdir()):
+            if not entry.is_dir() or entry.is_symlink():
+                continue
+            if entry.stat().st_mtime > cutoff:
+                continue
+            freed += _directory_size(entry)
+            _discard_dir(entry)
+            directories += 1
+        return CleanupReport(directories=directories, bytes_freed=freed)
 
     def jobs(self, state: JobState | None = None) -> JobList:
         """Return every Job, newest state first reconciled, optionally filtered."""
@@ -210,6 +376,49 @@ class Dispatch:
     def job(self, job_id: str) -> Job:
         """Return one Job by ID, with its manifest loaded."""
         return Job(self, {"id": job_id}).refresh()
+
+    def _launch_payload(
+        self, argv: Sequence[str], *, wait_for_slot: float | None
+    ) -> dict[str, Any]:
+        """Launch, optionally retrying while the two-Job cap is full."""
+        if wait_for_slot is None:
+            return self._json(argv)
+        if wait_for_slot < 0:
+            raise ValueError("wait_for_slot must be >= 0")
+        deadline = time.monotonic() + wait_for_slot
+        while True:
+            try:
+                return self._json(argv)
+            except OperationalError as exc:
+                if not _is_capacity_refusal(exc):
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(_SLOT_RETRY_INTERVAL, remaining))
+
+    def _at(self, cwd: Path) -> Dispatch:
+        """A session identical to this one but invoking the CLI in ``cwd``."""
+        return Dispatch(
+            cwd,
+            command=self._command,
+            env=self._env,
+            timeout=self._timeout,
+            workspace=self._workspace,
+        )
+
+    def _new_query_dir(self, stem: str) -> Path:
+        """Create the per-query workspace directory holding SQL and its Result."""
+        query_dir = self._workspace / f"{stem}_{secrets.token_hex(3)}"
+        config.ensure_private_dir(self._workspace)
+        query_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+        return query_dir
+
+    def _default_workspace(self) -> Path:
+        root = self._env.get("DISPATCH_DATA_ROOT")
+        if root:
+            return config.notebook_dir(root=Path(root))
+        return config.notebook_dir()
 
     def _json(self, args: Sequence[str]) -> dict[str, Any]:
         completed = self._run([*args, "--json"])
@@ -369,6 +578,14 @@ class Job:
         return (self.manifest.get("destination") or {}).get("csv_path") or None
 
     @property
+    def result_path(self) -> Path | None:
+        """Path of the Job's Result, or ``None`` when its Destination wrote none."""
+        if (self.destination or "") not in ("Csv", "Table+Csv"):
+            return None
+        csv_path = self.csv_path
+        return Path(csv_path) if csv_path else None
+
+    @property
     def is_terminal(self) -> bool:
         return self.state in TERMINAL_STATES
 
@@ -462,7 +679,7 @@ class Job:
         state change. Interrupting the wait leaves the Job running: the runner
         is detached.
         """
-        view = _LiveView()
+        view = notebook_display.LiveView()
         return self.wait(
             timeout=timeout,
             poll_interval=poll_interval,
@@ -474,6 +691,80 @@ class Job:
         self._dispatch._json(["cancel", self.id, "--yes"])
         return self.refresh()
 
+    def to_df(
+        self,
+        *,
+        timeout: float | None = None,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+        **read_csv_kwargs: Any,
+    ) -> Any:
+        """Return the Job's Result as a ``pandas.DataFrame``, waiting if needed.
+
+        Keyword arguments reach ``pandas.read_csv`` (``dtype``, ``parse_dates``,
+        ``nrows``). The exported CSV is unquoted, so a value containing a comma
+        or newline makes it ambiguous: prefer :meth:`rows` when you need the
+        parse checked (ADR-0010).
+        """
+        return results.to_dataframe(
+            self._result_path_when_successful(timeout=timeout, poll_interval=poll_interval),
+            **read_csv_kwargs,
+        )
+
+    #: ``to_pandas`` reads the same way; both names exist because both are habits.
+    to_pandas = to_df
+
+    def rows(
+        self,
+        *,
+        timeout: float | None = None,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+    ) -> list[dict[str, str]]:
+        """Return the Job's Result as a list of dicts, waiting if needed.
+
+        Every line's field count is checked against the header, so an ambiguous
+        export raises :class:`ResultParseError` instead of shifting columns.
+        """
+        return results.read_rows(
+            self._result_path_when_successful(timeout=timeout, poll_interval=poll_interval)
+        )
+
+    @property
+    def columns(self) -> list[str]:
+        """Column names of the Job's Result."""
+        return results.read_columns(self._result_path_when_successful())
+
+    def to_csv(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        timeout: float | None = None,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+    ) -> Path:
+        """Copy the Job's Result to ``path`` and return where it landed."""
+        source = self._result_path_when_successful(timeout=timeout, poll_interval=poll_interval)
+        target = Path(path).expanduser()
+        if target.is_dir():
+            target = target / source.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        return target
+
+    def _result_path_when_successful(
+        self,
+        *,
+        timeout: float | None = None,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+    ) -> Path:
+        """Wait for the Job, insist it Succeeded, and return its Result path."""
+        if not self.is_terminal:
+            self.wait(timeout=timeout, poll_interval=poll_interval)
+        if not self.succeeded:
+            raise JobUnsuccessful(
+                f"Job {self.id} is {self.state} (exit code {self.exit_code}), so it has no "
+                "Result. Read job.logs() to see why."
+            )
+        return results.resolve_result_path(self.result_path)
+
     def to_dict(self) -> dict[str, Any]:
         """The Job's fields as a plain dict, ready for pandas or JSON."""
         return dict(self._data)
@@ -483,20 +774,7 @@ class Job:
         return f"<Job {self.id} {self.state} {route}>"
 
     def _repr_html_(self) -> str:
-        rows = [
-            ("Job ID", self.id),
-            ("State", _state_html(self.state)),
-            ("Source", f"{self.source or '--'} {self.source_detail or ''}".strip()),
-            ("Destination", f"{self.destination or '--'} {self.destination_detail or ''}".strip()),
-            ("Elapsed", _format_duration(self.elapsed_seconds)),
-            ("Exit code", "--" if self.exit_code is None else str(self.exit_code)),
-        ]
-        cells = "".join(
-            f"<tr><th style='text-align:left;padding:2px 12px 2px 0'>{html.escape(label)}</th>"
-            f"<td style='text-align:left'>{value}</td></tr>"
-            for label, value in rows
-        )
-        return f"<table style='border:none'><tbody>{cells}</tbody></table>"
+        return notebook_display.job_html(self)
 
 
 class JobList(list[Job]):
@@ -507,69 +785,18 @@ class JobList(list[Job]):
         return [job.to_dict() for job in self]
 
     def _repr_html_(self) -> str:
-        if not self:
-            return "<em>No Jobs.</em>"
-        headers = ("Job ID", "State", "Source", "Destination", "Elapsed", "Exit")
-        head = "".join(
-            f"<th style='text-align:left;padding-right:12px'>{name}</th>" for name in headers
-        )
-        body = []
-        for job in self:
-            cells = (
-                html.escape(job.id),
-                _state_html(job.state),
-                html.escape(job.source or "--"),
-                html.escape(job.destination or "--"),
-                _format_duration(job.elapsed_seconds),
-                "--" if job.exit_code is None else str(job.exit_code),
-            )
-            body.append(
-                "<tr>"
-                + "".join(f"<td style='padding-right:12px'>{cell}</td>" for cell in cells)
-                + "</tr>"
-            )
-        return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
+        return notebook_display.job_list_html(self)
 
 
-class _LiveView:
-    """Render repeated Job snapshots in place (Jupyter) or as change lines (stdout)."""
+class CleanupReport:
+    """What :meth:`Dispatch.cleanup` removed from the Notebook workspace."""
 
-    def __init__(self, *, rich: bool | None = None) -> None:
-        available = display is not None and HTML is not None
-        self._rich = (is_jupyter_notebook() and available) if rich is None else (rich and available)
-        self._handle: Any = None
-        self._last = ""
+    def __init__(self, *, directories: int, bytes_freed: int) -> None:
+        self.directories = directories
+        self.bytes_freed = bytes_freed
 
-    def update(self, job: Job, log_lines: Sequence[str]) -> None:
-        if self._rich:
-            payload = HTML(_watch_html(job, log_lines))
-            if self._handle is None:
-                self._handle = display(payload, display_id=True)
-            else:
-                self._handle.update(payload)
-            return
-        summary = f"{job.id} {job.state} ({_format_duration(job.elapsed_seconds)})"
-        if summary != self._last:
-            print(summary, flush=True)
-            self._last = summary
-
-
-def _watch_html(job: Job, log_lines: Sequence[str]) -> str:
-    log = html.escape("\n".join(log_lines)) or "(no log output yet)"
-    return (
-        "<div style='font-family:monospace'>"
-        f"<div><b>{html.escape(job.id)}</b> {_state_html(job.state)} "
-        f"&middot; {html.escape(job.destination or '--')} "
-        f"&middot; {_format_duration(job.elapsed_seconds)}</div>"
-        "<pre style='margin:4px 0 0;padding:8px;background:#f6f8fa;"
-        f"max-height:18em;overflow:auto'>{log}</pre>"
-        "</div>"
-    )
-
-
-def _state_html(state: str) -> str:
-    color = _STATE_COLORS.get(state, "#57606a")
-    return f"<span style='color:{color};font-weight:600'>{html.escape(state)}</span>"
+    def __repr__(self) -> str:
+        return f"CleanupReport(directories={self.directories}, bytes_freed={self.bytes_freed})"
 
 
 def _launch_argv(
@@ -606,6 +833,29 @@ def _launch_argv(
     if acknowledge_advisor:
         args.append("--acknowledge-advisor")
     return args
+
+
+def _query_stem() -> str:
+    """A CSV-safe stem for one Inline SQL query (``safe_csv_path`` needs an identifier)."""
+    return f"nb_{secrets.token_hex(4)}"
+
+
+def _ensure_trailing_newline(text: str) -> str:
+    return text if text.endswith("\n") else f"{text}\n"
+
+
+def _is_capacity_refusal(error: DispatchError) -> bool:
+    message = str(error).lower()
+    return any(marker in message for marker in _CAPACITY_MARKERS)
+
+
+def _directory_size(path: Path) -> int:
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def _discard_dir(path: Path) -> None:
+    """Remove a workspace directory, tolerating a partially created one."""
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def _date_text(value: str | date | None) -> str:
@@ -662,17 +912,6 @@ def _parse_timestamp(value: str | None) -> datetime | None:
         except ValueError:
             continue
     return None
-
-
-def _format_duration(seconds: float | None) -> str:
-    if seconds is None:
-        return "--"
-    total = int(seconds)
-    if total < 60:
-        return f"{total}s"
-    if total < 3600:
-        return f"{total // 60}m {total % 60:02d}s"
-    return f"{total // 3600}h {(total % 3600) // 60:02d}m"
 
 
 def _shutdown(process: subprocess.Popen[str]) -> None:
