@@ -221,6 +221,11 @@ class Dispatch:
         """
         if not text.strip():
             raise UsageError("SQL text is empty")
+        if table is None and destination in ("Table", "Table+Csv"):
+            raise UsageError(
+                f"destination={destination!r} needs an explicit table= name; Dispatch will not "
+                "create a table under a generated name."
+            )
         stem = table or _query_stem()
         query_dir = self._new_query_dir(stem)
         sql_path = query_dir / f"{stem}.sql"

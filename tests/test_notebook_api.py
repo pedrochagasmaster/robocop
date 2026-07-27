@@ -556,6 +556,14 @@ class TestInlineSql:
         with pytest.raises(MissingResultError, match="destination='Csv'"):
             job.to_df(timeout=WAIT_TIMEOUT, poll_interval=POLL_INTERVAL)
 
+    @pytest.mark.parametrize("destination", ["Table", "Table+Csv"])
+    def test_table_destinations_require_an_explicit_name(
+        self, mock_env, tmp_path: Path, destination: str
+    ) -> None:
+        """A generated table name would leave randomly named tables in Impala."""
+        with pytest.raises(UsageError, match="explicit table="):
+            _dispatch(tmp_path).sql("SELECT 1", destination=destination)
+
     def test_inline_template_passes_the_date_range(self, mock_env, tmp_path: Path) -> None:
         session = _dispatch(tmp_path)
 
