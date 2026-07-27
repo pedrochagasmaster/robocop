@@ -33,8 +33,9 @@ JOB_STATES = ("Pending", "Running", "Succeeded", "Failed", "Cancelled")
 TERMINAL_STATES = frozenset({"Succeeded", "Failed", "Cancelled"})
 CANCELLABLE_STATES = frozenset({"Pending", "Running"})
 
-MSG_KERBEROS_MISSING = "Kerberos ticket missing — run kinit"
-MSG_KERBEROS_TTL_SHORT = "Kerberos ticket TTL is under 5 minutes — renew with kinit"
+# ASCII punctuation only: CLI prints these on Windows consoles that are not UTF-8.
+MSG_KERBEROS_MISSING = "Kerberos ticket missing - run kinit"
+MSG_KERBEROS_TTL_SHORT = "Kerberos ticket TTL is under 5 minutes - renew with kinit"
 
 _JOB_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z_[a-z0-9]+$")
 _LOG_TAIL_BLOCK = 8192
