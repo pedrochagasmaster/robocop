@@ -5,18 +5,26 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from . import telemetry
+from . import cli_job, telemetry
 from .app import DispatchApp
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="dispatch",
-        description="Server-side TUI for launching and supervising Impala Jobs.",
-        epilog="With no subcommand, launches the interactive TUI.",
+        description=(
+            "Server-side TUI and non-interactive CLI for launching and supervising Impala Jobs."
+        ),
+        epilog=(
+            "With no subcommand, launches the interactive TUI.\n"
+            "Use 'dispatch job --help' for non-interactive Job commands.\n"
+            "Use 'dispatch telemetry --help' for offline usage reports."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", title="commands")
+
+    cli_job.add_job_parser(subparsers)
 
     telemetry_parser = subparsers.add_parser(
         "telemetry",
@@ -38,10 +46,12 @@ def main() -> None:
         help="Limit to one username.",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.command == "telemetry":
         _run_telemetry(args)
         return
+    if args.command == "job":
+        raise SystemExit(cli_job.run_job_command(args))
     DispatchApp().run()
 
 

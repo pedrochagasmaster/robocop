@@ -27,10 +27,9 @@ from textual.widgets import (
 )
 from textual.worker import Worker
 
-from .. import capacity, config, jobs, kerberos, manifest, process, sql, telemetry
+from .. import config, job_ops, kerberos, manifest, process, sql, telemetry
 from ..advisor import analyze, analyze_form, analyze_sql, combine_analysis
 from ..advisor.models import AnalysisResult, badge_markup
-from ..asyncio_utils import await_uncancellable
 from .advisor_gate import AdvisorLaunchGate
 from .confirm import ConfirmScreen
 from .preview import PreviewScreen
@@ -39,15 +38,9 @@ from .sidebar import Sidebar
 logger = logging.getLogger("dispatch.new_job")
 
 
-async def _launch_runner_after_commit(job_dir: Path) -> int:
-    """Finish runner handoff after Pending commit despite task cancellation."""
-    launch = asyncio.create_task(process.launch_runner(job_dir))
-    return await await_uncancellable(launch)
-
-
 def _refusal_reason(error: str) -> telemetry.RefusalReason:
     lowered = error.lower()
-    if "concurrency cap" in lowered:
+    if "concurrency cap" in lowered or "capacity" in lowered:
         return "slot_cap"
     if "kerberos" in lowered:
         return "kerberos"
@@ -72,7 +65,7 @@ _KNOWN_EXISTING_SCHEMAS = frozenset({"coe_enc", "aa_enc"})
 # below) via DISPATCH_REQUEST_POOL. Selecting nothing keeps the original
 # behaviour: the orchestrators cycle their own hardcoded queue list.
 # See scr/_common.resolve_pools and dispatch/runner._orchestrator_env.
-_QUEUE_AUTO = "auto"
+_QUEUE_AUTO = job_ops.QUEUE_AUTO
 _QUEUE_CHOICES: list[tuple[str, str]] = [
     ("adhoc_fast \u00b7 fastest, short / simple queries", "adhoc_fast"),
     ("adhoc_small \u00b7 small queries", "adhoc_small"),
@@ -82,8 +75,8 @@ _QUEUE_CHOICES: list[tuple[str, str]] = [
 ]
 # Cycle-priority order (fast \u2192 large \u2192 general) used to normalise the
 # user's selection deterministically, regardless of click order.
-_QUEUE_ORDER = [value for _label, value in _QUEUE_CHOICES]
-_QUEUE_VALUES = set(_QUEUE_ORDER)
+_QUEUE_ORDER = list(job_ops.QUEUE_ORDER)
+_QUEUE_VALUES = set(job_ops.QUEUE_VALUES)
 _QUEUE_HINTS = {
     "adhoc_fast": "Fast pool \u2014 best for short or simple queries.",
     "adhoc_small": "Small pool \u2014 light queries with a modest footprint.",
@@ -595,6 +588,25 @@ class NewJobScreen(Screen[None]):
             msgs.append("[green]\u2713[/] Kerberos")
         self.query_one("#warning-text", Static).update("  ".join(msgs))
 
+    def _launch_inputs(self) -> job_ops.LaunchInputs:
+        source_type = self._selected_source()
+        destination_type = self._selected_destination()
+        return job_ops.LaunchInputs(
+            source_type=source_type,  # type: ignore[arg-type]
+            destination_type=destination_type,  # type: ignore[arg-type]
+            launch_cwd=self.launch_cwd,
+            sql_path=self._input_value("sql-file"),
+            existing_table=self._existing_full_table(),
+            schema=self._input_value("schema"),
+            table_name=self._table_name_value(),
+            start_date=self._input_value("start-date"),
+            end_date=self._input_value("end-date"),
+            email=self._input_value("email"),
+            subject=self._input_value("subject"),
+            queue=self._queue_param(),
+            user=self._eid,
+        )
+
     def _validation_issues(self, *, deep: bool = False) -> list[str]:
         """Collect every current form problem, in launch-refusal order.
 
@@ -605,59 +617,27 @@ class NewJobScreen(Screen[None]):
         network mount) and is therefore reserved for the launch path.
         """
         issues: list[str] = []
-        source = self._selected_source()
-        destination = self._selected_destination()
-        if (source, destination) not in manifest.LEGAL_CELLS:
-            issues.append(
-                f"Illegal combination: {manifest.source_display_label(source)} \u2192 {destination}"
+        if (
+            self._selected_source() == "ExistingTable"
+            and self._selected_existing_schema_choice() == "other"
+        ):
+            schema_error = sql.validate_identifier(
+                self._input_value("existing-schema-custom"), "Schema"
             )
-        if destination in ("Table", "Table+Csv"):
-            schema_error = sql.validate_identifier(self._input_value("schema"), "Schema")
             if schema_error:
                 issues.append(schema_error)
-            table_error = sql.validate_eid_table_name(self._table_name_value(), self._eid)
-            if table_error:
-                issues.append(table_error)
-        if source in ("SqlFile", "SqlTemplate"):
-            if not self._input_value("sql-file"):
-                issues.append("SQL file path is required")
-            elif not self._sql_file_exists():
-                issues.append("SQL file not found")
-        if source == "SqlTemplate":
-            date_error = sql.validate_date_range(
-                self._input_value("start-date"), self._input_value("end-date")
-            )
-            if date_error:
-                issues.append(date_error)
-        existing_error: str | None = None
-        existing = self._existing_full_table()
-        if source == "ExistingTable":
-            if self._selected_existing_schema_choice() == "other":
-                schema_error = sql.validate_identifier(
-                    self._input_value("existing-schema-custom"), "Schema"
-                )
-                if schema_error:
-                    issues.append(schema_error)
-            existing_error = sql.validate_full_table(existing, "Existing table")
-            if existing_error:
-                issues.append(existing_error)
-        if destination in ("Csv", "Table+Csv"):
-            csv_table = self._table_name_value()
-            if source == "ExistingTable" and existing_error is None:
-                _schema, csv_table = existing.split(".", 1)
-            try:
-                sql.safe_csv_path(self.launch_cwd, csv_table)
-            except ValueError as exc:
-                issues.append(str(exc))
-        email = self._input_value("email")
-        if email and ("@" not in email or "." not in email.split("@")[-1]):
-            issues.append("Invalid email format")
-        if self.kerberos_ttl is None:
-            issues.append("Kerberos ticket missing \u2014 press K to kinit")
-        elif self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS:
-            issues.append("Kerberos ticket TTL is under 5 minutes \u2014 press K to renew")
-        if deep and source != "ExistingTable":
-            issues.extend(self._sql_content_issues(source))
+        shared = job_ops.validation_issues(
+            self._launch_inputs(),
+            kerberos_ttl=self.kerberos_ttl,
+            deep=deep,
+        )
+        for issue in shared:
+            if issue == "Kerberos ticket missing — run kinit":
+                issues.append("Kerberos ticket missing \u2014 press K to kinit")
+            elif issue == "Kerberos ticket TTL is under 5 minutes — renew with kinit":
+                issues.append("Kerberos ticket TTL is under 5 minutes \u2014 press K to renew")
+            else:
+                issues.append(issue)
         return issues
 
     def _sql_content_issues(self, source: str) -> list[str]:
@@ -991,34 +971,28 @@ class NewJobScreen(Screen[None]):
             self._show_message(error, "error")
             self.notify(error, severity="error")
             return
-        source_type = self._selected_source()
-        if source_type == "ExistingTable":
-            sql_text = ""
-        else:
-            sql_text = self._read_sql()
-            if sql_text is None:
-                telemetry.note_launch_refused("validation")
-                return
-        source, destination = self._source_destination()
+        try:
+            plan = job_ops.prepare_launch(
+                self._launch_inputs(),
+                kerberos_ttl=self.kerberos_ttl,
+            )
+        except job_ops.ValidationError as exc:
+            error = str(exc)
+            self._show_message(error, "error")
+            self.notify(error, severity="error")
+            return
         # Advisor error gate (confirm ceiling). Warnings/info never gate;
         # analysis-unavailable never gates. When errors exist, the gate is the
         # launch confirm; otherwise the existing Launch Job confirm applies.
-        analysis = analyze(
-            sql_text,
-            source_type=source_type,
-            destination_type=destination["type"],
-            destination_table=destination.get("table_name") or "",
-            user_id=config.current_user(),
-        )
-        errors = analysis.errors()
+        errors = plan.analysis.errors()
         if errors:
             # Single modal: the gate carries the Launch Job summary, so no
             # information from the standard confirm is lost.
-            gated = await self._confirm_advisor_gate(errors, source, destination)
+            gated = await self._confirm_advisor_gate(errors, plan.source, plan.destination)
             if not gated:
                 return
         else:
-            confirmed = await self._confirm_launch(source, destination)
+            confirmed = await self._confirm_launch(plan.source, plan.destination)
             if not confirmed:
                 return
         if hasattr(self.app, "refresh_kerberos"):
@@ -1030,50 +1004,30 @@ class NewJobScreen(Screen[None]):
             self.notify(error, severity="error")
             return
         try:
-            job_dir, _job_manifest = await jobs.create_job_when_capacity_available(
-                source=source,
-                destination=destination,
-                params=self._params(),
-                launch_cwd=self.launch_cwd,
-                sql_text=sql_text,
+            plan = job_ops.prepare_launch(
+                self._launch_inputs(),
+                kerberos_ttl=self.kerberos_ttl,
             )
-        except capacity.CapacityBusy as exc:
+        except job_ops.ValidationError as exc:
             error = str(exc)
-            telemetry.note_launch_refused("slot_cap")
             self._show_message(error, "error")
             self.notify(error, severity="error")
             return
-        except (capacity.CapacityTimeout, capacity.CapacityLedgerError) as exc:
-            error = str(exc)
-            telemetry.note_launch_refused("validation")
-            self._show_message(error, "error")
-            self.notify(error, severity="error")
-            return
-        telemetry.note_job_launched(
-            job_id=job_dir.name,
-            source=source["type"],
-            destination=destination["type"],
-        )
         try:
-            await _launch_runner_after_commit(job_dir)
-        except OSError as exc:
-            manifest.update(
-                job_dir / "manifest.json",
-                state="Failed",
-                exit_code=-1,
-                finished_at=manifest.now_utc(),
-            )
-            error = f"Could not launch detached runner: {exc}"
-            logger.exception("Failed to launch runner for Job %s", job_dir.name)
+            result = await job_ops.execute_launch_async(plan)
+        except job_ops.OperationalError as exc:
+            error = str(exc)
             self._show_message(error, "error")
             self.notify(error, severity="error")
             return
-        logger.info(
-            "Launched Job %s source=%s dest=%s", job_dir.name, source["type"], destination["type"]
-        )
+        if result.handoff_failed:
+            error = result.handoff_error or "Could not launch detached runner"
+            self._show_message(error, "error")
+            self.notify(error, severity="error")
+            return
         self._save_form_defaults()
-        self.notify(f"\u2713 Launched Job {job_dir.name}", severity="information")
-        self._show_message(f"\u2713 Launched Job {job_dir.name}", "success")
+        self.notify(f"\u2713 Launched Job {result.job_id}", severity="information")
+        self._show_message(f"\u2713 Launched Job {result.job_id}", "success")
 
     def _launch_summary(
         self,

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 from datetime import datetime
 
 from . import process
@@ -90,6 +91,26 @@ async def ticket_ttl_seconds() -> int | None:
     if rc != 0:
         return None
     return parse_ttl_seconds(stdout)
+
+
+def ticket_ttl_seconds_sync() -> int | None:
+    """Blocking Kerberos TTL probe for non-interactive CLI launches."""
+    try:
+        completed = subprocess.run(
+            ["klist"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, FileNotFoundError):
+        logger.warning("klist not found on PATH; Kerberos unavailable")
+        return None
+    except subprocess.TimeoutExpired:
+        return None
+    if completed.returncode != 0:
+        return None
+    return parse_ttl_seconds(completed.stdout)
 
 
 def parse_ttl_seconds(klist_output: str, now: datetime | None = None) -> int | None:

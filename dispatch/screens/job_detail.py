@@ -14,7 +14,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, RichLog, Static
 from textual.worker import Worker
 
-from .. import config, errors, jobs, manifest, process, telemetry
+from .. import config, errors, job_ops, manifest
 from ..formatting import (
     format_elapsed,
     format_job_id,
@@ -470,39 +470,35 @@ class JobDetailScreen(Screen[None]):
             confirmed = await self._confirm_pending_cancel(item["id"])
             if not confirmed:
                 return
-            manifest.update(
-                self.job_dir / "manifest.json",
-                state="Cancelled",
-                exit_code=0,
-                finished_at=manifest.now_utc(),
-            )
-            telemetry.note_job_cancelled(item["id"])
-            self.notify(f"Pending Job {item['id']} removed", severity="warning")
-            self._set_static("#job-status-line", "[yellow]Pending Job cancelled[/]")
-            return
-        if item["state"] in ("Running", "Pending") and pid:
+        elif item["state"] in ("Running", "Pending") and pid:
             confirmed = await self._confirm_cancel(item["id"], pid)
             if not confirmed:
                 return
-            try:
-                result = process.cancel_process_group(pid)
-            except ProcessLookupError:
-                result = "missing"
-            except PermissionError:
-                self.notify(
-                    "Permission denied while signalling the Job process group",
-                    severity="error",
-                )
-                return
-            if result == "missing":
-                jobs.reconcile_manifest(self.job_dir / "manifest.json")
-                self.notify(
-                    "Job process is no longer running; manifest marked Failed",
-                    severity="warning",
-                )
-                self._set_static("#job-status-line", "[red]Process missing; marked Failed[/]")
-                return
-            telemetry.note_job_cancelled(item["id"])
+        else:
+            self.notify("No cancellable Job process found", severity="warning")
+            return
+
+        try:
+            result = job_ops.cancel_job(item["id"], yes=True)
+        except job_ops.OperationalError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        except job_ops.UnknownJobError as exc:
+            self.notify(str(exc), severity="error")
+            return
+
+        if result.kind == "pending_cancelled":
+            self.notify(f"Pending Job {item['id']} removed", severity="warning")
+            self._set_static("#job-status-line", "[yellow]Pending Job cancelled[/]")
+            return
+        if result.kind == "reconciled_missing":
+            self.notify(
+                "Job process is no longer running; manifest marked Failed",
+                severity="warning",
+            )
+            self._set_static("#job-status-line", "[red]Process missing; marked Failed[/]")
+            return
+        if result.kind == "signaled":
             self.notify(f"Cancellation requested for Job {item['id']}", severity="warning")
             self._set_static("#job-status-line", "[yellow]Cancellation requested\u2026[/]")
             return

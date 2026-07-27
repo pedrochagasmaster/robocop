@@ -36,6 +36,19 @@ dispatch
 
 If the TUI opens, setup is complete.
 
+For scripts and automation, the same `dispatch` launcher also provides a
+non-interactive Job CLI (identical via `python -m dispatch`):
+
+```bash
+cd /path/to/your/sql/files
+dispatch job launch --source SqlFile --destination Csv --sql query.sql --table report --yes
+dispatch job list
+dispatch job wait JOB_ID --json
+```
+
+See [README.md](README.md) for the full flag list, JSON examples, and exit codes.
+The TUI remains the interactive supervision cockpit; the CLI never opens it.
+
 ## Quick Checks
 
 If `dispatch` is not found:
