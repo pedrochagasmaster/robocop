@@ -153,19 +153,31 @@ and detached runners.
 from dispatch.notebook import Dispatch
 
 d = Dispatch(cwd="~/sql")
+
+# SQL written in the notebook, loaded into a DataFrame
+df = d.sql("SELECT dt, count(*) AS c FROM aa_enc.events GROUP BY dt").to_df()
+d.table("aa_enc.events", limit=1000).to_df()
+
+# or a Job from a file, watched while it runs
 job = d.launch(source="SqlFile", destination="Csv", sql="query.sql", table="report")
 job.watch()                       # live state and log tail until the Job is terminal
-
 job.succeeded                     # True
-pd.read_csv(job.csv_path)         # the result, in the launch directory
+job.to_df()                       # the Result, as a DataFrame
 
 d.jobs(state="Running")           # supervise everything else
 ```
 
-Refusals raise (`UsageError`, `UnknownJobError`, `OperationalError`); a Job
-that ran and failed is returned like any other. Full reference:
-[docs/notebook-api.md](docs/notebook-api.md). Design rationale:
-[ADR-0008](docs/adr/0008-notebook-api-wraps-the-cli.md).
+Every call is a real Job — validation, Kerberos, Advisor gate, two-Job cap,
+manifest, detached runner — so expect minutes, not milliseconds. Refusals raise
+(`UsageError`, `UnknownJobError`, `OperationalError`); a Job that ran and failed
+is returned like any other. Loading a Result needs pandas, which is optional:
+`rows()` works with the standard library alone.
+
+Full reference: [docs/notebook-api.md](docs/notebook-api.md). Design rationale:
+[ADR-0008](docs/adr/0008-notebook-api-wraps-the-cli.md),
+[ADR-0009](docs/adr/0009-notebook-queries-are-eagerly-submitted-jobs.md),
+[ADR-0010](docs/adr/0010-notebook-results-are-strict-reads-of-the-job-csv.md),
+[ADR-0011](docs/adr/0011-no-unaudited-interactive-query-tier.md).
 
 ## Usage telemetry
 
