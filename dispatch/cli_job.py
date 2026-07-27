@@ -51,9 +51,9 @@ def add_job_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParse
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Legal source/destination cells:\n"
-            "  SqlFile       → Table | Csv | Table+Csv\n"
-            "  SqlTemplate   → Table\n"
-            "  ExistingTable → Csv\n"
+            "  SqlFile       -> Table | Csv | Table+Csv\n"
+            "  SqlTemplate   -> Table\n"
+            "  ExistingTable -> Csv\n"
             "\n"
             "Confirmations: pass --yes for every launch; when Advisor reports\n"
             "error-severity findings, also pass --acknowledge-advisor.\n"
@@ -82,7 +82,7 @@ def add_job_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParse
     launch.add_argument(
         "--existing-table",
         default="",
-        help="Fully qualified schema.table for ExistingTable → Csv.",
+        help="Fully qualified schema.table for ExistingTable -> Csv.",
     )
     launch.add_argument(
         "--schema",

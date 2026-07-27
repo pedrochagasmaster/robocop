@@ -100,10 +100,12 @@ def test_dispatch_help_lists_job_and_telemetry(mock_env) -> None:
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, "PYTHONIOENCODING": "ascii"},
     )
-    assert result.returncode == 0
+    assert result.returncode == 0, result.stderr
     assert "job" in result.stdout
     assert "telemetry" in result.stdout
+    result.stdout.encode("ascii")
 
 
 def test_job_help_lists_subcommands(mock_env) -> None:
@@ -112,10 +114,12 @@ def test_job_help_lists_subcommands(mock_env) -> None:
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, "PYTHONIOENCODING": "ascii"},
     )
-    assert result.returncode == 0
+    assert result.returncode == 0, result.stderr
     for name in ("launch", "list", "show", "logs", "wait", "cancel"):
         assert name in result.stdout
+    result.stdout.encode("ascii")
 
 
 def test_python_m_dispatch_module_help_subprocess(mock_env) -> None:
@@ -124,10 +128,14 @@ def test_python_m_dispatch_module_help_subprocess(mock_env) -> None:
         capture_output=True,
         text=True,
         check=False,
+        # Match Windows CI consoles that default to a legacy code page.
+        env={**os.environ, "PYTHONIOENCODING": "ascii"},
     )
-    assert result.returncode == 0
+    assert result.returncode == 0, result.stderr
     assert "--source" in result.stdout
     assert "--acknowledge-advisor" in result.stdout
+    # Help must stay ASCII-safe for Windows charmap consoles.
+    result.stdout.encode("ascii")
 
 
 def test_launch_usage_error_without_required_flags(mock_env, monkeypatch) -> None:
