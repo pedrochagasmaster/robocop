@@ -142,6 +142,31 @@ Argparse usage errors also exit `2`.
 - Advisor error findings additionally require `--acknowledge-advisor`.
 - Job paths that are missing, corrupt, symlink-escaped, or outside the jobs root are rejected.
 
+## Run (Python notebooks)
+
+`dispatch.notebook` wraps the same CLI for analysts working in Jupyter on the
+Edge Node. Each call shells out to `dispatch job … --json`, so notebooks
+inherit the CLI's validation, Kerberos checks, Advisor gates, capacity limits,
+and detached runners.
+
+```python
+from dispatch.notebook import Dispatch
+
+d = Dispatch(cwd="~/sql")
+job = d.launch(source="SqlFile", destination="Csv", sql="query.sql", table="report")
+job.watch()                       # live state and log tail until the Job is terminal
+
+job.succeeded                     # True
+pd.read_csv(job.csv_path)         # the result, in the launch directory
+
+d.jobs(state="Running")           # supervise everything else
+```
+
+Refusals raise (`UsageError`, `UnknownJobError`, `OperationalError`); a Job
+that ran and failed is returned like any other. Full reference:
+[docs/notebook-api.md](docs/notebook-api.md). Design rationale:
+[ADR-0008](docs/adr/0008-notebook-api-wraps-the-cli.md).
+
 ## Usage telemetry
 
 Dispatch records offline usage events (sessions, screens, Job launches, refusals)
