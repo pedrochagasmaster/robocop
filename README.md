@@ -1,12 +1,16 @@
 # Dispatch
 
-Dispatch is a server-side TUI for launching Impala Jobs from the Hadoop Edge Node. Users `ssh` to the Edge Node, `cd` to the directory containing their SQL files, run `dispatch`, and launch Jobs that survive terminal disconnects.
+Dispatch is a server-side tool for launching Impala Jobs from the Hadoop Edge
+Node. Users `ssh` to the Edge Node, `cd` to the directory containing their SQL
+files, and either open the interactive Textual TUI (`dispatch`) or drive Jobs
+non-interactively with `dispatch job …`. Detached runners own execution so Jobs
+survive terminal disconnects.
 
 ## What changed in v1.0
 
 - The legacy Windows GUI is removed.
 - Jobs are described by on-disk manifests under `/ads_storage/<user>/.dispatch/jobs/`.
-- The TUI supervises Jobs by reading manifests and logs; the detached runner owns Orchestrator script execution.
+- The TUI and CLI supervise Jobs by reading manifests and logs; the detached runner owns Orchestrator script execution.
 - CSV results are written uncompressed to the launch-time working directory.
 - A local mock layer supports development without Hadoop, Kerberos, SMTP, or `/ads_storage/`.
 
@@ -49,14 +53,94 @@ validation, commit, and release handoff.
 Normal development ends with a GitHub pull request. Release Operators use
 [docs/release-workflow.md](docs/release-workflow.md).
 
-## Run
+## Run (interactive TUI)
 
 ```bash
 cd /path/to/sql/files
 dispatch
 ```
 
-Dispatch captures the launch-time CWD once. CSV destinations are resolved relative to that directory for the entire session.
+With no subcommand, `dispatch` (and `python -m dispatch`) open the Textual TUI.
+Dispatch captures the launch-time CWD once. CSV destinations are resolved
+relative to that directory for the entire session.
+
+## Run (non-interactive CLI)
+
+Automation and shell users can launch and supervise Jobs without opening the
+TUI. The CLI reuses the same validation, Kerberos checks, Advisor gates,
+capacity admission, manifest persistence, telemetry, and detached-runner
+handoff as the TUI. It never instantiates Textual screens.
+
+```bash
+cd /path/to/sql/files
+
+# Launch (requires --yes; add --acknowledge-advisor when Advisor reports errors)
+dispatch job launch --source SqlFile --destination Csv --sql query.sql --table report --yes
+dispatch job launch --source SqlTemplate --destination Table \
+  --sql monthly.sql --schema aa_enc --table monthly_out \
+  --start-date 2026-01-01 --end-date 2026-01-31 --yes
+dispatch job launch --source ExistingTable --destination Csv \
+  --existing-table aa_enc.events_existing --yes
+
+# Supervise
+dispatch job list
+dispatch job list --state Running --json
+dispatch job show JOB_ID --json
+dispatch job logs JOB_ID --lines 100
+dispatch job logs JOB_ID --follow
+dispatch job wait JOB_ID --timeout 600 --json
+dispatch job cancel JOB_ID --yes
+```
+
+`python -m dispatch job …` exposes the identical interface.
+
+### Launch flags
+
+| Flag | Meaning |
+|---|---|
+| `--source` | `SqlFile`, `SqlTemplate`, or `ExistingTable` |
+| `--destination` | `Table`, `Csv`, or `Table+Csv` (must be a legal cell) |
+| `--sql` | SQL file path; relative paths resolve against the invocation CWD |
+| `--existing-table` | `schema.table` for ExistingTable → Csv |
+| `--schema` | Destination schema (default `aa_enc`) |
+| `--table` | Destination table suffix; the analyst EID prefix is applied |
+| `--start-date` / `--end-date` | SqlTemplate date range (`YYYY-MM-DD`) |
+| `--email` / `--subject` | Notification recipients and subject |
+| `--queue` | `auto` (default) or comma-separated Impala pools |
+| `--yes` | Required confirmation substitute for the TUI launch dialog |
+| `--acknowledge-advisor` | Required when Advisor reports error-severity findings |
+| `--json` | One JSON document on stdout; diagnostics on stderr |
+
+### JSON examples
+
+```bash
+dispatch job launch --source SqlFile --destination Csv --sql q.sql --table out --yes --json
+# {"job_id": "20260727T120000Z_abc123", "state": "Pending", "pid": null}
+
+dispatch job list --json
+# {"jobs": [{"id": "...", "state": "Running", "source": "SqlFile", ...}]}
+
+dispatch job wait JOB_ID --json
+# {"job_id": "...", "state": "Succeeded", "exit_code": 0, "timed_out": false}
+```
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Successful command (and `wait` when the Job Succeeded) |
+| `1` | Job completed unsuccessfully or was Cancelled (`wait`) |
+| `2` | Invalid invocation, missing `--yes` / Advisor ack, or launch validation failure |
+| `3` | Unknown, malformed, or unsafe Job ID |
+| `4` | Operational refusal/failure (Kerberos/capacity/timeout/handoff/cancel) |
+
+Argparse usage errors also exit `2`.
+
+### Safety
+
+- Launches and cancellations never proceed silently: pass `--yes`.
+- Advisor error findings additionally require `--acknowledge-advisor`.
+- Job paths that are missing, corrupt, symlink-escaped, or outside the jobs root are rejected.
 
 ## Usage telemetry
 
@@ -82,7 +166,7 @@ A Job combines exactly one Source and one Destination.
 | `SqlTemplate` | yes | no | no |
 | `ExistingTable` | no | yes | no |
 
-The TUI hard-refuses illegal cells, missing Kerberos tickets, tickets with less than five minutes remaining, and more than two simultaneously Running Jobs.
+The TUI and CLI hard-refuse illegal cells, missing Kerberos tickets, tickets with less than five minutes remaining, and more than two simultaneously Running/Pending Jobs.
 
 ## Orchestrator scripts
 
@@ -100,6 +184,7 @@ The runner decomposes `Table + Csv` into table creation followed by a separate C
 source mocks/dev-env.sh
 export DISPATCH_MOCK_SCENARIO=happy_path
 python -m dispatch
+# or: python -m dispatch job launch --source SqlFile --destination Csv --sql demo.sql --yes
 ```
 
 Available scenarios:
