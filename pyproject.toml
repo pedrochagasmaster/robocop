@@ -14,12 +14,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Loading a Job's Result into a DataFrame is optional: Analysts get pandas from
+# the shared runtime or not at all, and dispatch.results degrades to rows().
+notebook = [
+  "pandas>=1.5",
+]
 dev = [
   "pytest",
   "pytest-asyncio",
   "pytest-xdist>=3.6,<4",
   "ruff",
   "mypy",
+  "pandas>=1.5",
 ]
 release = [
   "edge-deploy-core @ git+https://github.com/pedrochagasmaster/edge-deploy-core.git@v1.5.3",
@@ -69,6 +75,17 @@ check_untyped_defs = false
 warn_unused_ignores = false
 warn_redundant_casts = true
 disable_error_code = ["arg-type", "assignment", "attr-defined", "list-item", "typeddict-item"]
+
+[[tool.mypy.overrides]]
+# pandas is an optional import in dispatch.results. Its numpy stubs need
+# python_version >= 3.12 to parse, so type-check against the interface we use
+# rather than following into the installed package.
+module = [
+  "pandas.*",
+  "numpy.*",
+]
+follow_imports = "skip"
+follow_imports_for_stubs = true
 
 [[tool.mypy.overrides]]
 module = [

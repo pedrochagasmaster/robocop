@@ -22,6 +22,8 @@ Shared widgets currently live beside screens, especially in
 | Overview supervision cockpit | `dispatch/screens/dashboard.py` | `dispatch/jobs.py`, `dispatch/errors.py`, `dispatch/formatting.py` | `tests/test_cockpit.py`, `tests/test_qa_fixes.py` |
 | New Job and launch validation | `dispatch/screens/new_job.py` | `dispatch/job_ops.py`, `dispatch/manifest.py`, `dispatch/jobs.py`, `dispatch/sql.py`, `dispatch/kerberos.py`, `dispatch/runner.py` | `tests/test_cockpit.py`, `tests/test_production_polish.py`, `tests/test_prefill_seam.py`, `tests/test_qa_fixes.py`, `tests/test_job_cli.py` |
 | Non-interactive Job CLI | `dispatch/cli_job.py`, `dispatch/__main__.py` | `dispatch/job_ops.py` | `tests/test_job_cli.py` |
+| Notebook API (wraps the CLI in a subprocess) | `dispatch/notebook.py` | `dispatch/results.py`, `dispatch/notebook_display.py`, `dispatch/config.py`, `dispatch/cli_job.py` (contract only) | `tests/test_notebook_api.py` |
+| Reading a Job's Result CSV | `dispatch/results.py` | `scr/download_to_csv.py` (export format) | `tests/test_results.py` |
 | SQL/job preview | `dispatch/screens/preview.py` | `dispatch/sql.py`, `dispatch/manifest.py` | `tests/test_qa_fixes.py`, `tests/test_ui_ux_closure.py` |
 | Confirmation dialogs | `dispatch/screens/confirm.py` | Calling screen | `tests/test_ui_ux_closure.py` |
 | Job logs, follow/search, cancel | `dispatch/screens/job_detail.py` | `dispatch/job_ops.py`, `dispatch/jobs.py`, `dispatch/errors.py`, `dispatch/formatting.py` | `tests/test_cockpit.py`, `tests/test_qa_fixes.py`, `tests/test_job_cli.py` |
@@ -36,6 +38,9 @@ Shared widgets currently live beside screens, especially in
 | Job queries, reconciliation, launch-slot locking and cap | `dispatch/jobs.py` |
 | Shared launch/cancel/list/show/logs/wait (TUI + CLI) | `dispatch/job_ops.py` |
 | Non-interactive Job CLI adapter | `dispatch/cli_job.py` |
+| Notebook/script Python API over the CLI | `dispatch/notebook.py` |
+| Result CSV parsing and DataFrame loading | `dispatch/results.py` |
+| Jupyter HTML rendering and the live watch view | `dispatch/notebook_display.py` |
 | SQL parsing, templates, destination naming | `dispatch/sql.py` |
 | Kerberos TTL parsing and checks | `dispatch/kerberos.py` |
 | Async and interactive subprocess gateways | `dispatch/process.py` |

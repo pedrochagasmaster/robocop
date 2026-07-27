@@ -79,9 +79,29 @@ exists only briefly between launch click and the runner spawning the
 orchestrator and is not exposed in the dashboard.
 _Avoid_: status, phase.
 
+**Inline SQL**:
+SQL authored in a notebook cell rather than in a `.sql` file the **Analyst**
+keeps. It produces an ordinary `SqlFile` **Job**; the file it runs from belongs
+to Dispatch, not to the **Analyst**.
+_Avoid_: query string, ad hoc query, snippet.
+
+**Result**:
+The rows a completed **Job** produced, read back into Python from the CSV its
+**Destination** wrote. A **Job** whose **Destination** is `Table` has no
+**Result**.
+_Avoid_: output, dataset, result set.
+
+**Notebook workspace**:
+The Dispatch-owned directory that holds **Inline SQL** and **Results** for
+**Jobs** launched from a notebook, so an **Analyst's** working directory only
+ever receives files they asked for by name.
+_Avoid_: scratch, temp directory, cache.
+
 ## Relationships
 
 - A **Job** has exactly one **Source** and exactly one **Destination**.
+- A **Job** whose **Destination** includes `Csv` has exactly one **Result**;
+  a `Table`-only **Job** has none.
 - A **Job** invokes one or more **Orchestrator scripts** in sequence.
 - A user may have at most **two Jobs in `Running` state simultaneously**.
   Launching a third while two are running is hard-refused; it does not queue.

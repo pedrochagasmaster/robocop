@@ -14,7 +14,7 @@ from typing import Literal
 from .asyncio_utils import await_uncancellable
 
 
-def _resolve_exec_argv(argv: tuple[str, ...], *, windows: bool | None = None) -> tuple[str, ...]:
+def resolve_exec_argv(argv: tuple[str, ...], *, windows: bool | None = None) -> tuple[str, ...]:
     """Resolve a command without letting Windows bypass PATH-injected Python mocks."""
     is_windows = os.name == "nt" if windows is None else windows
     if is_windows and not Path(argv[0]).parent.name:
@@ -49,7 +49,7 @@ async def run_exec(
     # System32 before PATH, so e.g. `klist` would hit the OS tool instead of a
     # PATH-injected mock. shutil.which honors PATH order on every platform; an
     # unresolvable name keeps its FileNotFoundError from create_subprocess_exec.
-    resolved_argv = _resolve_exec_argv(argv)
+    resolved_argv = resolve_exec_argv(argv)
     proc = await asyncio.create_subprocess_exec(
         *resolved_argv,
         stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,

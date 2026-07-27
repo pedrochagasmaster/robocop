@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import stat
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -507,6 +508,32 @@ async def test_ticket_ttl_returns_none_when_klist_times_out(monkeypatch) -> None
     monkeypatch.setattr(kerberos.process, "run_exec", fake_run_exec)
 
     assert await kerberos.ticket_ttl_seconds() is None
+
+
+def test_sync_ttl_probe_resolves_klist_through_path(mock_env) -> None:
+    """The CLI's Kerberos probe must find the PATH-injected mock klist.
+
+    Windows ``CreateProcess`` searches System32 before PATH, so a bare
+    ``klist`` would reach the OS tool and report no ticket even in dev mode.
+    """
+    ttl = kerberos.ticket_ttl_seconds_sync()
+
+    assert ttl is not None
+    assert ttl > kerberos.MIN_LAUNCH_TTL_SECONDS
+
+
+def test_sync_ttl_probe_passes_a_resolved_command(mock_env, monkeypatch) -> None:
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(argv, **_kwargs):
+        seen["argv"] = list(argv)
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    monkeypatch.setattr(kerberos.subprocess, "run", fake_run)
+
+    assert kerberos.ticket_ttl_seconds_sync() is None
+    assert seen["argv"][0] != "klist"
+    assert seen["argv"][-1].endswith("klist") or seen["argv"][-1].endswith("klist.exe")
 
 
 def test_principal_for_eid_appends_realm(monkeypatch) -> None:

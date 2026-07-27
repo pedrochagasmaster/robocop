@@ -18,8 +18,8 @@ def data_root(user: str | None = None) -> Path:
     return Path("/ads_storage") / (user or current_user())
 
 
-def dispatch_home(user: str | None = None) -> Path:
-    return data_root(user) / ".dispatch"
+def dispatch_home(user: str | None = None, *, root: Path | None = None) -> Path:
+    return (root if root is not None else data_root(user)) / ".dispatch"
 
 
 def ensure_private_dir(path: Path) -> Path:
@@ -31,6 +31,11 @@ def ensure_private_dir(path: Path) -> Path:
 
 def jobs_dir(user: str | None = None) -> Path:
     return dispatch_home(user) / "jobs"
+
+
+def notebook_dir(user: str | None = None, *, root: Path | None = None) -> Path:
+    """Notebook workspace: Dispatch-owned Inline SQL and Results (ADR-0010)."""
+    return dispatch_home(user, root=root) / "notebook"
 
 
 def config_path(user: str | None = None) -> Path:
