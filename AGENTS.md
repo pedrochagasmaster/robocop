@@ -39,6 +39,13 @@ without one. `mocks/dev-env.sh` requires bash (it uses `BASH_SOURCE`). Data root
 defaults to `/tmp/ads_storage/$USER`; job manifests and captured emails live
 under there and in `mocks/sent_emails/`.
 
+The notebook API (`dispatch/notebook.py`) needs no extra setup for its tests,
+but exercising `demos/notebook_job_api.ipynb` does: `.venv/bin/python -m pip
+install jupyterlab` (not a project dependency), then run it headlessly with
+`jupyter nbconvert --to notebook --execute` from a directory inside a shell
+that has sourced `mocks/dev-env.sh`. Set `DISPATCH_MOCK_DELAY` to a few seconds
+to make live monitoring visible; the mocks are otherwise instant.
+
 Known non-environment failures: the two
 `tests/test_install_onboarding.py::test_install_creates_runtime_artifacts_with_mocked_edge_tools`
 cases fail on a clean checkout because they assert the generated launcher
