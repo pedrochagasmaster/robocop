@@ -24,6 +24,13 @@ from dispatch.capacity import (
 
 PROCESS_TIMEOUT = 10
 
+# A spawned worker waiting for capacity must outlast the parent's setup, which
+# can spend PROCESS_TIMEOUT waiting for each launch intent to appear plus the
+# cost of spawning a fresh interpreter. A shorter budget makes the worker give up
+# before the scenario it is meant to exercise exists, which is a flake rather
+# than a failure: Windows CI runners under `-n 4` are slow enough to hit it.
+ADMIT_TIMEOUT = PROCESS_TIMEOUT * 3
+
 
 def _read_ledger(root: Path) -> dict[str, Any]:
     return json.loads((root / ".dispatch" / "capacity.json").read_text(encoding="utf-8"))
@@ -125,7 +132,7 @@ def _launch_worker(
         return label
 
     try:
-        result = admit_launch(create_pending, timeout=5, root=root)
+        result = admit_launch(create_pending, timeout=ADMIT_TIMEOUT, root=root)
     except Exception as exc:
         outcomes.put(("error", label, type(exc).__name__, str(exc)))
         return
@@ -133,7 +140,7 @@ def _launch_worker(
 
 
 def _blocked_launch_worker(root: Path) -> None:
-    admit_launch(lambda: "launch", timeout=30, root=root)
+    admit_launch(lambda: "launch", timeout=ADMIT_TIMEOUT, root=root)
 
 
 def _exit_cleanly() -> None:
@@ -257,8 +264,10 @@ def test_launch_intents_are_admitted_fifo_across_processes(tmp_path: Path) -> No
     observed_order = list(callback_order)
     manager.shutdown()
 
-    assert observed_order == ["first", "second"]
+    # Assert the outcomes first: a worker that refused or gave up reports why,
+    # while an empty callback order only says that nothing ran.
     assert sorted(observed) == [("admitted", "first"), ("admitted", "second")]
+    assert observed_order == ["first", "second"]
 
 
 def test_waiting_launch_has_priority_over_new_stats_lease(
