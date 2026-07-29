@@ -541,6 +541,20 @@ Input:focus {
     height: auto;
 }
 
+#monitor-panel {
+    height: auto;
+    max-height: 8;
+    padding: 0 1;
+    margin: 0 1 1 1;
+    background: $surface-darken-1;
+    border: round $primary-background-darken-2;
+    overflow-y: auto;
+}
+
+#monitor-panel Static {
+    height: auto;
+}
+
 #log-header {
     layout: horizontal;
     height: auto;
@@ -580,6 +594,44 @@ Input:focus {
     dock: bottom;
     margin: 0 1 1 1;
     display: none;
+}
+
+JobDetailScreen.compact .action-bar {
+    height: 4;
+    padding: 0 1;
+}
+
+JobDetailScreen.compact #job-detail-content > .section-title {
+    height: 2;
+    padding: 0 1;
+}
+
+JobDetailScreen.compact #job-summary-panel {
+    max-height: 5;
+    padding: 0;
+    margin: 0 1;
+}
+
+JobDetailScreen.compact #monitor-panel {
+    max-height: 3;
+    padding: 0 1;
+    margin: 0 1;
+}
+
+JobDetailScreen.compact #log-header {
+    height: 1;
+    padding: 0 1;
+}
+
+JobDetailScreen.compact #log-header .section-title {
+    height: 1;
+    padding: 0 1;
+}
+
+JobDetailScreen.compact #log-panel {
+    min-height: 3;
+    margin: 0 1;
+    padding: 0 1;
 }
 
 /* ── History ────────────────────────────────────────────────────────── */

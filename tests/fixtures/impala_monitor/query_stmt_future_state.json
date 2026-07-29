@@ -1,0 +1,17 @@
+{
+  "query_id": "95969798999a9b9c:95969a9b9c9d9e9f",
+  "inflight": true,
+  "record_json": {
+    "query_id": "95969798999a9b9c:95969a9b9c9d9e9f",
+    "effective_user": "user_a",
+    "default_db": "db_a",
+    "stmt": "SELECT 1 /* sanitized */",
+    "stmt_type": "QUERY",
+    "state": "PAUSED_FOR_FUTURE_FEATURE",
+    "last_event": "Something new",
+    "resource_pool": "default",
+    "queued_duration": "0s010ms",
+    "rows_fetched": 0,
+    "future_extra_field": "unrecognized-value-ignored"
+  }
+}

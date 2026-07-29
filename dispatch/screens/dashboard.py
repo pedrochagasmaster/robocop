@@ -169,6 +169,20 @@ class DashboardScreen(Screen[None]):
         try:
             detail_target = self._detail_job_id
             active = await asyncio.to_thread(jobs.active_jobs)
+            background_jobs = {
+                (item["id"], config.jobs_dir() / item["id"])
+                for item in active
+                if item["state"] in ("Pending", "Running")
+            }
+            try:
+                await asyncio.to_thread(
+                    self._dispatch_app().monitor_service.sync_background_jobs,
+                    background_jobs,
+                )
+            except Exception as exc:
+                # Monitoring is observational. A service failure must not
+                # suppress the authoritative manifest list or any Job action.
+                logger.warning("Background monitoring sync unavailable: %s", exc)
             error_cache: dict[str, str | None] = {}
             for item in active:
                 if item["state"] != "Failed":

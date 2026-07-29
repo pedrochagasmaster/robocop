@@ -14,19 +14,34 @@ Two types of tests live here:
     dashboard table reflects the expected job state label.  Exercises the
     ``DashboardScreen.refresh_jobs`` path and the ``jobs.active_jobs`` seam at
     the widget level.
+
+``TestJobDetailMonitorPanel``
+    Slice 5 (``docs/research/impala-monitoring-implementation-plan.md``)
+    coverage for the monitoring panel in ``JobDetailScreen``: unavailable,
+    queued, running-with-progress, retry-chain, and
+    attempt-failed-job-retrying states, driven by a fake ``MonitorService``
+    exposing only the ``subscribe``/``unsubscribe``/``snapshot`` surface the
+    screen depends on. Also covers that a monitoring failure leaves
+    cancel/log-tail behavior untouched.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from pathlib import Path
 
+import pytest
 from textual.app import App
+from textual.widgets import Button, Static
 
-from dispatch import manifest
+from dispatch import config, jobs, manifest
+from dispatch import impala_monitor as im
+from dispatch import monitor_service as ms
 from dispatch.app import DispatchApp
 from dispatch.screens.confirm import ConfirmScreen
+from dispatch.screens.job_detail import JobDetailScreen
 
 # ---------------------------------------------------------------------------
 # Snapshot test — structural / content checks, no pixel geometry
@@ -158,3 +173,768 @@ def test_confirm_screen_enter_confirms() -> None:
         return app.result
 
     assert asyncio.run(run()) is True
+
+
+# ---------------------------------------------------------------------------
+# Slice 5 — Job Detail monitoring panel
+# ---------------------------------------------------------------------------
+
+COORD_1 = "https://coordinator-1.internal.example:25443"
+QID_1 = "1a2b3c4d5e6f7081:9192a3b4c5d6e7f8"
+QID_RETRY = "aaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb"
+
+
+def _seed_running_job(jobs_dir: Path, job_id: str = "20260716T100000Z_monitor") -> Path:
+    """Seed a minimal Running-state manifest; returns the job directory.
+
+    Used only to give ``JobDetailScreen`` a valid manifest to render its
+    (unchanged) summary panel from — monitoring state itself always comes
+    from the fake service, never from this manifest.
+    """
+    job_dir = jobs_dir / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    manifest.write(
+        job_dir / "manifest.json",
+        {
+            "schema_version": 1,
+            "id": job_id,
+            "tool": "dispatch",
+            "user": "testuser",
+            "source": {"type": "SqlFile", "sql_path_at_launch": "/tmp/x.sql"},
+            "destination": {"type": "Csv", "csv_path": "/tmp/x.csv"},
+            "params": {},
+            "orchestrator_calls": [{"script": "download_to_csv.py", "argv": ["python3", "x.py"]}],
+            "state": "Running",  # type: ignore[typeddict-item]
+            "pid": 4242,
+            "started_at": "2026-07-16T10:00:00Z",
+            "finished_at": None,
+            "exit_code": None,
+        },
+    )
+    return job_dir
+
+
+def _observation(
+    *,
+    phase: im.Phase,
+    raw_state: str | None,
+    pool: str | None = "default",
+    query_progress: im.ProgressCounter | None = None,
+    scan_progress: im.ProgressCounter | None = None,
+    queued_duration: str | None = None,
+    availability_error: str | None = None,
+) -> im.ImpalaObservation:
+    return im.ImpalaObservation(
+        raw_state=raw_state,
+        phase=phase,
+        pool=pool,
+        scan_progress=scan_progress,
+        query_progress=query_progress,
+        queued_duration=queued_duration,
+        bytes_read=None,
+        rows_fetched=None,
+        last_event=None,
+        status_summary=None,
+        detail_url=f"{COORD_1}/query_stmt?query_id={QID_1}&json",
+        observed_at="2026-07-16T10:00:01Z",
+        availability_error=availability_error,
+    )
+
+
+def _query(
+    query_id: str,
+    *,
+    relation: im.Relation = "initial",
+    observation: im.ImpalaObservation | None = None,
+    retries: tuple[ms.QueryAttempt, ...] = (),
+    seq: int = 1,
+) -> ms.QueryAttempt:
+    return ms.QueryAttempt(
+        query_id=query_id,
+        coordinator_base_url=COORD_1,
+        relation=relation,
+        shell_execution_id="shell-1",
+        discovered_at="2026-07-16T10:00:00Z",
+        seq=seq,
+        retries=retries,
+        observation=observation,
+    )
+
+
+def _snapshot_with_shells(job_id: str, *shells: ms.ShellExecutionAttempt) -> ms.MonitorSnapshot:
+    return _snapshot_with_calls(
+        job_id,
+        ms.OrchestratorCallAttempt(
+            call_id=f"{job_id}:call:1",
+            index=1,
+            script="download_to_csv.py",
+            seq=1,
+            shell_executions=tuple(shells),
+        ),
+    )
+
+
+def _snapshot_with_calls(job_id: str, *calls: ms.OrchestratorCallAttempt) -> ms.MonitorSnapshot:
+    return ms.MonitorSnapshot(
+        job_id=job_id,
+        available=True,
+        unavailable_reason=None,
+        orchestrator_calls=tuple(calls),
+    )
+
+
+class FakeMonitorService:
+    """Minimal stand-in exposing only the surface ``JobDetailScreen`` uses.
+
+    ``subscribe``/``unsubscribe``/``snapshot`` mirror
+    ``dispatch.monitor_service.MonitorService``'s public signatures exactly,
+    so swapping in the real service requires no screen changes. Snapshots are
+    canned per job id via ``set_snapshot`` rather than computed from replayed
+    events, keeping these tests focused on panel rendering.
+    """
+
+    def __init__(self) -> None:
+        self.snapshots: dict[str, ms.MonitorSnapshot] = {}
+        self.subscribe_calls: list[str] = []
+        self.unsubscribe_calls: list[str] = []
+        self.foreground_subscribers = 0
+        self.recovery_criteria_calls: list[tuple[str, str]] = []
+        self.recover_calls: list[tuple[str, str, object, str | None]] = []
+        self.recover_exception: Exception | None = None
+        self.recovered_snapshot: ms.MonitorSnapshot | None = None
+
+    def set_snapshot(self, job_id: str, snapshot: ms.MonitorSnapshot) -> None:
+        self.snapshots[job_id] = snapshot
+
+    def subscribe(self, job_id: str, job_dir: Path) -> ms.MonitorSnapshot:
+        self.subscribe_calls.append(job_id)
+        self.foreground_subscribers += 1
+        return self.snapshot(job_id)
+
+    def unsubscribe(self, job_id: str) -> None:
+        self.unsubscribe_calls.append(job_id)
+        self.foreground_subscribers -= 1
+
+    def snapshot(self, job_id: str) -> ms.MonitorSnapshot:
+        return self.snapshots.get(
+            job_id,
+            ms.MonitorSnapshot(
+                job_id=job_id, available=False, unavailable_reason="monitoring unavailable"
+            ),
+        )
+
+    def recovery_criteria(self, job_id: str, call_id: str) -> object:
+        self.recovery_criteria_calls.append((job_id, call_id))
+        return object()
+
+    def recover_identity(
+        self,
+        job_id: str,
+        call_id: str,
+        criteria: object,
+        *,
+        seed_url: str | None = None,
+    ) -> ms.MonitorSnapshot:
+        self.recover_calls.append((job_id, call_id, criteria, seed_url))
+        if self.recover_exception is not None:
+            raise self.recover_exception
+        assert self.recovered_snapshot is not None
+        return self.recovered_snapshot
+
+
+class BlockingMonitorService(FakeMonitorService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def subscribe(self, job_id: str, job_dir: Path) -> ms.MonitorSnapshot:
+        self.subscribe_calls.append(job_id)
+        self.foreground_subscribers += 1
+        self.entered.set()
+        assert self.release.wait(timeout=2.0), "test did not release monitor subscribe"
+        return ms.MonitorSnapshot(job_id=job_id, available=True, unavailable_reason=None)
+
+
+async def _mount_job_detail(
+    app: DispatchApp, job_id: str, service: FakeMonitorService | None
+) -> JobDetailScreen:
+    screen = JobDetailScreen(job_id, monitor_service=service)  # type: ignore[arg-type]
+    await app.push_screen(screen)
+    return screen
+
+
+class TestJobDetailMonitorPanel:
+    def test_cancelled_late_subscribe_after_pop_is_compensated_without_paint(
+        self, mock_env_with_config
+    ) -> None:
+        data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+        jobs_dir = data_root / ".dispatch" / "jobs"
+        job_id = _seed_running_job(jobs_dir).name
+        service = BlockingMonitorService()
+
+        class PaintCountingScreen(JobDetailScreen):
+            monitor_paints = 0
+
+            async def _start_monitoring_async(self) -> None:
+                """Let this test own and explicitly cancel the subscribe task."""
+
+            def _apply_monitor_snapshot(self, snapshot: ms.MonitorSnapshot) -> None:
+                self.monitor_paints += 1
+                super()._apply_monitor_snapshot(snapshot)
+
+        async def run() -> PaintCountingScreen:
+            app = DispatchApp()
+            async with app.run_test(size=(120, 40)) as pilot:
+                screen = PaintCountingScreen(job_id, monitor_service=service)  # type: ignore[arg-type]
+                await app.push_screen(screen)
+                subscribe_task = asyncio.create_task(screen._subscribe_monitor_async())
+                while not service.entered.is_set():
+                    await asyncio.sleep(0.01)
+                app.pop_screen()
+                subscribe_task.cancel()
+                service.release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await subscribe_task
+                await pilot.pause(0.2)
+                return screen
+
+        screen = asyncio.run(run())
+        assert service.subscribe_calls == [job_id]
+        assert service.unsubscribe_calls == [job_id]
+        assert screen.monitor_paints == 0
+        assert screen._monitor_subscribed is False
+        assert service.foreground_subscribers == 0
+        assert screen._monitor_refresh_in_flight is False
+        assert screen._monitor_timer is None
+
+    def test_job_detail_layout_is_bounded_and_restores_history_across_sizes(
+        self, mock_env_with_config, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(jobs, "pid_is_alive", lambda pid: True)
+        data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+        jobs_dir = data_root / ".dispatch" / "jobs"
+        job_id = _seed_running_job(jobs_dir).name
+        service = FakeMonitorService()
+        query = _query(
+            QID_1,
+            observation=_observation(phase="running", raw_state="RUNNING"),
+        )
+        service.set_snapshot(
+            job_id,
+            _snapshot_with_shells(
+                job_id,
+                ms.ShellExecutionAttempt(
+                    shell_execution_id="shell-1",
+                    shell_relation="initial",
+                    pool="default",
+                    seq=1,
+                    queries=(query,),
+                ),
+            ),
+        )
+
+        async def run() -> None:
+            app = DispatchApp()
+            async with app.run_test(size=(80, 24)) as pilot:
+                screen = await _mount_job_detail(app, job_id, service)
+                await pilot.pause(0.2)
+
+                def assert_regions(*, compact: bool) -> None:
+                    monitor = screen.query_one("#monitor-panel")
+                    attempt = screen.query_one("#monitor-attempt")
+                    history = screen.query_one("#monitor-history")
+                    log_panel = screen.query_one("#log-panel")
+                    action_bar = screen.query_one(".action-bar")
+                    footer = screen.query_one("Footer")
+                    back = screen.query_one("#back", Button)
+                    cancel = screen.query_one("#cancel", Button)
+
+                    assert monitor.region.bottom <= log_panel.region.y
+                    assert log_panel.region.height > 0
+                    assert log_panel.region.bottom <= action_bar.region.y
+                    assert action_bar.region.bottom <= footer.region.y
+                    assert footer.region.bottom <= app.size.height
+                    assert attempt.display is True
+                    assert history.display is (not compact)
+                    assert back.display is True
+                    assert cancel.display is True
+
+                assert_regions(compact=True)
+                focused_before = screen.focused
+                assert focused_before is not None
+                await pilot.resize_terminal(120, 40)
+                await pilot.pause(0.2)
+                assert_regions(compact=False)
+                await pilot.resize_terminal(160, 50)
+                await pilot.pause(0.2)
+                assert_regions(compact=False)
+                assert screen.focused is focused_before
+                assert service.subscribe_calls == [job_id]
+
+        asyncio.run(run())
+
+    def test_monitoring_unavailable_shows_quiet_line(self, mock_env_with_config) -> None:
+        data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+        jobs_dir = data_root / ".dispatch" / "jobs"
+        job_dir = _seed_running_job(jobs_dir)
+        job_id = job_dir.name
+        service = FakeMonitorService()
+        # No snapshot registered: default is "monitoring unavailable".
+
+        async def run() -> str:
+            app = DispatchApp()
+            async with app.run_test(size=(120, 40)) as pilot:
+                screen = await _mount_job_detail(app, job_id, service)
+                await pilot.pause(0.3)
+                return str(screen.query_one("#monitor-attempt", Static).render())
+
+        text = asyncio.run(run())
+        assert "monitoring unavailable" in text.lower()
+
+    def test_no_monitor_service_wired_behaves_like_before(self, mock_env_with_config) -> None:
+        """Default ``monitor_service=None`` keeps every existing caller valid."""
+        data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+        jobs_dir = data_root / ".dispatch" / "jobs"
+        job_dir = _seed_running_job(jobs_dir)
+        job_id = job_dir.name
+
+        async def run() -> str:
+            app = DispatchApp()
+            async with app.run_test(size=(120, 40)) as pilot:
+                screen = await _mount_job_detail(app, job_id, None)
+                await pilot.pause(0.3)
+                return str(screen.query_one("#monitor-attempt", Static).render())
+
+        text = asyncio.run(run())
+        assert "monitoring unavailable" in text.lower()
+
+    def test_queued_state_shows_phase_pool_and_queued_duration(self, mock_env_with_config) -> None:
+        data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+        jobs_dir = data_root / ".dispatch" / "jobs"
+        job_dir = _seed_running_job(jobs_dir)
+        job_id = job_dir.name
+        service = FakeMonitorService()
+        query = _query(
+            QID_1,
+            observation=_observation(
+                phase="queued",
+                raw_state="COMPILED",
+                pool="adhoc_small",
+                queued_duration="12s345ms",
+            ),
+        )
+        shell = ms.ShellExecutionAttempt(
+            shell_execution_id="shell-1",
+            shell_relation="initial",
+            pool="adhoc_small",
+            seq=1,
+            queries=(query,),
+        )
+        service.set_snapshot(job_id, _snapshot_with_shells(job_id, shell))
+
+        async def run() -> str:
+            app = DispatchApp()
+            async with app.run_test(size=(120, 40)) as pilot:
+                screen = await _mount_job_detail(app, job_id, service)
+                await pilot.pause(0.3)
+                return str(screen.query_one("#monitor-attempt", Static).render())
+
+        text = asyncio.run(run())
+        assert "queued" in text.lower()
+        assert "adhoc_small" in text
+        assert "12s345ms" in text
+        # An ETA is never implied by this panel.
+        assert "eta" not in text.lower()
+
+    def test_running_state_shows_reported_work_completed_not_eta(
+        self, mock_env_with_config
+    ) -> None:
+        data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+        jobs_dir = data_root / ".dispatch" / "jobs"
+        job_dir = _seed_running_job(jobs_dir)
+        job_id = job_dir.name
+        service = FakeMonitorService()
+        query = _query(
+            QID_1,
+            observation=_observation(
+                phase="running",
+                raw_state="RUNNING",
+                pool="default",
+                query_progress=im.ProgressCounter(completed=3, total=8, display="3 / 8"),
+            ),
+        )
+        shell = ms.ShellExecutionAttempt(
+            shell_execution_id="shell-1",
+            shell_relation="initial",
+            pool="default",
+            seq=1,
+            queries=(query,),
+        )
+        service.set_snapshot(job_id, _snapshot_with_shells(job_id, shell))
+
+        async def run() -> str:
+            app = DispatchApp()
+            async with app.run_test(size=(120, 40)) as pilot:
+                screen = await _mount_job_detail(app, job_id, service)
+                await pilot.pause(0.3)
+                return str(screen.query_one("#monitor-attempt", Static).render())
+
+        text = asyncio.run(run())
+        assert "running" in text.lower()
+        assert "reported work completed" in text.lower()
+        assert "3 / 8" in text
+        assert "eta" not in text.lower()
+
+    def test_retry_chain_shows_history_with_retry_entries(self, mock_env_with_config) -> None:
+        data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+        jobs_dir = data_root / ".dispatch" / "jobs"
+        job_dir = _seed_running_job(jobs_dir)
+        job_id = job_dir.name
+        service = FakeMonitorService()
+        retry = _query(
+            QID_RETRY,
+            relation="transparent_retry",
+            observation=_observation(phase="running", raw_state="RUNNING"),
+            seq=2,
+        )
+        initial = _query(
+            QID_1,
+            observation=_observation(phase="failed", raw_state="EXCEPTION"),
+            retries=(retry,),
+        )
+        shell = ms.ShellExecutionAttempt(
+            shell_execution_id="shell-1",
+            shell_relation="initial",
+            pool="default",
+            seq=1,
+            queries=(initial,),
+        )
+        service.set_snapshot(job_id, _snapshot_with_shells(job_id, shell))
+
+        async def run() -> tuple[str, str]:
+            app = DispatchApp()
+            async with app.run_test(size=(120, 40)) as pilot:
+                screen = await _mount_job_detail(app, job_id, service)
+                await pilot.pause(0.3)
+                attempt_text = str(screen.query_one("#monitor-attempt", Static).render())
+                history_text = str(screen.query_one("#monitor-history", Static).render())
+                return attempt_text, history_text
+
+        attempt_text, history_text = asyncio.run(run())
+        # The live leaf is the retry, currently running.
+        assert "running" in attempt_text.lower()
+        # The history line must show the retry as its own entry.
+        assert "retry" in history_text.lower()
+
+    def test_nested_retry_chain_uses_deepest_leaf_and_renders_every_attempt(self) -> None:
+        final_retry = _query(
+            "cccccccccccccccc:dddddddddddddddd",
+            relation="transparent_retry",
+            observation=_observation(phase="running", raw_state="RUNNING"),
+            seq=3,
+        )
+        first_retry = _query(
+            QID_RETRY,
+            relation="transparent_retry",
+            observation=_observation(phase="failed", raw_state="EXCEPTION"),
+            retries=(final_retry,),
+            seq=2,
+        )
+        initial = _query(
+            QID_1,
+            observation=_observation(phase="failed", raw_state="EXCEPTION"),
+            retries=(first_retry,),
+        )
+        shell = ms.ShellExecutionAttempt(
+            shell_execution_id="shell-1",
+            shell_relation="initial",
+            pool="default",
+            seq=1,
+            queries=(initial,),
+        )
+        screen = JobDetailScreen("job")
+
+        snapshot = _snapshot_with_shells("job", shell)
+        leaf = screen._current_leaf_attempt(snapshot)
+        history = screen._format_attempt_history(snapshot)
+
+        assert leaf is final_retry
+        assert "running" in screen._format_current_attempt(leaf).lower()
+        assert history.lower().count("attempt failed; job retrying") == 2
+        assert "attempt history (3 total)" in history.lower()
+
+    def test_mid_chain_exception_reads_attempt_failed_job_retrying(
+        self, mock_env_with_config
+    ) -> None:
+        """A mid-chain EXCEPTION with a following attempt never reads 'job failed'."""
+        data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+        jobs_dir = data_root / ".dispatch" / "jobs"
+        job_dir = _seed_running_job(jobs_dir)
+        job_id = job_dir.name
+        service = FakeMonitorService()
+        retry = _query(
+            QID_RETRY,
+            relation="transparent_retry",
+            observation=_observation(phase="running", raw_state="RUNNING"),
+            seq=2,
+        )
+        initial = _query(
+            QID_1,
+            observation=_observation(phase="failed", raw_state="EXCEPTION"),
+            retries=(retry,),
+        )
+        shell = ms.ShellExecutionAttempt(
+            shell_execution_id="shell-1",
+            shell_relation="initial",
+            pool="default",
+            seq=1,
+            queries=(initial,),
+        )
+        service.set_snapshot(job_id, _snapshot_with_shells(job_id, shell))
+
+        async def run() -> str:
+            app = DispatchApp()
+            async with app.run_test(size=(120, 40)) as pilot:
+                screen = await _mount_job_detail(app, job_id, service)
+                await pilot.pause(0.3)
+                return str(screen.query_one("#monitor-history", Static).render())
+
+        history_text = asyncio.run(run())
+        assert "attempt failed; job retrying" in history_text.lower()
+        assert "job failed" not in history_text.lower()
+
+    def test_pool_fallback_in_same_call_reads_attempt_failed_job_retrying(self) -> None:
+        failed = _query(
+            QID_1,
+            observation=_observation(phase="failed", raw_state="EXCEPTION"),
+        )
+        running = _query(
+            QID_RETRY,
+            observation=_observation(phase="running", raw_state="RUNNING"),
+        )
+        initial_shell = ms.ShellExecutionAttempt(
+            shell_execution_id="shell-1",
+            shell_relation="initial",
+            pool="adhoc_fast",
+            seq=1,
+            queries=(failed,),
+        )
+        fallback_shell = ms.ShellExecutionAttempt(
+            shell_execution_id="shell-2",
+            shell_relation="orchestrator_pool_fallback",
+            pool="adhoc_heavy",
+            seq=2,
+            queries=(running,),
+        )
+        history = JobDetailScreen("job")._format_attempt_history(
+            _snapshot_with_shells("job", initial_shell, fallback_shell)
+        )
+        assert "attempt failed; job retrying" in history.lower()
+
+    def test_next_call_and_statement_sibling_do_not_invent_retry_wording(self) -> None:
+        failed = _query(
+            QID_1,
+            observation=_observation(phase="failed", raw_state="EXCEPTION"),
+        )
+        running = _query(
+            QID_RETRY,
+            observation=_observation(phase="running", raw_state="RUNNING"),
+            seq=2,
+        )
+        first_call = ms.OrchestratorCallAttempt(
+            call_id="call-0001",
+            index=1,
+            script="Query_Impala_Parametrized.py",
+            seq=1,
+            shell_executions=(
+                ms.ShellExecutionAttempt(
+                    shell_execution_id="shell-1",
+                    shell_relation="initial",
+                    pool="default",
+                    seq=1,
+                    queries=(failed,),
+                ),
+            ),
+        )
+        second_call = ms.OrchestratorCallAttempt(
+            call_id="call-0002",
+            index=2,
+            script="download_to_csv.py",
+            seq=2,
+            shell_executions=(
+                ms.ShellExecutionAttempt(
+                    shell_execution_id="shell-2",
+                    shell_relation="initial",
+                    pool="default",
+                    seq=2,
+                    queries=(running,),
+                ),
+            ),
+        )
+        screen = JobDetailScreen("job")
+        across_calls = screen._format_attempt_history(
+            _snapshot_with_calls("job", first_call, second_call)
+        )
+        statement_siblings = screen._format_attempt_history(
+            _snapshot_with_shells(
+                "job",
+                ms.ShellExecutionAttempt(
+                    shell_execution_id="shell-1",
+                    shell_relation="initial",
+                    pool="default",
+                    seq=1,
+                    queries=(failed, running),
+                ),
+            )
+        )
+        assert "job retrying" not in across_calls.lower()
+        assert "job retrying" not in statement_siblings.lower()
+
+    def test_recovery_binding_uses_safe_criteria_and_applies_unique_result(
+        self, mock_env_with_config, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            config, "impala_monitor_seed_url", lambda: "https://seed:25000", raising=False
+        )
+        data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+        jobs_dir = data_root / ".dispatch" / "jobs"
+        job_id = _seed_running_job(jobs_dir).name
+        service = FakeMonitorService()
+        empty_shell = ms.ShellExecutionAttempt(
+            shell_execution_id="shell-1",
+            shell_relation="initial",
+            pool="default",
+            seq=1,
+        )
+        service.set_snapshot(job_id, _snapshot_with_shells(job_id, empty_shell))
+        assert JobDetailScreen._recovery_candidate_call_id(service.snapshots[job_id]) is not None
+        recovered_query = _query(
+            QID_1,
+            observation=_observation(phase="running", raw_state="RUNNING"),
+        )
+        service.recovered_snapshot = _snapshot_with_shells(
+            job_id,
+            ms.ShellExecutionAttempt(
+                shell_execution_id="shell-1",
+                shell_relation="initial",
+                pool="default",
+                seq=1,
+                queries=(recovered_query,),
+            ),
+        )
+
+        async def run() -> tuple[str, bool]:
+            app = DispatchApp()
+            async with app.run_test(size=(120, 40)) as pilot:
+                screen = await _mount_job_detail(app, job_id, service)
+                await pilot.pause(0.2)
+                assert screen.query_one("#recover-monitor", Button).display is True, (
+                    service.subscribe_calls,
+                    service.recovery_criteria_calls,
+                    screen._recovery_call_id,
+                    screen._recovery_checked_call_id,
+                )
+                await pilot.press("m")
+                await pilot.pause(0.2)
+                return (
+                    str(screen.query_one("#monitor-attempt", Static).render()),
+                    screen.query_one("#recover-monitor", Button).display,
+                )
+
+        attempt, recovery_visible = asyncio.run(run())
+        assert service.recovery_criteria_calls
+        assert len(service.recover_calls) == 1
+        assert service.recover_calls[0][3] == "https://seed:25000"
+        assert "running" in attempt.lower()
+        assert recovery_visible is False
+
+    def test_recovery_refusal_keeps_existing_monitor_state(
+        self, mock_env_with_config, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(config, "impala_monitor_seed_url", lambda: None, raising=False)
+        data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+        jobs_dir = data_root / ".dispatch" / "jobs"
+        job_id = _seed_running_job(jobs_dir).name
+        service = FakeMonitorService()
+        service.set_snapshot(
+            job_id,
+            _snapshot_with_shells(
+                job_id,
+                ms.ShellExecutionAttempt(
+                    shell_execution_id="shell-1",
+                    shell_relation="initial",
+                    pool="default",
+                    seq=1,
+                ),
+            ),
+        )
+        service.recover_exception = RuntimeError("identity unavailable/ambiguous")
+
+        async def run() -> str:
+            app = DispatchApp()
+            async with app.run_test(size=(120, 40)) as pilot:
+                screen = await _mount_job_detail(app, job_id, service)
+                await pilot.pause(0.2)
+                await pilot.press("m")
+                await pilot.pause(0.2)
+                return str(screen.query_one("#monitor-attempt", Static).render())
+
+        attempt = asyncio.run(run())
+        assert len(service.recover_calls) == 1
+        assert "no query observed yet" in attempt.lower()
+
+    def test_subscribe_and_unsubscribe_called_on_mount_and_unmount(
+        self, mock_env_with_config
+    ) -> None:
+        data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+        jobs_dir = data_root / ".dispatch" / "jobs"
+        job_dir = _seed_running_job(jobs_dir)
+        job_id = job_dir.name
+        service = FakeMonitorService()
+
+        async def run() -> FakeMonitorService:
+            app = DispatchApp()
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _mount_job_detail(app, job_id, service)
+                await pilot.pause(0.3)
+                assert service.subscribe_calls == [job_id]
+                app.pop_screen()
+                await pilot.pause(0.3)
+            return service
+
+        service = asyncio.run(run())
+        assert service.unsubscribe_calls == [job_id]
+
+    def test_monitoring_failure_leaves_cancel_and_log_tail_untouched(
+        self, mock_env_with_config, monkeypatch
+    ) -> None:
+        """A monitoring-unavailable snapshot must not change cancel/log behavior.
+
+        Seeds a Running job with a live pid so Cancel is available, appends a
+        log line, and asserts both remain fully functional when the fake
+        service reports "monitoring unavailable" throughout.
+        """
+        monkeypatch.setattr(jobs, "pid_is_alive", lambda pid: True)
+        data_root = Path(os.environ["DISPATCH_DATA_ROOT"])
+        jobs_dir = data_root / ".dispatch" / "jobs"
+        job_dir = _seed_running_job(jobs_dir)
+        job_id = job_dir.name
+        (job_dir / "run.log").write_text("hello from the orchestrator\n", encoding="utf-8")
+        service = FakeMonitorService()  # never given a snapshot -> unavailable
+
+        async def run() -> tuple[bool, str]:
+            app = DispatchApp()
+            async with app.run_test(size=(120, 40)) as pilot:
+                screen = await _mount_job_detail(app, job_id, service)
+                await pilot.pause(0.3)
+                cancel_visible = screen.query_one("#cancel", Button).display
+                from textual.widgets import RichLog
+
+                log_widget = screen.query_one("#log-display", RichLog)
+                log_text = "\n".join(str(line) for line in log_widget.lines)
+                return cancel_visible, log_text
+
+        cancel_visible, log_text = asyncio.run(run())
+        assert cancel_visible is True
+        assert "hello from the orchestrator" in log_text

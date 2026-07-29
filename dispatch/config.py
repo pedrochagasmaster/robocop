@@ -77,3 +77,33 @@ def save_form_defaults(values: dict[str, str], user: str | None = None) -> None:
         cfg = {}
     cfg["form_defaults"] = values
     write_config(cfg, user)
+
+
+def impala_monitor_ca_bundle() -> str | None:
+    """Optional CA bundle path for validating coordinator TLS certificates.
+
+    ``None`` (the default) means "use the system trust store" via
+    ``ssl.create_default_context()`` with no ``cafile`` override. Set via
+    ``DISPATCH_IMPALA_MONITOR_CA_BUNDLE`` for environments with a private CA.
+    This never disables verification; it only points verification at a
+    specific bundle.
+    """
+    override = os.environ.get("DISPATCH_IMPALA_MONITOR_CA_BUNDLE", "").strip()
+    return override or None
+
+
+def impala_monitor_allow_http() -> bool:
+    """Dev/mock-only opt-in to allow plaintext ``http://`` coordinator URLs.
+
+    Defaults to ``False`` (HTTPS-only, verified). Set
+    ``DISPATCH_IMPALA_MONITOR_ALLOW_HTTP=1`` only for local mock servers; this
+    must never be enabled in a production deployment.
+    """
+    raw = os.environ.get("DISPATCH_IMPALA_MONITOR_ALLOW_HTTP", "").strip().lower()
+    return raw not in ("", "0", "false", "off", "no")
+
+
+def impala_monitor_seed_url() -> str | None:
+    """Optional validated coordinator seed for operator-triggered recovery."""
+    override = os.environ.get("DISPATCH_IMPALA_MONITOR_SEED_URL", "").strip()
+    return override or None

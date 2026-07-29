@@ -1,0 +1,17 @@
+{
+  "_synthetic": true,
+  "query_id": "708192939495969a:f8919293949a9b9c",
+  "inflight": true,
+  "record_json": {
+    "query_id": "708192939495969a:f8919293949a9b9c",
+    "effective_user": "user_a",
+    "default_db": "db_a",
+    "stmt": "SELECT 1 /* sanitized */",
+    "stmt_type": "QUERY",
+    "state": "RETRYING",
+    "last_event": "Retrying",
+    "resource_pool": "default",
+    "queued_duration": "0s010ms",
+    "rows_fetched": 0
+  }
+}

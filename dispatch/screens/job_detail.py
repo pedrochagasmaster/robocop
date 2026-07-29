@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.screen import Screen
+from textual.timer import Timer
 from textual.widgets import Button, Footer, Header, Input, RichLog, Static
 from textual.worker import Worker
 
@@ -22,8 +23,12 @@ from ..formatting import (
     format_timestamp,
     style_log_line,
 )
+from ..monitor_service import MonitorSnapshot
 from .confirm import ConfirmScreen
 from .sidebar import Sidebar
+
+if TYPE_CHECKING:
+    from ..monitor_service import MonitorService, QueryAttempt
 
 # The live log view keeps only a bounded tail in memory and on screen so very
 # chatty jobs cannot grow the UI without limit. The RichLog widget and the
@@ -34,6 +39,20 @@ LOG_VIEW_LINES = 200
 # more than this between ticks; the remainder is picked up on the next tick
 # by carrying the offset forward. Bounds memory and RichLog write bursts.
 LOG_READ_CHUNK_BYTES = 65536
+
+# Most recent shell/query attempts shown in the compact history line; older
+# attempts are summarized by count rather than dropped silently.
+MONITOR_HISTORY_LIMIT = 5
+
+_PHASE_LABELS: dict[str, str] = {
+    "preparing": "preparing",
+    "queued": "queued",
+    "running": "running",
+    "succeeded": "succeeded",
+    "failed": "failed",
+    "retrying": "retrying",
+    "unknown": "unknown",
+}
 
 
 class JobDetailScreen(Screen[None]):
@@ -48,11 +67,18 @@ class JobDetailScreen(Screen[None]):
         ("/", "log_search", "Search"),
         ("y", "copy_job_id", "Copy ID"),
         ("r", "clone_job", "Clone"),
+        ("m", "recover_identity", "Recover"),
     ]
 
     follow_mode = reactive(True)
 
-    def __init__(self, job_id: str, cancel_on_mount: bool = False) -> None:
+    def __init__(
+        self,
+        job_id: str,
+        cancel_on_mount: bool = False,
+        *,
+        monitor_service: MonitorService | None = None,
+    ) -> None:
         super().__init__()
         self.job_id = job_id
         self.cancel_on_mount = cancel_on_mount
@@ -73,6 +99,19 @@ class JobDetailScreen(Screen[None]):
         self._refresh_in_flight = False
         # Last markup painted per Static, to skip no-op repaints over SSH.
         self._static_cache: dict[str, str] = {}
+        # Slice 5 monitoring panel. ``None`` (the default) keeps monitoring
+        # off entirely so every existing caller/test is unaffected; the app
+        # wires its owned MonitorService through for real navigation.
+        self._monitor_service = monitor_service
+        self._monitor_subscribed = False
+        self._monitor_refresh_in_flight = False
+        self._monitor_generation = 0
+        self._detail_timer: Timer | None = None
+        self._monitor_timer: Timer | None = None
+        self._compact_layout = False
+        self._recovery_call_id: str | None = None
+        self._recovery_checked_call_id: str | None = None
+        self._recovery_in_flight = False
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Hide actions that do not apply to the Job's current state."""
@@ -80,6 +119,8 @@ class JobDetailScreen(Screen[None]):
             return self._job_state in (None, "Running", "Pending")
         if action == "clone_job":
             return self._job_state in (None, "Succeeded", "Failed", "Cancelled")
+        if action == "recover_identity":
+            return self._recovery_call_id is not None and not self._recovery_in_flight
         return True
 
     @property
@@ -111,6 +152,10 @@ class JobDetailScreen(Screen[None]):
 
                 yield Static("", id="error-banner")
 
+                with Vertical(id="monitor-panel"):
+                    yield Static("", id="monitor-attempt")
+                    yield Static("", id="monitor-history")
+
                 with Horizontal(id="log-header"):
                     yield Static("[bold]Logs[/]", classes="section-title")
                     yield Static("", id="log-streaming")
@@ -130,18 +175,148 @@ class JobDetailScreen(Screen[None]):
                 yield Static("", id="job-status-line", classes="action-status")
                 yield Button("Back [B]", id="back", variant="default")
                 yield Button("Clone [R]", id="clone", variant="default")
+                yield Button("Recover [M]", id="recover-monitor", variant="default")
                 yield Button("Cancel Job [C]", id="cancel", variant="error")
         yield Footer()
 
     async def on_mount(self) -> None:
+        self._monitor_generation += 1
         self.query_one("#log-search-input").display = False
         self.query_one("#truncation-hint").display = False
         self.query_one("#error-banner").display = False
         self.query_one("#clone", Button).display = False
+        self.query_one("#recover-monitor", Button).display = False
+        self._update_layout_mode()
         if self.cancel_on_mount:
             self.action_cancel()
         await self._refresh_detail_async()
-        self.set_interval(1.0, self._refresh_detail_async)
+        self._detail_timer = self.set_interval(1.0, self._refresh_detail_async)
+        self.app.run_worker(
+            self._start_monitoring_async(),
+            name=f"monitor-start-{self.job_id}",
+            exclusive=False,
+        )
+
+    async def _start_monitoring_async(self) -> None:
+        # Let the mount message finish so the ownership guard can require
+        # ``app.screen is self`` without treating a normal mount as stale.
+        await asyncio.sleep(0)
+        if not self._monitor_result_is_current(self._monitor_generation):
+            return
+        await self._subscribe_monitor_async()
+        if self.is_mounted and self.app.screen is self:
+            self._monitor_timer = self.set_interval(2.0, self._refresh_monitor_async)
+
+    def on_unmount(self) -> None:
+        self._monitor_generation += 1
+        for timer in (self._detail_timer, self._monitor_timer):
+            if timer is not None:
+                timer.stop()
+        self._detail_timer = None
+        self._monitor_timer = None
+        # Screen is popped, not suspended-in-place (see app.py navigation);
+        # dropping the subscription here returns this job's pollers to the
+        # background cadence for every other consumer.
+        if self._monitor_subscribed and self._monitor_service is not None:
+            self._monitor_service.unsubscribe(self.job_id)
+            self._monitor_subscribed = False
+
+    def on_resize(self) -> None:
+        self._update_layout_mode()
+
+    def _update_layout_mode(self) -> None:
+        compact = self.app.size.height < 30
+        if compact == self._compact_layout:
+            return
+        self._compact_layout = compact
+        self.set_class(compact, "compact")
+        self.query_one("#monitor-history").display = not compact
+
+    def _monitor_result_is_current(self, token: int) -> bool:
+        return self.is_mounted and self.app.screen is self and token == self._monitor_generation
+
+    def _show_monitor_error(self, token: int, exc: Exception) -> None:
+        if not self._monitor_result_is_current(token):
+            return
+        self._set_static("#monitor-attempt", "[dim]Impala attempt: monitoring unavailable[/]")
+        self._set_static("#monitor-history", "")
+        self.notify(f"Monitoring unavailable: {type(exc).__name__}", severity="warning")
+
+    def _unwired_monitor_snapshot(self) -> MonitorSnapshot:
+        return MonitorSnapshot(
+            job_id=self.job_id,
+            available=False,
+            unavailable_reason="monitoring unavailable",
+        )
+
+    async def _subscribe_monitor_async(self) -> None:
+        """Subscribe to monitoring for this job, driving the foreground cadence.
+
+        Paints the quiet "monitoring unavailable" line and returns without
+        subscribing when no service was wired in — the default for every
+        existing caller/test, and identical to a wired service reporting no
+        sidecar for this job. Runs the (blocking, file-reading) ``subscribe``
+        call in a thread so the event loop is never blocked, per the
+        dispatch-textual-tui skill.
+        """
+        service = self._monitor_service
+        if service is None:
+            self._apply_monitor_snapshot(self._unwired_monitor_snapshot())
+            return
+        token = self._monitor_generation
+        job_id = self.job_id
+        job_dir = self.job_dir
+
+        def _subscribe() -> MonitorSnapshot:
+            return service.subscribe(job_id, job_dir)
+
+        subscribe_task = asyncio.create_task(asyncio.to_thread(_subscribe))
+        try:
+            snapshot = await asyncio.shield(subscribe_task)
+        except asyncio.CancelledError:
+            # Cancelling the awaiting coroutine does not stop work already
+            # running in ``to_thread``. Wait for that call to settle, then
+            # compensate any successful foreground subscription before
+            # propagating cancellation.
+            try:
+                await asyncio.shield(subscribe_task)
+            except Exception:
+                pass
+            else:
+                await asyncio.to_thread(service.unsubscribe, job_id)
+            raise
+        except Exception as exc:
+            self._show_monitor_error(token, exc)
+            return
+        if not self._monitor_result_is_current(token):
+            await asyncio.to_thread(service.unsubscribe, job_id)
+            return
+        self._monitor_subscribed = True
+        self._apply_monitor_snapshot(snapshot)
+        await self._check_recovery_eligibility(snapshot, token)
+
+    async def _refresh_monitor_async(self) -> None:
+        if self._monitor_service is None or self._monitor_refresh_in_flight:
+            return
+        self._monitor_refresh_in_flight = True
+        service = self._monitor_service
+        job_id = self.job_id
+        token = self._monitor_generation
+
+        def _snapshot() -> MonitorSnapshot:
+            return service.snapshot(job_id)
+
+        try:
+            snapshot = await asyncio.to_thread(_snapshot)
+            if self._monitor_result_is_current(token):
+                self._apply_monitor_snapshot(snapshot)
+                await self._check_recovery_eligibility(snapshot, token)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._show_monitor_error(token, exc)
+        finally:
+            self._monitor_refresh_in_flight = False
 
     async def _refresh_detail_async(self) -> None:
         if self._refresh_in_flight:
@@ -322,6 +497,198 @@ class JobDetailScreen(Screen[None]):
             self._set_static("#error-banner", "[red]Job failed.[/] [dim]Check log for details.[/]")
         if not banner.display:
             banner.display = True
+
+    # -- Slice 5: Impala attempt monitoring panel -------------------------
+    #
+    # The manifest's coarse job state (rendered above, unchanged) is the only
+    # authoritative job-level truth. This panel shows a *separate* signal:
+    # the current Impala attempt's phase, pool, reported progress, queued
+    # duration, and a compact shell/query attempt history, sourced only from
+    # MonitorService snapshots. It never overrides or reinterprets the
+    # manifest state, and a monitoring failure never touches cancel/log-tail
+    # behavior above.
+
+    def _apply_monitor_snapshot(self, snapshot: MonitorSnapshot) -> None:
+        if not snapshot.available:
+            reason = snapshot.unavailable_reason or "monitoring unavailable"
+            self._set_static("#monitor-attempt", f"[dim]Impala attempt: {reason}[/]")
+            self._set_static("#monitor-history", "")
+            return
+
+        leaf = self._current_leaf_attempt(snapshot)
+        self._set_static("#monitor-attempt", self._format_current_attempt(leaf))
+        self._set_static("#monitor-history", self._format_attempt_history(snapshot))
+
+    @staticmethod
+    def _recovery_candidate_call_id(snapshot: MonitorSnapshot) -> str | None:
+        candidates = []
+        for call in snapshot.orchestrator_calls:
+            missing_shells = [shell for shell in call.shell_executions if not shell.queries]
+            if missing_shells:
+                candidates.append(call)
+        if len(candidates) != 1:
+            return None
+        candidate = candidates[0]
+        if candidate.index is None or candidate.call_id.startswith("legacy-"):
+            return None
+        return candidate.call_id
+
+    async def _check_recovery_eligibility(self, snapshot: MonitorSnapshot, token: int) -> None:
+        call_id = self._recovery_candidate_call_id(snapshot)
+        if call_id is None:
+            self._set_recovery_available(None)
+            return
+        if call_id == self._recovery_checked_call_id:
+            return
+        service = self._monitor_service
+        if service is None:
+            return
+        self._recovery_checked_call_id = call_id
+        try:
+            await asyncio.to_thread(service.recovery_criteria, self.job_id, call_id)
+        except Exception:
+            if self._monitor_result_is_current(token):
+                self._set_recovery_available(None)
+            return
+        if self._monitor_result_is_current(token):
+            self._set_recovery_available(call_id)
+
+    def _set_recovery_available(self, call_id: str | None) -> None:
+        self._recovery_call_id = call_id
+        self.query_one("#recover-monitor", Button).display = call_id is not None
+        self.refresh_bindings()
+
+    async def action_recover_identity(self) -> None:
+        service = self._monitor_service
+        call_id = self._recovery_call_id
+        if service is None or call_id is None or self._recovery_in_flight:
+            return
+        token = self._monitor_generation
+        self._recovery_in_flight = True
+        self.refresh_bindings()
+
+        def _recover() -> MonitorSnapshot:
+            criteria = service.recovery_criteria(self.job_id, call_id)
+            return service.recover_identity(
+                self.job_id,
+                call_id,
+                criteria,
+                seed_url=config.impala_monitor_seed_url(),
+            )
+
+        try:
+            snapshot = await asyncio.to_thread(_recover)
+            if self._monitor_result_is_current(token):
+                self._apply_monitor_snapshot(snapshot)
+                self._set_recovery_available(None)
+                self.notify("Impala query identity recovered", severity="information")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if self._monitor_result_is_current(token):
+                self.notify("Identity unavailable/ambiguous", severity="warning")
+        finally:
+            self._recovery_in_flight = False
+            if self._monitor_result_is_current(token):
+                self.refresh_bindings()
+
+    @staticmethod
+    def _current_leaf_attempt(snapshot: MonitorSnapshot) -> QueryAttempt | None:
+        """Return the most recently started live leaf query attempt, if any.
+
+        A query superseded by a transparent retry is represented by its
+        latest retry (the live continuation); the last shell in event order
+        is the most current attempt.
+        """
+        for call in reversed(snapshot.orchestrator_calls):
+            for shell in reversed(call.shell_executions):
+                if not shell.queries:
+                    continue
+                query = shell.queries[-1]
+                return query.latest_retry_leaf()
+        return None
+
+    def _format_current_attempt(self, leaf: QueryAttempt | None) -> str:
+        if leaf is None:
+            return "[dim]Impala attempt: no query observed yet[/]"
+        observation = leaf.observation
+        if observation is None:
+            return "[dim]Impala attempt: awaiting first observation…[/]"
+
+        if observation.availability_error:
+            return (
+                f"[dim]Impala attempt: monitoring unavailable ({observation.availability_error})[/]"
+            )
+
+        phase_text = _PHASE_LABELS.get(observation.phase, observation.phase)
+        parts = [f"Impala attempt: [bold]{phase_text}[/]"]
+        if observation.pool:
+            parts.append(f"pool [cyan]{observation.pool}[/]")
+        progress = observation.query_progress or observation.scan_progress
+        if progress is not None and progress.display:
+            parts.append(f"reported work completed: {progress.display}")
+        if observation.queued_duration:
+            parts.append(f"queued {observation.queued_duration}")
+        return "  ·  ".join(parts)
+
+    def _format_attempt_history(self, snapshot: MonitorSnapshot) -> str:
+        entries: list[str] = []
+        for call in snapshot.orchestrator_calls:
+            shells = call.shell_executions
+            for shell_index, shell in enumerate(shells):
+                fallback_follows = (
+                    shell_index + 1 < len(shells)
+                    and shells[shell_index + 1].shell_relation == "orchestrator_pool_fallback"
+                )
+                for query_index, query in enumerate(shell.queries):
+                    entries.extend(
+                        self._describe_query_chain(
+                            query,
+                            pool=shell.pool,
+                            fallback_follows=(
+                                fallback_follows and query_index == len(shell.queries) - 1
+                            ),
+                        )
+                    )
+        if not entries:
+            return ""
+        shown = entries[-MONITOR_HISTORY_LIMIT:]
+        lines = [f"[dim]Attempt history ({len(entries)} total):[/]"]
+        lines.extend(f"  {entry}" for entry in shown)
+        return "\n".join(lines)
+
+    def _describe_query_chain(
+        self, query: QueryAttempt, *, pool: str, fallback_follows: bool = False
+    ) -> list[str]:
+        """Describe one initial query and its transparent-retry chain.
+
+        A mid-chain ``EXCEPTION`` (an attempt with at least one following
+        retry) reads "attempt failed; job retrying" — never "job failed",
+        since the manifest (not this panel) is the only source of job-level
+        truth. Only the last attempt in the chain (no further retry) may
+        report a terminal outcome as such.
+        """
+        chain = query.attempts_depth_first()
+        described: list[str] = []
+        for index, attempt in enumerate(chain):
+            has_following = index < len(chain) - 1 or (index == len(chain) - 1 and fallback_follows)
+            described.append(
+                self._describe_single_attempt(attempt, pool=pool, has_following=has_following)
+            )
+        return described
+
+    @staticmethod
+    def _describe_single_attempt(query: QueryAttempt, *, pool: str, has_following: bool) -> str:
+        observation = query.observation
+        label = "retry" if query.relation == "transparent_retry" else "attempt"
+        if observation is None:
+            return f"{label} ({pool}): awaiting observation…"
+        if observation.availability_error and observation.phase == "unknown":
+            return f"{label} ({pool}): monitoring unavailable"
+        phase_text = _PHASE_LABELS.get(observation.phase, observation.phase)
+        if observation.phase == "failed" and has_following:
+            return f"{label} ({pool}): attempt failed; job retrying"
+        return f"{label} ({pool}): {phase_text}"
 
     def _styled_log_line(self, line: str) -> str:
         styled = self._style_log_line(line)
@@ -556,3 +923,5 @@ class JobDetailScreen(Screen[None]):
             self.app.pop_screen()
         elif event.button.id == "clone":
             self.action_clone_job()
+        elif event.button.id == "recover-monitor":
+            self.run_worker(self.action_recover_identity(), name="recover-monitor", exclusive=True)

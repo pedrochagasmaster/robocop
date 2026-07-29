@@ -1,11 +1,10 @@
 # pylint: disable=line-too-long,trailing-whitespace,missing-final-newline,too-many-arguments,too-many-positional-arguments,f-string-without-interpolation,consider-using-with,unspecified-encoding,logging-not-lazy,consider-using-f-string,no-else-return
 import logging
-import subprocess
 import argparse
 import sys
 import os
 
-from _common import FATAL_ERRORS, classificar_erro_impala, cycle_through_pools, resolve_pools, send_email
+from _common import FATAL_ERRORS, classificar_erro_impala, cycle_through_pools, resolve_pools, run_impala_shell, send_email
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -106,13 +105,12 @@ def load_query(path):
     return sql_query
 
 def run_on_impala(query: str, subject, to_email, tablecreated="", user="", queue=""):
-    process = subprocess.Popen(
+    returncode, stdout, stderr = run_impala_shell(
         ['impala-shell', '-k', '-i', 'dw.prod.impala.mastercard.int:21000', '--ssl', '--delimited', '--print_header',
-         '--output_delimiter=|', '-q', query], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = process.communicate()
+         '--output_delimiter=|', '-q', query], pool=queue)
     logging.info("Executing query: %s" % query)
 
-    if process.returncode == 0:
+    if returncode == 0:
         print("########## query executed successfully ##########")
         messageBody = (
             f"User: {user}\n"

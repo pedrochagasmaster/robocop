@@ -180,6 +180,11 @@ Full reference: [docs/notebook-api.md](docs/notebook-api.md). Design rationale:
 [ADR-0010](docs/adr/0010-notebook-results-are-strict-reads-of-the-job-csv.md),
 [ADR-0011](docs/adr/0011-no-unaudited-interactive-query-tier.md).
 
+Operators may set `DISPATCH_IMPALA_MONITOR_SEED_URL` to a validated Impala
+coordinator base URL for explicit query-identity recovery. This optional seed
+does not bypass host validation. HTTPS remains the default; plaintext HTTP is
+still restricted to the existing development/mock opt-in.
+
 ## Usage telemetry
 
 Dispatch records offline usage events (sessions, screens, Job launches, refusals)

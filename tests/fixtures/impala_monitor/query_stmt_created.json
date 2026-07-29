@@ -1,0 +1,14 @@
+{
+  "query_id": "1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+  "inflight": true,
+  "record_json": {
+    "query_id": "1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+    "effective_user": "user_a",
+    "default_db": "db_a",
+    "stmt": "SELECT 1 /* sanitized */",
+    "stmt_type": "QUERY",
+    "state": "CREATED",
+    "resource_pool": "default",
+    "rows_fetched": 0
+  }
+}

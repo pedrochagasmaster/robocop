@@ -1,0 +1,15 @@
+{
+  "query_id": "3c4d5e6f70819293:b4c5d6e7f8919293",
+  "inflight": true,
+  "record_json": {
+    "query_id": "3c4d5e6f70819293:b4c5d6e7f8919293",
+    "effective_user": "user_a",
+    "default_db": "db_a",
+    "stmt": "SELECT 1 /* sanitized */",
+    "stmt_type": "QUERY",
+    "state": "COMPILED",
+    "last_event": "Planning finished",
+    "resource_pool": "default",
+    "rows_fetched": 0
+  }
+}

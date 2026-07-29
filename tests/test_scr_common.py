@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,13 @@ if str(SCR_DIR) not in sys.path:
 import _common  # noqa: E402
 import download_to_csv  # noqa: E402
 import monthly_query_processor  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _monitor_lineage_env(monkeypatch):
+    monkeypatch.setenv("DISPATCH_ORCHESTRATOR_CALL_ID", "call-0001")
+    monkeypatch.setenv("DISPATCH_ORCHESTRATOR_CALL_INDEX", "1")
+    monkeypatch.setenv("DISPATCH_ORCHESTRATOR_SCRIPT", "test_orchestrator.py")
 
 
 @pytest.mark.parametrize(
@@ -349,17 +358,12 @@ def test_download_csv_run_export_sends_success_notification(monkeypatch, tmp_pat
     output_file = tmp_path / "export.csv"
     sent_emails: list[tuple[str, str, str]] = []
 
-    class FakeProcess:
-        returncode = 0
+    def fake_run_impala_shell(command: list[str], *, pool: str = "") -> tuple[int, bytes, bytes]:
+        target = Path(command[command.index("-o") + 1])
+        target.write_text("csv\n", encoding="utf-8")
+        return 0, b"ok", b""
 
-        def __init__(self, command: list[str], stdout, stderr) -> None:
-            target = Path(command[command.index("-o") + 1])
-            target.write_text("csv\n", encoding="utf-8")
-
-        def communicate(self) -> tuple[bytes, bytes]:
-            return b"ok", b""
-
-    monkeypatch.setattr(download_to_csv.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(download_to_csv, "run_impala_shell", fake_run_impala_shell)
     monkeypatch.setattr(
         download_to_csv,
         "send_email",
@@ -383,16 +387,10 @@ def test_download_csv_run_export_sends_fatal_error_notification(monkeypatch, tmp
     output_file = tmp_path / "export.csv"
     sent_emails: list[tuple[str, str, str]] = []
 
-    class FakeProcess:
-        returncode = 1
+    def fake_run_impala_shell(command: list[str], *, pool: str = "") -> tuple[int, bytes, bytes]:
+        return 1, b"", b"ParseException: syntax error at line 1"
 
-        def __init__(self, command: list[str], stdout, stderr) -> None:
-            pass
-
-        def communicate(self) -> tuple[bytes, bytes]:
-            return b"", b"ParseException: syntax error at line 1"
-
-    monkeypatch.setattr(download_to_csv.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(download_to_csv, "run_impala_shell", fake_run_impala_shell)
     monkeypatch.setattr(
         download_to_csv,
         "send_email",
@@ -459,3 +457,543 @@ def test_send_email_closes_connection_when_sendmail_fails(monkeypatch) -> None:
     _common.send_email("body", "Subject", "a@example.com")
 
     assert closed == ["quit"]
+
+
+# =============================================================================
+# run_impala_shell: execution identity event protocol
+# =============================================================================
+
+# A child process that writes several MB to stdout *before* writing anything
+# to stderr, then writes the monitor line to stderr, then exits. If stdout
+# and stderr were drained sequentially (stderr first) rather than
+# concurrently, this child would block forever writing to a full stdout
+# pipe while the parent waits on stderr — this reproduces the exact deadlock
+# ``run_impala_shell`` must avoid.
+_BIG_STDOUT_CHILD = """
+import sys
+sys.stdout.write("x" * (6 * 1024 * 1024))
+sys.stdout.flush()
+sys.stderr.write("Query state can be monitored at: https://coordinator-1.internal.example:25443/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8\\n")
+sys.stderr.flush()
+sys.exit(0)
+"""
+
+
+def _read_events(events_path: Path) -> list[dict]:
+    if not events_path.exists():
+        return []
+    lines = events_path.read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+class TestRunImpalaShellConcurrentDrain:
+    def test_multi_mb_stdout_with_stderr_monitor_line_does_not_deadlock(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Concurrent draining must not deadlock on a large stdout child."""
+        script = tmp_path / "big_stdout_child.py"
+        script.write_text(_BIG_STDOUT_CHILD, encoding="utf-8")
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-deadlock")
+
+        returncode, stdout, stderr = _common.run_impala_shell(
+            [sys.executable, str(script)], pool="adhoc_fast"
+        )
+
+        assert returncode == 0
+        assert len(stdout) == 6 * 1024 * 1024
+        assert b"Query state can be monitored at:" in stderr
+
+        events = _read_events(events_path)
+        types = [event["type"] for event in events]
+        assert types == ["shell_started", "query_discovered", "shell_finished"]
+
+
+class TestRunImpalaShellMonitorLineExtraction:
+    def test_monitor_line_emits_query_discovered_event(self, tmp_path, monkeypatch) -> None:
+        script = tmp_path / "monitor_child.py"
+        script.write_text(
+            "import sys\n"
+            "sys.stderr.write("
+            "'Query state can be monitored at: "
+            "https://coordinator-1.internal.example:25443/query_plan?"
+            "query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8\\n')\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+
+        returncode, _stdout, stderr = _common.run_impala_shell(
+            [sys.executable, str(script)], pool="adhoc"
+        )
+
+        assert returncode == 0
+        assert b"Query state can be monitored at:" in stderr
+
+        events = _read_events(events_path)
+        discovered = [e for e in events if e["type"] == "query_discovered"]
+        assert len(discovered) == 1
+        assert (
+            discovered[0]["coordinator_base_url"] == "https://coordinator-1.internal.example:25443"
+        )
+        assert discovered[0]["query_id"] == "1a2b3c4d5e6f7081:9192a3b4c5d6e7f8"
+
+    def test_retried_link_emits_query_retried_event(self, tmp_path, monkeypatch) -> None:
+        script = tmp_path / "retried_child.py"
+        script.write_text(
+            "import sys\n"
+            "sys.stderr.write("
+            "'Retried query link: "
+            "https://coordinator-1.internal.example:25443/query_plan?"
+            "query_id=2b3c4d5e6f708192:a3b4c5d6e7f89101\\n')\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+
+        _common.run_impala_shell([sys.executable, str(script)], pool="adhoc")
+
+        events = _read_events(events_path)
+        retried = [e for e in events if e["type"] == "query_retried"]
+        assert len(retried) == 1
+        assert retried[0]["query_id"] == "2b3c4d5e6f708192:a3b4c5d6e7f89101"
+
+    def test_unrelated_stderr_text_emits_no_discovery_event(self, tmp_path, monkeypatch) -> None:
+        """Only the two anchored line shapes are interpreted; everything else passes through."""
+        script = tmp_path / "plain_child.py"
+        script.write_text(
+            "import sys\n"
+            "sys.stderr.write('AnalysisException: Syntax error in line 1\\n')\n"
+            "sys.exit(1)\n",
+            encoding="utf-8",
+        )
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+
+        returncode, _stdout, stderr = _common.run_impala_shell(
+            [sys.executable, str(script)], pool="adhoc"
+        )
+
+        assert returncode == 1
+        assert b"AnalysisException" in stderr
+        events = _read_events(events_path)
+        assert [e["type"] for e in events] == ["shell_started", "shell_finished"]
+
+
+class TestRunImpalaShellMalformedUrlRejection:
+    @pytest.mark.parametrize(
+        "stderr_line",
+        [
+            "error: Query state can be monitored at: https://host.example/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+            "Query state can be monitored at: https://host.example/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8 trailing",
+            "Query state can be monitored at: https://host.example/cancel_query?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+            "Query state can be monitored at: https://host.example/query_stmt?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+            "Query state can be monitored at: https://host.example/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8&x=1",
+            "Query state can be monitored at: https://host.example/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8&query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+            "Query state can be monitored at: https://user:secret@host.example/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+            "Query state can be monitored at: https://host.example/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8#fragment",
+            "Query state can be monitored at: https://host.example:99999/query_plan?query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+            "Query state can be monitored at: https://host.example/query_plan?query_id=1A2b3c4d5e6f7081:9192a3b4c5d6e7f8",
+        ],
+    )
+    def test_non_exact_monitor_lines_are_rejected_and_preserve_bytes(
+        self, stderr_line: str, tmp_path, monkeypatch
+    ) -> None:
+        expected = (stderr_line + "\r\n").encode()
+        script = tmp_path / "adversarial_child.py"
+        script.write_text(
+            "import sys\nsys.stderr.buffer.write(" + repr(expected) + ")\n",
+            encoding="utf-8",
+        )
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+
+        returncode, stdout, stderr = _common.run_impala_shell(
+            [sys.executable, str(script)], pool="adhoc"
+        )
+
+        assert (returncode, stdout, stderr) == (0, b"", expected)
+        assert [event["type"] for event in _read_events(events_path)] == [
+            "shell_started",
+            "shell_finished",
+        ]
+
+    @pytest.mark.parametrize("line_ending", [b"\n", b"\r\n"])
+    def test_exact_monitor_line_accepts_lf_or_crlf_and_preserves_bytes(
+        self, line_ending: bytes, tmp_path, monkeypatch
+    ) -> None:
+        expected = (
+            b"Query state can be monitored at: "
+            b"https://host.example:25443/query_plan?"
+            b"query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8" + line_ending
+        )
+        script = tmp_path / "exact_child.py"
+        script.write_text(
+            "import sys\nsys.stderr.buffer.write(" + repr(expected) + ")\n",
+            encoding="utf-8",
+        )
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+
+        returncode, stdout, stderr = _common.run_impala_shell(
+            [sys.executable, str(script)], pool="adhoc"
+        )
+
+        assert (returncode, stdout, stderr) == (0, b"", expected)
+        assert [event["type"] for event in _read_events(events_path)] == [
+            "shell_started",
+            "query_discovered",
+            "shell_finished",
+        ]
+
+    def test_malformed_url_is_rejected_without_affecting_execution(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A monitor line with an unparseable/invalid URL emits no event but
+        does not alter the child's exit code or returned bytes."""
+        script = tmp_path / "malformed_child.py"
+        script.write_text(
+            "import sys\n"
+            "sys.stderr.write('Query state can be monitored at: not-a-valid-url\\n')\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+
+        returncode, _stdout, stderr = _common.run_impala_shell(
+            [sys.executable, str(script)], pool="adhoc"
+        )
+
+        assert returncode == 0
+        assert b"not-a-valid-url" in stderr
+        events = _read_events(events_path)
+        assert [e["type"] for e in events] == ["shell_started", "shell_finished"]
+
+    def test_url_missing_query_id_is_rejected(self, tmp_path, monkeypatch) -> None:
+        script = tmp_path / "no_qid_child.py"
+        script.write_text(
+            "import sys\n"
+            "sys.stderr.write("
+            "'Query state can be monitored at: "
+            "https://coordinator-1.internal.example:25443/query_plan\\n')\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+
+        _common.run_impala_shell([sys.executable, str(script)], pool="adhoc")
+
+        events = _read_events(events_path)
+        assert [e["type"] for e in events] == ["shell_started", "shell_finished"]
+
+    def test_url_with_bad_query_id_shape_is_rejected(self, tmp_path, monkeypatch) -> None:
+        script = tmp_path / "bad_qid_child.py"
+        script.write_text(
+            "import sys\n"
+            "sys.stderr.write("
+            "'Query state can be monitored at: "
+            "https://coordinator-1.internal.example:25443/query_plan?query_id=not-hex\\n')\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+
+        _common.run_impala_shell([sys.executable, str(script)], pool="adhoc")
+
+        events = _read_events(events_path)
+        assert [e["type"] for e in events] == ["shell_started", "shell_finished"]
+
+
+class TestRunImpalaShellEventsPathUnset:
+    def test_events_path_unset_degrades_to_plain_drain(self, tmp_path, monkeypatch) -> None:
+        """No DISPATCH_MONITOR_EVENTS_PATH => no events, execution unaffected."""
+        monkeypatch.delenv("DISPATCH_MONITOR_EVENTS_PATH", raising=False)
+        monkeypatch.delenv("DISPATCH_JOB_ID", raising=False)
+        script = tmp_path / "monitor_child.py"
+        script.write_text(
+            "import sys\n"
+            "sys.stdout.write('hello\\n')\n"
+            "sys.stderr.write("
+            "'Query state can be monitored at: "
+            "https://coordinator-1.internal.example:25443/query_plan?"
+            "query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8\\n')\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+
+        returncode, stdout, stderr = _common.run_impala_shell(
+            [sys.executable, str(script)], pool="adhoc"
+        )
+
+        assert returncode == 0
+        assert stdout.replace(b"\r\n", b"\n") == b"hello\n"
+        assert b"Query state can be monitored at:" in stderr
+        # No sidecar file should exist anywhere the test can observe:
+        # nothing in tmp_path was created by the writer.
+        assert list(tmp_path.glob("*.jsonl")) == []
+
+
+class TestRunImpalaShellUnwritableEventsPath:
+    def test_unwritable_events_path_is_harmless(self, tmp_path, monkeypatch) -> None:
+        """An events path in a non-existent directory must not affect exit
+        code or returned bytes; the writer degrades silently."""
+        bad_path = tmp_path / "does" / "not" / "exist" / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(bad_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+        script = tmp_path / "monitor_child.py"
+        script.write_text(
+            "import sys\n"
+            "sys.stdout.write('hello\\n')\n"
+            "sys.stderr.write("
+            "'Query state can be monitored at: "
+            "https://coordinator-1.internal.example:25443/query_plan?"
+            "query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8\\n')\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+
+        returncode, stdout, stderr = _common.run_impala_shell(
+            [sys.executable, str(script)], pool="adhoc"
+        )
+
+        assert returncode == 0
+        assert stdout.replace(b"\r\n", b"\n") == b"hello\n"
+        assert b"Query state can be monitored at:" in stderr
+        assert not bad_path.exists()
+        assert not bad_path.parent.exists()
+
+
+class TestRunImpalaShellEventShape:
+    def test_events_carry_v2_call_lineage_and_utc_timestamp(self, tmp_path, monkeypatch) -> None:
+        script = tmp_path / "monitor_child.py"
+        script.write_text(
+            "import sys\n"
+            "sys.stderr.write("
+            "'Query state can be monitored at: "
+            "https://coordinator-1.internal.example:25443/query_plan?"
+            "query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8\\n')\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-shape-test")
+        monkeypatch.setenv("DISPATCH_ORCHESTRATOR_CALL_ID", "call-0002")
+        monkeypatch.setenv("DISPATCH_ORCHESTRATOR_CALL_INDEX", "2")
+        monkeypatch.setenv("DISPATCH_ORCHESTRATOR_SCRIPT", "download_to_csv.py")
+        monkeypatch.setattr(_common, "_SHELL_EXECUTION_COUNTER", 0)
+
+        _common.run_impala_shell([sys.executable, str(script)], pool="acs_large")
+
+        events = _read_events(events_path)
+        assert len(events) == 3
+        seqs = [event["seq"] for event in events]
+        assert seqs == [1, 2, 3]
+        for event in events:
+            assert event["v"] == 2
+            assert event["job_id"] == "job-shape-test"
+            assert event["pool"] == "acs_large"
+            assert event["orchestrator_call_id"] == "call-0002"
+            assert event["orchestrator_call_index"] == 2
+            assert event["orchestrator_script"] == "download_to_csv.py"
+            assert event["shell_relation"] == "initial"
+            assert "shell_execution_id" in event and event["shell_execution_id"]
+            assert event["ts"].endswith("Z")
+        assert events[0]["type"] == "shell_started"
+        assert events[1]["type"] == "query_discovered"
+        assert events[2]["type"] == "shell_finished"
+        assert events[2]["returncode"] == 0
+        # Never SQL, never error bodies.
+        for event in events:
+            assert "sql" not in event
+            assert "stderr" not in event
+            assert "detalhes" not in event
+
+    def test_shell_execution_id_is_stable_across_events_in_one_run(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        script = tmp_path / "monitor_child.py"
+        script.write_text(
+            "import sys\n"
+            "sys.stderr.write("
+            "'Query state can be monitored at: "
+            "https://coordinator-1.internal.example:25443/query_plan?"
+            "query_id=1a2b3c4d5e6f7081:9192a3b4c5d6e7f8\\n')\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+
+        _common.run_impala_shell([sys.executable, str(script)], pool="adhoc")
+
+        events = _read_events(events_path)
+        ids = {event["shell_execution_id"] for event in events}
+        assert len(ids) == 1
+
+    def test_two_runs_get_distinct_shell_execution_ids(self, tmp_path, monkeypatch) -> None:
+        script = tmp_path / "plain_child.py"
+        script.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+
+        _common.run_impala_shell([sys.executable, str(script)], pool="adhoc")
+        _common.run_impala_shell([sys.executable, str(script)], pool="adhoc")
+
+        events = _read_events(events_path)
+        ids = {event["shell_execution_id"] for event in events}
+        assert len(ids) == 2
+
+    def test_shell_runs_are_numbered_as_initial_then_pool_fallback(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        script = tmp_path / "plain_child.py"
+        script.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        events_path = tmp_path / "monitor.events.jsonl"
+        monkeypatch.setenv("DISPATCH_MONITOR_EVENTS_PATH", str(events_path))
+        monkeypatch.setenv("DISPATCH_JOB_ID", "job-1")
+        monkeypatch.setenv("DISPATCH_ORCHESTRATOR_CALL_ID", "call-0001")
+        monkeypatch.setenv("DISPATCH_ORCHESTRATOR_CALL_INDEX", "1")
+        monkeypatch.setenv("DISPATCH_ORCHESTRATOR_SCRIPT", "download_to_csv.py")
+        monkeypatch.setattr(_common, "_SHELL_EXECUTION_COUNTER", 0)
+
+        _common.run_impala_shell([sys.executable, str(script)], pool="acs_small")
+        _common.run_impala_shell([sys.executable, str(script)], pool="acs_large")
+
+        started = [event for event in _read_events(events_path) if event["type"] == "shell_started"]
+        assert [event["shell_relation"] for event in started] == [
+            "initial",
+            "orchestrator_pool_fallback",
+        ]
+
+
+class TestRunImpalaShellByteEquivalence:
+    """The returned tuple must be exactly what ``Popen(...).communicate()``
+    returns today, so downstream error classification sees identical input."""
+
+    def test_exit_code_and_bytes_match_communicate_for_success(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.delenv("DISPATCH_MONITOR_EVENTS_PATH", raising=False)
+        script = tmp_path / "echo_child.py"
+        script.write_text(
+            "import sys\n"
+            "sys.stdout.write('stdout-line\\n')\n"
+            "sys.stderr.write('stderr-line\\n')\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+        argv = [sys.executable, str(script)]
+
+        reference = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        expected_stdout, expected_stderr = reference.communicate()
+        expected_returncode = reference.returncode
+
+        returncode, stdout, stderr = _common.run_impala_shell(argv)
+
+        assert returncode == expected_returncode == 0
+        assert stdout == expected_stdout
+        assert stderr == expected_stderr
+
+    def test_exit_code_and_bytes_match_communicate_for_failure(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.delenv("DISPATCH_MONITOR_EVENTS_PATH", raising=False)
+        script = tmp_path / "fail_child.py"
+        script.write_text(
+            "import sys\nsys.stderr.write('AnalysisException: boom\\n')\nsys.exit(1)\n",
+            encoding="utf-8",
+        )
+        argv = [sys.executable, str(script)]
+
+        reference = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        expected_stdout, expected_stderr = reference.communicate()
+        expected_returncode = reference.returncode
+
+        returncode, stdout, stderr = _common.run_impala_shell(argv)
+
+        assert returncode == expected_returncode == 1
+        assert stdout == expected_stdout == b""
+        assert stderr == expected_stderr
+
+
+class TestRunnerOrchestratorEnvMonitorVars:
+    """dispatch.runner._orchestrator_env always sets the monitor env vars."""
+
+    def test_monitor_vars_set_when_queue_unset(self, tmp_path) -> None:
+        from dispatch import runner
+
+        job_dir = tmp_path / "job-1"
+        job_dir.mkdir()
+        env = runner._orchestrator_env(
+            {"id": "job-1", "params": {}},
+            job_dir,
+            {"script": "Query_Impala_Parametrized.py", "argv": []},
+            1,
+        )
+
+        assert env["DISPATCH_JOB_ID"] == "job-1"
+        assert env["DISPATCH_MONITOR_EVENTS_PATH"] == str(job_dir / "monitor.events.jsonl")
+        assert env["DISPATCH_ORCHESTRATOR_CALL_ID"] == "call-0001"
+        assert env["DISPATCH_ORCHESTRATOR_CALL_INDEX"] == "1"
+        assert env["DISPATCH_ORCHESTRATOR_SCRIPT"] == "Query_Impala_Parametrized.py"
+        assert "DISPATCH_REQUEST_POOL" not in env
+
+    def test_monitor_vars_set_when_queue_pinned(self, tmp_path) -> None:
+        from dispatch import runner
+
+        job_dir = tmp_path / "job-2"
+        job_dir.mkdir()
+        env = runner._orchestrator_env(
+            {"id": "job-2", "params": {"queue": "acs_large"}},
+            job_dir,
+            {"script": "download_to_csv.py", "argv": []},
+            2,
+        )
+
+        assert env["DISPATCH_JOB_ID"] == "job-2"
+        assert env["DISPATCH_MONITOR_EVENTS_PATH"] == str(job_dir / "monitor.events.jsonl")
+        assert env["DISPATCH_REQUEST_POOL"] == "acs_large"
+
+    def test_monitor_vars_set_when_queue_is_auto(self, tmp_path) -> None:
+        from dispatch import runner
+
+        job_dir = tmp_path / "job-3"
+        job_dir.mkdir()
+        env = runner._orchestrator_env(
+            {"id": "job-3", "params": {"queue": "auto"}},
+            job_dir,
+            {"script": "download_to_csv.py", "argv": []},
+            1,
+        )
+
+        assert env["DISPATCH_JOB_ID"] == "job-3"
+        assert env["DISPATCH_MONITOR_EVENTS_PATH"] == str(job_dir / "monitor.events.jsonl")
+        assert "DISPATCH_REQUEST_POOL" not in env
+
+    def test_env_copies_os_environ(self, tmp_path, monkeypatch) -> None:
+        from dispatch import runner
+
+        monkeypatch.setenv("SOME_UNRELATED_VAR", "keep-me")
+        job_dir = tmp_path / "job-4"
+        job_dir.mkdir()
+        env = runner._orchestrator_env(
+            {"id": "job-4", "params": {}},
+            job_dir,
+            {"script": "download_to_csv.py", "argv": []},
+            1,
+        )
+
+        assert env["SOME_UNRELATED_VAR"] == "keep-me"

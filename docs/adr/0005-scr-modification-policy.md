@@ -28,6 +28,16 @@ clean up. This ADR defines what is and isn't allowed.
   `os.environ.get('DISPATCH_SCR_DIR', '/ads_storage/dispatch/scr')`.
   `MAILHOST` similarly externalises `mailhost.mclocal.int`. This is what
   makes the mock layer (ADR-0004) viable.
+- **Read-only execution observability at the `impala-shell` seam**, only as a
+  narrowly scoped, versioned event sidecar. This category does not authorize
+  generic instrumentation: it must preserve the public CLI, queue order,
+  retry behavior and timing, email and CSV behavior, and exit codes; preserve
+  every stdout and stderr byte used by downstream classification; and drain
+  both child pipes concurrently so neither pipe can deadlock. Events must use
+  strict, versioned, allowlisted shapes that never contain SQL or error bodies.
+  Sidecar writes must be bounded and fail closed without affecting execution.
+  Every mock scenario and pre/post byte-equivalence evidence are required
+  under the existing two-reviewer process.
 - **Removal of dead code** (e.g. the `--download` path of
   `Query_Impala_Parametrized.py` once the legacy GUI is hard-deleted at
   v1.0; see ADR-0003).
