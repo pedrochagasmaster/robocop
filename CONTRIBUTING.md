@@ -11,9 +11,13 @@ Local developers and Cursor agents follow the same path:
 git switch main
 git pull --ff-only origin main
 git switch -c <short-branch-name>
-python -m pip install -e ".[dev]"
-python -m pytest -n 4 --dist loadfile
+uv sync --extra dev --extra release
+uv run pytest -n 4 --dist loadfile
 ```
+
+`uv sync` creates or updates `.venv` from the committed `uv.lock`. The
+`release` extra makes the pinned `edge_deploy` CLI available locally. Use
+`uv lock --check` before committing dependency metadata changes.
 
 On Windows, the authoritative release validation is the committed local check:
 

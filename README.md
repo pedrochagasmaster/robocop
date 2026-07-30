@@ -43,8 +43,8 @@ For local development on a non-Hadoop machine, use the project environment:
 
 ```bash
 source mocks/dev-env.sh
-python -m pip install -e ".[dev]"
-python -m dispatch
+uv sync --extra dev --extra release
+uv run python -m dispatch
 ```
 
 Contributors should use [CONTRIBUTING.md](CONTRIBUTING.md) for setup,
