@@ -342,7 +342,7 @@ release = [
 
 [package.metadata]
 requires-dist = [
-    { name = "edge-deploy-core", marker = "extra == 'release'", git = "https://github.com/pedrochagasmaster/edge-deploy-core.git?rev=v1.5.3" },
+    { name = "edge-deploy-core", marker = "extra == 'release'", git = "https://github.com/pedrochagasmaster/edge-deploy-core.git?rev=v1.5.4" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "pandas", marker = "extra == 'dev'", specifier = ">=1.5" },
     { name = "pandas", marker = "extra == 'notebook'", specifier = ">=1.5" },
@@ -357,8 +357,8 @@ provides-extras = ["notebook", "dev", "release"]
 
 [[package]]
 name = "edge-deploy-core"
-version = "1.5.3"
-source = { git = "https://github.com/pedrochagasmaster/edge-deploy-core.git?rev=v1.5.3#9663a78e97e0c35e0112b68f85e974a8f4db7ac2" }
+version = "1.5.4"
+source = { git = "https://github.com/pedrochagasmaster/edge-deploy-core.git?rev=v1.5.4#737852a18e64904a917fbdb3dd28d3691e878ee9" }
 dependencies = [
     { name = "paramiko" },
     { name = "pyyaml" },

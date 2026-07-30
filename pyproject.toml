@@ -28,7 +28,7 @@ dev = [
   "pandas>=1.5",
 ]
 release = [
-  "edge-deploy-core @ git+https://github.com/pedrochagasmaster/edge-deploy-core.git@v1.5.3",
+  "edge-deploy-core @ git+https://github.com/pedrochagasmaster/edge-deploy-core.git@v1.5.4",
 ]
 
 [tool.uv]
