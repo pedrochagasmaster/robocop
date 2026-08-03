@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import subprocess
 import os
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -339,7 +340,10 @@ def test_type_command_confirmed_falls_back_to_enter_after_retries() -> None:
     assert send_key.call_args_list[-1].args[0] == "Enter"
 
 
-def test_load_config_fallback_parses_simple_yaml(tmp_path) -> None:
+def test_load_config_fallback_parses_simple_yaml(tmp_path, monkeypatch) -> None:
+    """Fallback parser must run when PyYAML is absent, independent of workstation env."""
+    monkeypatch.setitem(sys.modules, "yaml", None)
+    monkeypatch.delenv("DISPATCH_EMAIL", raising=False)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         'host: "user@edge"\nrepo_path: "/repo"\nterminal_width: 132\n',
@@ -347,3 +351,39 @@ def test_load_config_fallback_parses_simple_yaml(tmp_path) -> None:
     )
     config = load_config(config_path)
     assert config == ProdTuiConfig(host="user@edge", repo_path="/repo", terminal_width=132)
+
+
+def test_from_mapping_uses_dispatch_email_when_operator_email_missing(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DISPATCH_EMAIL", "env-operator@example.com")
+    config = ProdTuiConfig.from_mapping({"host": "user@edge", "repo_path": "/repo"})
+    assert config.operator_email == "env-operator@example.com"
+
+
+def test_from_mapping_uses_dispatch_email_when_operator_email_blank(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DISPATCH_EMAIL", "env-operator@example.com")
+    config = ProdTuiConfig.from_mapping(
+        {"host": "user@edge", "repo_path": "/repo", "operator_email": ""}
+    )
+    assert config.operator_email == "env-operator@example.com"
+
+
+def test_from_mapping_prefers_nonempty_yaml_operator_email(monkeypatch) -> None:
+    monkeypatch.setenv("DISPATCH_EMAIL", "env-operator@example.com")
+    config = ProdTuiConfig.from_mapping(
+        {
+            "host": "user@edge",
+            "repo_path": "/repo",
+            "operator_email": "yaml-operator@example.com",
+        }
+    )
+    assert config.operator_email == "yaml-operator@example.com"
+
+
+def test_from_mapping_operator_email_empty_without_yaml_or_env(monkeypatch) -> None:
+    monkeypatch.delenv("DISPATCH_EMAIL", raising=False)
+    config = ProdTuiConfig.from_mapping({"host": "user@edge", "repo_path": "/repo"})
+    assert config.operator_email == ""
