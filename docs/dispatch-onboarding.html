@@ -1,0 +1,1769 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Offline bilingual analyst onboarding and reference for Dispatch.">
+  <title>Dispatch · Analyst handbook</title>
+  <style>
+    /* Mastercard brand palette - neutrals dominate; brand red/orange/yellow used
+       to communicate, not decorate. Tuned for WCAG 2.2 contrast. */
+    :root {
+      color-scheme: light;
+      --ink: #141413;
+      --muted: #6b6660;
+      --paper: #f7f6f4;
+      --surface: #ffffff;
+      --soft: #f1efeb;
+      --line: #ddd9d3;
+      --accent: #cc0000;
+      --accent-soft: #fbe9e9;
+      --accent-2: #ff5f00;
+      --accent-3: #f79e1b;
+      --navy: #1a1a19;
+      --good: #157347;
+      --warn: #8a5b00;
+      --code: #1a1a19;
+      --code-ink: #f4f2ef;
+      --shadow: 0 18px 50px rgba(20, 20, 19, .10);
+    }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --ink: #f4f2ef;
+      --muted: #b3ada5;
+      --paper: #17150f;
+      --surface: #211f1a;
+      --soft: #2a2822;
+      --line: #3b382f;
+      --accent: #ff6a3d;
+      --accent-soft: #3a241b;
+      --accent-2: #ff7a2e;
+      --accent-3: #f7b53f;
+      --navy: #f4f2ef;
+      --good: #6fce9f;
+      --warn: #f3c36a;
+      --code: #0f0e0b;
+      --code-ink: #f4f2ef;
+      --shadow: 0 18px 50px rgba(0, 0, 0, .30);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font: 16px/1.62 "Mark Pro", "Helvetica Neue", Helvetica, Arial, "Segoe UI", system-ui, sans-serif;
+    }
+    a { color: var(--accent); text-underline-offset: 3px; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    .skip-link { position: fixed; left: 12px; top: -80px; z-index: 20; padding: 8px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); font-weight: 700; }
+    .skip-link:focus { top: 12px; }
+    .site-shell { min-height: 100vh; display: grid; grid-template-columns: 286px minmax(0, 1fr); }
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 26px 22px;
+      background: var(--surface);
+      border-right: 1px solid var(--line);
+      overflow-y: auto;
+    }
+    .brand { display: flex; gap: 11px; align-items: center; margin-bottom: 6px; color: var(--ink); text-decoration: none; }
+    .brand-mark { width: 42px; height: 26px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 30'%3E%3Ccircle cx='15' cy='15' r='15' fill='%23EB001B'/%3E%3Ccircle cx='33' cy='15' r='15' fill='%23F79E1B'/%3E%3Cpath d='M24 3 A15 15 0 0 1 24 27 A15 15 0 0 1 24 3 Z' fill='%23FF5F00'/%3E%3C/svg%3E") center / contain no-repeat; margin-right: 12px; flex: 0 0 auto; }
+    .brand strong { font-size: 1.15rem; letter-spacing: -.02em; }
+    .brand-sub { margin: 0 0 24px; color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .12em; }
+    .site-nav { display: grid; gap: 4px; }
+    .site-nav a { padding: 9px 10px; border-radius: 7px; color: var(--muted); text-decoration: none; font-weight: 600; font-size: .92rem; transition: background-color .12s ease-out, color .12s ease-out; }
+    .site-nav a:hover { background: var(--soft); color: var(--ink); }
+    .site-nav a[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
+    .sidebar-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 24px; }
+    .control {
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--surface);
+      color: var(--ink);
+      cursor: pointer;
+      font: inherit;
+      font-size: .8rem;
+      font-weight: 700;
+      transition: border-color .12s ease-out;
+    }
+    .control:hover { border-color: var(--accent); }
+    .download-link { display: block; margin-top: 10px; padding: 10px; border-radius: 7px; background: var(--navy); color: var(--paper); text-align: center; text-decoration: none; font-size: .82rem; font-weight: 750; transition: filter .12s ease-out; }
+    .download-link:hover { filter: brightness(1.12); }
+    html[data-theme="dark"] .download-link { color: #1a1a19; }
+    .content { min-width: 0; padding: 46px clamp(24px, 6vw, 90px) 30px; }
+    .doc-page { max-width: 1050px; margin: 0 auto; }
+    .doc-page[hidden] { display: none; }
+    .eyebrow { margin: 0 0 9px; color: var(--accent); font: 800 .74rem/1.2 "Mark Pro", "Helvetica Neue", Arial, sans-serif; text-transform: uppercase; letter-spacing: .14em; }
+    h1 { max-width: 850px; margin: 0; font-size: clamp(2.3rem, 5vw, 4.6rem); line-height: .99; letter-spacing: -.04em; }
+    h2 { margin: 55px 0 14px; font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1.12; letter-spacing: -.035em; }
+    h3 { margin: 28px 0 8px; font-size: 1.12rem; }
+    .lede { max-width: 760px; margin: 20px 0 28px; color: var(--muted); font-size: 1.12rem; }
+    .hero-rule { height: 5px; width: 108px; background: linear-gradient(90deg, #eb001b 0%, var(--accent-2) 55%, var(--accent-3) 100%); border-radius: 3px; margin: 25px 0; }
+    .status-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 30px; }
+    .pill { padding: 5px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: .78rem; font-weight: 700; }
+    .run-path { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin: 30px 0; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--line); box-shadow: var(--shadow); }
+    .run-step { padding: 18px; background: var(--surface); }
+    .run-step b { display: block; color: var(--accent); font: 800 .74rem/1.2 Consolas, monospace; letter-spacing: .08em; }
+    .run-step strong { display: block; margin: 8px 0 4px; }
+    .run-step span { color: var(--muted); font-size: .85rem; }
+    .card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 18px 0; }
+    .card { padding: 18px 20px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+    .card h3 { margin-top: 0; }
+    .card p:last-child { margin-bottom: 0; }
+    .callout { margin: 20px 0; padding: 16px 18px; border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line)); background: var(--accent-soft); border-radius: 8px; }
+    .callout.good { border-color: color-mix(in srgb, var(--good) 45%, var(--line)); background: color-mix(in srgb, var(--good) 10%, var(--surface)); }
+    .callout.warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 10%, var(--surface)); }
+    code { font-family: Consolas, "SFMono-Regular", monospace; font-size: .9em; }
+    pre { position: relative; margin: 12px 0 20px; padding: 17px 19px; overflow-x: auto; border-radius: 8px; background: var(--code); color: var(--code-ink); line-height: 1.48; }
+    pre code { font-size: .83rem; }
+    .copy { float: right; margin: -5px -6px 6px 10px; border: 1px solid #4a4741; border-radius: 5px; background: var(--code); color: #e6e2db; cursor: pointer; font: 700 .72rem "Segoe UI", sans-serif; padding: 4px 7px; transition: border-color .12s ease-out, color .12s ease-out; }
+    .copy:hover { border-color: #8a857c; color: #ffffff; }
+    .table-wrap { margin: 16px 0 24px; overflow-x: auto; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+    table { width: 100%; border-collapse: collapse; min-width: 620px; }
+    th, td { padding: 11px 13px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { background: var(--soft); color: var(--muted); font-size: .76rem; text-transform: uppercase; letter-spacing: .07em; }
+    tr:last-child td { border-bottom: 0; }
+    ul, ol { padding-left: 1.35rem; }
+    li { margin: 6px 0; }
+    details { margin: 10px 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+    summary { cursor: pointer; font-weight: 750; }
+    .page-links { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 24px 0; }
+    .page-links a { display: block; min-height: 110px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); text-decoration: none; transition: border-color .15s ease-out, transform .15s ease-out; }
+    .page-links a:hover { border-color: var(--accent); transform: translateY(-2px); }
+    .page-links strong { display: block; color: var(--accent); }
+    .metadata { max-width: 1050px; margin: 54px auto 0; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: .75rem; }
+    .term-grid { display: grid; grid-template-columns: 210px 1fr; gap: 0; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+    .term-grid dt, .term-grid dd { margin: 0; padding: 11px 13px; border-bottom: 1px solid var(--line); }
+    .term-grid dt { background: var(--soft); font-weight: 750; }
+    .term-grid dd { background: var(--surface); }
+    .term-grid dt:last-of-type, .term-grid dd:last-of-type { border-bottom: 0; }
+    .tabs { display: flex; overflow-x: auto; margin-top: 18px; border: 1px solid var(--line); border-bottom: 0; border-radius: 9px 9px 0 0; background: var(--soft); }
+    .tab { flex: 1; min-width: 130px; padding: 11px 14px; border: 0; border-right: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; font: inherit; font-size: .9rem; font-weight: 700; white-space: nowrap; transition: background-color .12s ease-out, color .12s ease-out; }
+    .tab:last-child { border-right: 0; }
+    .tab[aria-selected="true"] { color: var(--accent); background: var(--surface); box-shadow: inset 0 -3px var(--accent); }
+    .tab-panel { display: none; padding: 6px 20px 20px; border: 1px solid var(--line); border-top: 0; border-radius: 0 0 9px 9px; background: var(--surface); }
+    .tab-panel.active { display: block; }
+    .tab-panel > h3:first-of-type { margin-top: 16px; }
+    .checks { list-style: none; margin: 14px 0; padding: 0 16px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+    .checks li { position: relative; margin: 0; padding: 10px 0 10px 30px; border-bottom: 1px solid var(--line); }
+    .checks li:last-child { border-bottom: 0; }
+    .checks li::before { content: "✓"; position: absolute; left: 2px; color: var(--good); font-weight: 800; }
+    .keys { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 18px 0; }
+    .keys section { padding: 4px 16px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+    .keys h3 { margin: 14px 0 6px; font-size: .95rem; }
+    .keys dl { display: grid; grid-template-columns: 92px 1fr; gap: 5px 10px; margin: 0 0 10px; font-size: .88rem; }
+    .keys dt { margin: 0; }
+    .keys dd { margin: 0; color: var(--muted); }
+    .keys kbd { display: inline-block; min-width: 20px; padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; background: var(--soft); color: var(--ink); font: 700 .78rem Consolas, monospace; text-align: center; }
+    .matrix td:first-child { font-weight: 700; }
+    .yes { color: var(--good); font-weight: 800; }
+    .no { color: var(--muted); }
+    @media (max-width: 860px) {
+      .site-shell { display: block; }
+      .sidebar { position: sticky; z-index: 10; height: auto; padding: 12px 14px; border-right: 0; border-bottom: 1px solid var(--line); overflow: visible; }
+      .brand { display: inline-flex; margin-bottom: 3px; }
+      .brand-mark { width: 32px; height: 20px; margin-right: 9px; }
+      .brand-sub { display: none; }
+      .site-nav { display: flex; gap: 4px; margin-top: 8px; overflow-x: auto; padding-bottom: 5px; scrollbar-width: none; }
+      .site-nav::-webkit-scrollbar { display: none; }
+      .site-nav a { flex: 0 0 auto; padding: 7px 8px; font-size: .78rem; }
+      .sidebar-actions { position: absolute; right: 12px; top: 9px; display: flex; margin: 0; }
+      .control { min-height: 34px; padding: 4px 8px; }
+      .download-link { margin-top: 5px; padding: 6px; font-size: .72rem; }
+      .content { padding: 28px 16px 22px; }
+      .run-path { grid-template-columns: 1fr 1fr; }
+      .card-grid, .page-links, .keys { grid-template-columns: 1fr; }
+      .term-grid { grid-template-columns: 1fr; }
+      .term-grid dt { border-bottom: 0; }
+      .tab-panel { padding: 2px 14px 14px; }
+      h1 { font-size: clamp(2.1rem, 12vw, 3.6rem); }
+    }
+    @media (max-width: 480px) {
+      .brand strong { font-size: 1rem; }
+      .sidebar-actions { top: 8px; }
+      .control { font-size: .73rem; }
+      .run-path { grid-template-columns: 1fr; }
+    }
+    @media print {
+      .sidebar, .copy, .skip-link, .tabs { display: none !important; }
+      .site-shell { display: block; }
+      .content { padding: 0; }
+      .doc-page[hidden] { display: none !important; }
+      .tab-panel { display: block; border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 0; }
+      .card, .table-wrap, details { break-inside: avoid; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      * { transition: none !important; }
+    }
+  </style>
+  <script>
+    // Resolve theme and language before first paint to avoid a light flash for dark-mode readers.
+    (() => {
+      const read = key => { try { return localStorage.getItem(key); } catch { return null; } };
+      const savedTheme = read('dispatch-doc-theme');
+      const savedLanguage = read('dispatch-doc-language');
+      const root = document.documentElement;
+      root.dataset.theme = savedTheme === 'dark' || savedTheme === 'light'
+        ? savedTheme
+        : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      root.dataset.language = savedLanguage === 'en' || savedLanguage === 'pt'
+        ? savedLanguage
+        : (navigator.language || '').toLowerCase().startsWith('pt') ? 'pt' : 'en';
+    })();
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content" data-copy-en="Skip to content" data-copy-pt="Pular para o conteúdo">Skip to content</a>
+  <div class="site-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#onboarding" data-page-link="onboarding"><span class="brand-mark" aria-hidden="true"></span><strong>Dispatch</strong></a>
+      <p class="brand-sub" data-copy-en="Analyst handbook" data-copy-pt="Manual do analista">Analyst handbook</p>
+      <nav class="site-nav" id="documentation-navigation" aria-label="Documentation pages">
+        <a href="#onboarding" data-page-link="onboarding" data-label-en="Onboarding" data-label-pt="Onboarding">Onboarding</a>
+        <a href="#tui" data-page-link="tui" data-label-en="TUI Guide" data-label-pt="Guia do TUI">TUI Guide</a>
+        <a href="#cli" data-page-link="cli" data-label-en="CLI Cookbook" data-label-pt="Receitas CLI">CLI Cookbook</a>
+        <a href="#notebook" data-page-link="notebook" data-label-en="Notebook API" data-label-pt="API de notebook">Notebook API</a>
+        <a href="#advisor" data-page-link="advisor" data-label-en="Advisor" data-label-pt="Advisor">Advisor</a>
+        <a href="#troubleshooting" data-page-link="troubleshooting" data-label-en="Troubleshooting" data-label-pt="Solução de problemas">Troubleshooting</a>
+        <a href="#glossary" data-page-link="glossary" data-label-en="Glossary" data-label-pt="Glossário">Glossary</a>
+      </nav>
+      <div class="sidebar-actions">
+        <button class="control" id="language-toggle" type="button" aria-label="Mudar para português">PT</button>
+        <button class="control" id="theme-toggle" type="button" aria-pressed="false">☾ Dark mode</button>
+      </div>
+      <a class="download-link" id="demo-download" download="dispatch_demo.sql" href="data:text/plain;base64,LS0gZGlzcGF0Y2hfZGVtby5zcWwKLS0gT25lIHN0YXRlbWVudCwgb25lIFNFTEVDVC4gRGlzcGF0Y2ggbWF0ZXJpYWxpc2VzIHRoZSByZXN1bHQ7IHRoZSBTUUwgb25seQotLSBkZXNjcmliZXMgaXQuIEtlZXAgdGhlIHBhcnRpdGlvbiBmaWx0ZXI6IGl0IGlzIHdoYXQgbWFrZXMgdGhlIEpvYiBjaGVhcC4KU0VMRUNUCiAgICBkdCwKICAgIGNhcmRfdHlwZSwKICAgIGlucHV0X21vZGUsCiAgICBjb3VudCgqKSAgICAgIEFTIHR4bl9jbnQsCiAgICBzdW0oYW1vdW50KSAgIEFTIGFtb3VudCwKICAgIHN1bShhcHByb3ZlZCkgQVMgYXBwcm92ZWQKRlJPTSBhYV9lbmMuZXZlbnRzCldIRVJFIGR0IEJFVFdFRU4gJzIwMjYtMDEtMDEnIEFORCAnMjAyNi0wMS0zMScKR1JPVVAgQlkgZHQsIGNhcmRfdHlwZSwgaW5wdXRfbW9kZQo="><span data-copy-en="↓ Download demo SQL" data-copy-pt="↓ Baixar SQL de demonstração">↓ Download demo SQL</span></a>
+    </aside>
+
+    <main class="content" id="main-content" tabindex="-1">
+      <article class="doc-page" data-page="onboarding" data-lang="en">
+        <p class="eyebrow">Start here · analyst workflow</p>
+        <h1>Launch Impala Jobs you can walk away from.</h1>
+        <div class="hero-rule"></div>
+        <p class="lede">Dispatch runs on the Hadoop Edge Node. You <code>ssh</code> in, go to the directory holding your SQL, and launch a Job. A detached runner owns the execution, so closing your terminal — or losing the VPN — does not kill the query. This page gets a new analyst from first access to a verified first Job.</p>
+        <div class="status-row"><span class="pill">Offline handbook</span><span class="pill">v1.1.0</span><span class="pill">TUI · CLI · Notebook</span><span class="pill">Survives disconnects</span></div>
+        <div class="run-path" aria-label="Normal run path">
+          <div class="run-step"><b>01</b><strong>Onboard</strong><span>One script, once per account.</span></div>
+          <div class="run-step"><b>02</b><strong>Describe</strong><span>Pick a Source and a Destination.</span></div>
+          <div class="run-step"><b>03</b><strong>Launch</strong><span>Kerberos, Advisor, capacity, then go.</span></div>
+          <div class="run-step"><b>04</b><strong>Supervise</strong><span>Watch the log, collect the result.</span></div>
+        </div>
+
+        <h2>What Dispatch does</h2>
+        <p>Running a long Impala query by hand means holding an SSH session open, remembering which resource pool was not full, re-typing the same <code>impala-shell</code> incantation, and losing everything when the connection drops. Dispatch turns that into a <strong>Job</strong>: a described unit of work, persisted to disk as a manifest, executed by a runner that Dispatch detaches from your terminal, with a run log you can rejoin at any time from any session.</p>
+        <p>It is not a new query engine. Under the Job sit the same production-tested orchestrator scripts the team already trusted, with their queue-cycling retry loop and email notifications intact. Dispatch owns the description, the validation, the refusals, and the supervision — never the SQL execution itself.</p>
+        <div class="card-grid">
+          <div class="card"><h3>Detached execution</h3><p>The runner is not a child of your shell. Disconnect, reconnect from another machine, and <code>dispatch</code> shows the same Job still running.</p></div>
+          <div class="card"><h3>One vocabulary</h3><p>Every Job is exactly one <strong>Source</strong> and one <strong>Destination</strong>. Illegal combinations are refused before anything reaches the cluster.</p></div>
+          <div class="card"><h3>Three front ends, one engine</h3><p>TUI, CLI, and the Python notebook API share the same validation, Kerberos check, Advisor gate, capacity limit, and manifests.</p></div>
+          <div class="card"><h3>Refusals are loud</h3><p>No ticket, an expiring ticket, two Jobs already running, an illegal cell: Dispatch stops with a reason instead of failing halfway through the cluster.</p></div>
+        </div>
+
+        <h2>Source × Destination</h2>
+        <p>These two axes are the whole model. Choose the Source from what your SQL <em>is</em>; choose the Destination from what you need <em>afterwards</em>.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Source</th><th>What it is</th><th>When to use it</th></tr></thead>
+          <tbody>
+            <tr><td><code>SqlFile</code></td><td>A single <code>.sql</code> file holding one <code>SELECT</code>.</td><td>The default. Almost every ad-hoc extraction.</td></tr>
+            <tr><td><code>SqlTemplate</code></td><td>A <code>.sql</code> file with <code>{date_inicio}</code> / <code>{date_fim}</code> placeholders, executed once per month across a range.</td><td>Backfills and monthly partitioned builds.</td></tr>
+            <tr><td><code>ExistingTable</code></td><td>No <code>SELECT</code> at all — the data is already materialised in Impala.</td><td>Exporting a table someone (or an earlier Job) already built.</td></tr>
+          </tbody>
+        </table></div>
+        <div class="table-wrap"><table class="matrix">
+          <thead><tr><th>Source ↓ / Destination →</th><th>Table</th><th>Csv</th><th>Table + Csv</th></tr></thead>
+          <tbody>
+            <tr><td><code>SqlFile</code></td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+            <tr><td><code>SqlTemplate</code></td><td class="yes">✓</td><td class="no">—</td><td class="no">—</td></tr>
+            <tr><td><code>ExistingTable</code></td><td class="no">—</td><td class="yes">✓</td><td class="no">—</td></tr>
+          </tbody>
+        </table></div>
+        <p><code>SqlTemplate</code> is restricted to <code>Table</code> on purpose: monthly partitioned output is meant for downstream analytical use, not bulk CSV export. <code>Table + Csv</code> is decomposed by the runner into table creation followed by a separate CSV export — it never uses the old combined create-and-compress path, and the CSV it writes is uncompressed.</p>
+        <div class="callout"><strong>Where the CSV lands.</strong> Dispatch captures your launch-time working directory <em>once</em>, when it starts. Every CSV destination in that session resolves against that directory — not against the SQL file's location, and not against wherever you <code>cd</code> to later. <code>cd</code> to the right place <em>before</em> you launch.</div>
+
+        <h2>1 · First access</h2>
+        <p>The Release Operator has already deployed the shared tree and activated its runtime. You only run onboarding, once per account:</p>
+        <pre><button class="copy" type="button">Copy</button><code>/ads_storage/dispatch/onboard.sh
+export PATH="$HOME/.local/bin:$PATH"
+which dispatch</code></pre>
+        <p>Run it directly — <strong>not</strong> with <code>source</code>. Onboarding creates or repairs your private state under <code>/ads_storage/$USER/.dispatch</code> (config, jobs, telemetry), writes the thin <code>~/.local/bin/dispatch</code> launcher, and updates your shell profile. It never creates a venv and never runs pip. If it prints the <code>export PATH…</code> line, run that one command; otherwise open a new SSH session.</p>
+        <p>Rerunning onboarding is safe at any time. It replaces a stale launcher without deleting your jobs, your configuration, or an old personal venv.</p>
+        <div class="callout warn"><strong>If onboarding says the shared runtime is missing or invalid,</strong> stop and send the exact output to a Release Operator. Do not run <code>install.sh</code> and do not run <code>pip</code>: analysts do not repair the shared runtime, and a hand-patched environment is the hardest failure to diagnose later.</div>
+
+        <h2>2 · Daily workflow</h2>
+        <ol>
+          <li><code>ssh</code> to the Edge Node and <code>cd</code> to the directory holding your <code>.sql</code> files. This is also where CSVs will land.</li>
+          <li>Make sure you have a Kerberos ticket: <code>klist</code>, and <code>kinit</code> if not. Dispatch refuses to launch with less than five minutes of ticket life remaining.</li>
+          <li>Run <code>dispatch</code> for the interactive cockpit, or <code>dispatch job …</code> for a scripted launch.</li>
+          <li>Launch, then leave. Come back with <code>dispatch</code> or <code>dispatch job logs</code> whenever you want to check on it.</li>
+        </ol>
+        <div class="callout"><strong>Two Jobs at a time.</strong> Dispatch admits at most two simultaneously Running or Pending Jobs per analyst. A third is hard-refused — it does <em>not</em> queue silently behind the others. Cancel something or wait.</div>
+
+        <h2>3 · Write the SQL</h2>
+        <p>A <code>SqlFile</code> holds <strong>one statement</strong>: a single <code>SELECT</code>. Dispatch materialises the result for you, so the file should describe rows, not perform DDL.</p>
+        <pre><button class="copy" type="button">Copy</button><code>SELECT
+    dt,
+    card_type,
+    input_mode,
+    count(*)      AS txn_cnt,
+    sum(amount)   AS amount,
+    sum(approved) AS approved
+FROM aa_enc.events
+WHERE dt BETWEEN '2026-01-01' AND '2026-01-31'
+GROUP BY dt, card_type, input_mode</code></pre>
+        <p>Use <strong>Download demo SQL</strong> in the navigation to get this file, then point a Job at it. Two habits prevent most expensive Jobs:</p>
+        <ul>
+          <li><strong>Always filter the partition column.</strong> An unfiltered scan of a partitioned table is the single most common way to fill a resource pool and get rejected. The Advisor flags it.</li>
+          <li><strong>Never <code>SELECT *</code> without a filter.</strong> That is an error-severity Advisor finding, and clearing it requires an explicit acknowledgement.</li>
+        </ul>
+        <h3>Templates</h3>
+        <p>A <code>SqlTemplate</code> is the same idea with two placeholders that Dispatch substitutes once per month over the range you give it:</p>
+        <pre><button class="copy" type="button">Copy</button><code>SELECT dt, card_type, count(*) AS txn_cnt
+FROM aa_enc.events
+WHERE dt BETWEEN '{date_inicio}' AND '{date_fim}'
+GROUP BY dt, card_type</code></pre>
+        <p>Dates are <code>YYYY-MM-DD</code>. A range longer than thirteen months is an error-severity Advisor finding, not a suggestion.</p>
+
+        <h2>4 · Your first Job</h2>
+        <p>Do this once before touching real work, so you learn the flow without debugging your query at the same time.</p>
+        <div class="tabs" role="tablist" aria-label="Ways to launch">
+          <button class="tab" id="tab-tui-en" type="button" role="tab" aria-selected="true" aria-controls="panel-tui-en">TUI (start here)</button>
+          <button class="tab" id="tab-cli-en" type="button" role="tab" aria-selected="false" aria-controls="panel-cli-en">CLI</button>
+          <button class="tab" id="tab-nb-en" type="button" role="tab" aria-selected="false" aria-controls="panel-nb-en">Notebook</button>
+        </div>
+        <div class="tab-panel active" id="panel-tui-en" role="tabpanel" aria-labelledby="tab-tui-en">
+          <p>The TUI shows every choice on screen and disables the illegal ones for you — the fastest way to learn what the fields mean.</p>
+          <pre><button class="copy" type="button">Copy</button><code>cd /path/to/your/sql/files
+dispatch</code></pre>
+          <ol>
+            <li>Press <kbd>N</kbd> for the New Job wizard.</li>
+            <li>Leave <strong>Source</strong> on <code>SqlFile</code> and <strong>Destination</strong> on <code>Csv</code>. Illegal destinations grey out automatically.</li>
+            <li>Pick your file from the SQL picker (it lists the <code>.sql</code> files in the launch directory), or type the path.</li>
+            <li>Leave <strong>Execution Queue</strong> empty — that is <code>auto</code>, and it cycles every pool until one accepts.</li>
+            <li>Press <kbd>P</kbd> to preview the generated SQL. Read it. This is what actually runs.</li>
+            <li>Press <kbd>L</kbd> to launch. If the Advisor reports errors you get a gate: read the findings, then confirm or go back and fix the SQL.</li>
+            <li>You land back on the Overview. Press <kbd>V</kbd> to follow the log live.</li>
+          </ol>
+        </div>
+        <div class="tab-panel" id="panel-cli-en" role="tabpanel" aria-labelledby="tab-cli-en">
+          <p>Same Job, one command. This is what you script once a configuration is settled.</p>
+          <pre><button class="copy" type="button">Copy</button><code>cd /path/to/your/sql/files
+
+dispatch job launch --source SqlFile --destination Csv \
+  --sql dispatch_demo.sql --table demo --yes
+
+dispatch job list
+dispatch job logs JOB_ID --follow
+dispatch job wait JOB_ID --timeout 1800 --json</code></pre>
+          <p><code>--yes</code> is mandatory: it is the non-interactive stand-in for the TUI's launch dialog. Add <code>--acknowledge-advisor</code> only when the Advisor reports error-severity findings and you have read them.</p>
+        </div>
+        <div class="tab-panel" id="panel-nb-en" role="tabpanel" aria-labelledby="tab-nb-en">
+          <p>Same Job from Jupyter on the Edge Node. The notebook API wraps the CLI, so nothing is skipped.</p>
+          <pre><button class="copy" type="button">Copy</button><code>from dispatch.notebook import Dispatch
+
+d = Dispatch(cwd="~/sql")
+
+job = d.launch(source="SqlFile", destination="Csv",
+               sql="dispatch_demo.sql", table="demo")
+job.watch()          # live state and log tail until terminal
+job.succeeded        # True
+job.to_df()          # the Result, as a DataFrame</code></pre>
+          <p>Every call is a real Job — manifest, detached runner, the two-Job cap, all of it. Expect minutes, not milliseconds. There is no faster unaudited tier.</p>
+        </div>
+
+        <h2>5 · Check that it worked</h2>
+        <p>All of these should be true. If any is false, go to <a href="#troubleshooting" data-page-link="troubleshooting">Troubleshooting</a>.</p>
+        <ul class="checks">
+          <li>The Job reached state <code>Succeeded</code> in the TUI Overview, or <code>dispatch job wait</code> exited <code>0</code>.</li>
+          <li>The CSV exists in the directory you launched from — uncompressed, named for the table you asked for.</li>
+          <li>The run log ends cleanly, with no classified error such as <code>SYNTAX_ERROR</code>, <code>TABLE_NOT_FOUND</code>, or <code>MEMORY_LIMIT_EXCEEDED</code>.</li>
+          <li>If you asked for a <code>Table</code> destination, the table exists in the schema you chose, under your EID prefix.</li>
+          <li>The notification email arrived, if you supplied a recipient.</li>
+        </ul>
+        <div class="callout good"><strong>You are onboarded</strong> when you can launch a Job, explain which Source and Destination it used, close your terminal without worrying, and find the log again afterwards.</div>
+
+        <h2>Job states</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>State</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>Pending</code></td><td>Brief window between launch and the runner spawning the orchestrator. Not shown in the dashboard.</td></tr>
+            <tr><td><code>Running</code></td><td>The orchestrator process is alive. Counts against your two-Job cap.</td></tr>
+            <tr><td><code>Succeeded</code></td><td>The orchestrator exited <code>0</code>.</td></tr>
+            <tr><td><code>Failed</code></td><td>Non-zero exit, or a fatal classified error such as <code>SYNTAX_ERROR</code> or <code>TABLE_NOT_FOUND</code>.</td></tr>
+            <tr><td><code>Cancelled</code></td><td>You killed it, from the TUI or with <code>dispatch job cancel</code>.</td></tr>
+          </tbody>
+        </table></div>
+        <p>A finished Job stays in the active dashboard for <strong>seven days</strong>, then collapses into History (<kbd>H</kbd>). It is never deleted.</p>
+
+        <h2>Resource Pools</h2>
+        <p>An Impala Resource Pool is the queue that governs concurrent query resources. Leaving the selection empty means <code>auto</code>: cycle every pool until one accepts the query, which is what you want almost always. Restrict it only when you know the shape of your query.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Pool</th><th>Use for</th></tr></thead>
+          <tbody>
+            <tr><td><code>adhoc_fast</code></td><td>Short or simple queries. Fastest to be admitted.</td></tr>
+            <tr><td><code>adhoc_small</code></td><td>Light queries with a modest footprint.</td></tr>
+            <tr><td><code>acs_small</code></td><td>Light ACS workloads.</td></tr>
+            <tr><td><code>acs_large</code></td><td>Heavy or long-running queries.</td></tr>
+            <tr><td><code>adhoc</code></td><td>General pool: long-running or resource-heavy queries.</td></tr>
+          </tbody>
+        </table></div>
+        <p>If you select several, they are tried in that cycle-priority order regardless of the order you clicked them.</p>
+
+        <h2>Where your files live</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Path</th><th>Contents</th></tr></thead>
+          <tbody>
+            <tr><td><code>/ads_storage/dispatch/</code></td><td>The shared deployment. Read-only to analysts; the Release Operator owns it.</td></tr>
+            <tr><td><code>/ads_storage/$USER/.dispatch/jobs/</code></td><td>One manifest per Job, plus its run log. This is the system of record.</td></tr>
+            <tr><td><code>/ads_storage/$USER/.dispatch/telemetry/</code></td><td>Offline usage events, JSONL.</td></tr>
+            <tr><td><code>/ads_storage/$USER/.dispatch/notebook/</code></td><td>Notebook workspace: Inline SQL and Results for notebook-launched Jobs.</td></tr>
+            <tr><td><code>~/.local/bin/dispatch</code></td><td>The thin launcher onboarding wrote. Rerun onboarding to repair it.</td></tr>
+            <tr><td>Your launch directory</td><td>Where CSV results land. Captured once, at startup.</td></tr>
+          </tbody>
+        </table></div>
+        <div class="callout"><strong>Usage telemetry.</strong> Dispatch records offline events — sessions, screens, Job launches, refusals — so operators can see who uses it and how. There are no network calls; writes go through a bounded background queue so storage latency never blocks the TUI or a Job. Opt out with <code>DISPATCH_TELEMETRY=0</code>. Inspect with <code>dispatch telemetry who --days 30</code> and <code>dispatch telemetry summary --days 30</code>.</div>
+
+        <h2>Go deeper</h2>
+        <div class="page-links">
+          <a href="#tui" data-page-link="tui"><strong>TUI Guide</strong>Every screen and every key.</a>
+          <a href="#cli" data-page-link="cli"><strong>CLI Cookbook</strong>Flags, JSON output, exit codes.</a>
+          <a href="#notebook" data-page-link="notebook"><strong>Notebook API</strong>Jobs and Results from Python.</a>
+          <a href="#advisor" data-page-link="advisor"><strong>Advisor</strong>What the SQL rules check and why.</a>
+          <a href="#troubleshooting" data-page-link="troubleshooting"><strong>Troubleshooting</strong>The failures you will actually hit.</a>
+          <a href="#glossary" data-page-link="glossary"><strong>Glossary</strong>The vocabulary, defined once.</a>
+        </div>
+        <p>This handbook is standalone. The repository documentation continues from here: <code>README.md</code> for the full CLI reference, <code>onboarding.md</code> for the short setup flow, <code>docs/notebook-api.md</code> for the Python reference, <code>docs/query-optimization-advisor-spec.md</code> for the Advisor specification, and <code>docs/adr/</code> for why the design is what it is.</p>
+      </article>
+
+      <article class="doc-page" data-page="tui" data-lang="en" hidden>
+        <p class="eyebrow">Reference · interactive cockpit</p>
+        <h1>TUI Guide</h1>
+        <div class="hero-rule"></div>
+        <p class="lede">Running <code>dispatch</code> with no subcommand opens the Textual TUI. It is a supervision cockpit: launch Jobs, watch their logs live, cancel them, and browse Impala tables. Every screen prints its keys in the footer, and <kbd>?</kbd> opens the full list from anywhere.</p>
+
+        <h2>Screens</h2>
+        <div class="card-grid">
+          <div class="card"><h3>Overview</h3><p>The jobs cockpit. Running Jobs first, then everything finished in the last seven days. The preview pane follows your selection.</p></div>
+          <div class="card"><h3>New Job</h3><p>The launch wizard: Source, Destination, queue, SQL file, schema and table, dates, notification email. Illegal destinations disable themselves.</p></div>
+          <div class="card"><h3>Job Detail</h3><p>The full run log, following live. Search it, jump to top or bottom, copy the Job ID, clone the Job, or cancel it.</p></div>
+          <div class="card"><h3>History</h3><p>Jobs that finished more than seven days ago. Sortable and paged; nothing is ever deleted.</p></div>
+          <div class="card"><h3>Impala Browser</h3><p>List tables in a schema, describe one, and bulk-drop tables you own. Dropping requires typing <code>I AM SURE</code>.</p></div>
+          <div class="card"><h3>SQL Preview</h3><p>The SQL exactly as it will be submitted, after template substitution. Read it before every unfamiliar launch.</p></div>
+        </div>
+
+        <h2>Keys</h2>
+        <div class="keys">
+          <section>
+            <h3>Global</h3>
+            <dl>
+              <dt><kbd>Q</kbd></dt><dd>Quit Dispatch</dd>
+              <dt><kbd>?</kbd></dt><dd>Toggle the help screen</dd>
+              <dt><kbd>Ctrl</kbd>+<kbd>P</kbd></dt><dd>Command palette (all destinations, plus kinit)</dd>
+              <dt><kbd>F2</kbd></dt><dd>Collapse or expand the sidebar</dd>
+              <dt><kbd>Tab</kbd></dt><dd>Move focus between controls</dd>
+            </dl>
+            <h3>Overview</h3>
+            <dl>
+              <dt><kbd>N</kbd></dt><dd>New Job wizard</dd>
+              <dt><kbd>V</kbd></dt><dd>View full logs for the selected Job</dd>
+              <dt><kbd>C</kbd></dt><dd>Cancel the selected Job</dd>
+              <dt><kbd>/</kbd></dt><dd>Filter Jobs (<kbd>Esc</kbd> clears)</dd>
+              <dt><kbd>H</kbd></dt><dd>Open History</dd>
+              <dt><kbd>B</kbd></dt><dd>Open the Impala Browser</dd>
+              <dt><kbd>↑</kbd><kbd>↓</kbd> <kbd>J</kbd><kbd>K</kbd></dt><dd>Move the selection; the preview follows</dd>
+              <dt><kbd>Enter</kbd></dt><dd>Open detail for the selected row</dd>
+            </dl>
+          </section>
+          <section>
+            <h3>New Job</h3>
+            <dl>
+              <dt><kbd>↑</kbd><kbd>↓</kbd></dt><dd>Pick a SQL file from the launch directory</dd>
+              <dt><kbd>L</kbd></dt><dd>Launch (requires Kerberos)</dd>
+              <dt><kbd>P</kbd></dt><dd>Preview the generated SQL</dd>
+              <dt><kbd>E</kbd></dt><dd>Edit the SQL file in <code>$EDITOR</code></dd>
+              <dt><kbd>K</kbd></dt><dd>Refresh Kerberos (<code>kinit</code>)</dd>
+              <dt><kbd>M</kbd></dt><dd>Toggle the legal-cells matrix</dd>
+              <dt><kbd>B</kbd> <kbd>Esc</kbd></dt><dd>Back to Overview</dd>
+            </dl>
+            <h3>Job Detail</h3>
+            <dl>
+              <dt><kbd>Space</kbd> <kbd>F</kbd></dt><dd>Pause or resume log follow</dd>
+              <dt><kbd>g</kbd> <kbd>G</kbd></dt><dd>Jump to top / bottom of the log</dd>
+              <dt><kbd>/</kbd></dt><dd>Search the log</dd>
+              <dt><kbd>Y</kbd></dt><dd>Copy the Job ID</dd>
+              <dt><kbd>R</kbd></dt><dd>Clone a finished Job into New Job</dd>
+              <dt><kbd>M</kbd></dt><dd>Recover the Impala query identity</dd>
+              <dt><kbd>C</kbd></dt><dd>Cancel a running Job (with confirmation)</dd>
+            </dl>
+          </section>
+          <section>
+            <h3>History</h3>
+            <dl>
+              <dt><kbd>S</kbd></dt><dd>Cycle sort: date → state → table</dd>
+              <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Previous / next page</dd>
+              <dt><kbd>Enter</kbd></dt><dd>View logs for the selected row</dd>
+              <dt><kbd>B</kbd> <kbd>Esc</kbd></dt><dd>Back</dd>
+            </dl>
+            <h3>SQL Preview</h3>
+            <dl>
+              <dt><kbd>Y</kbd></dt><dd>Copy the SQL to the clipboard</dd>
+              <dt><kbd>Enter</kbd> <kbd>Esc</kbd></dt><dd>Back to the form</dd>
+            </dl>
+          </section>
+          <section>
+            <h3>Impala Browser</h3>
+            <dl>
+              <dt><kbd>S</kbd></dt><dd>Load tables for the schema and filter</dd>
+              <dt><kbd>O</kbd></dt><dd>Cycle sort: name → size (click Size to reverse)</dd>
+              <dt><kbd>X</kbd></dt><dd>Toggle the highlighted table's selection</dd>
+              <dt><kbd>A</kbd></dt><dd>Select all loaded tables (toggle)</dd>
+              <dt><kbd>Enter</kbd></dt><dd>Describe the highlighted table</dd>
+              <dt><kbd>D</kbd></dt><dd>Drop checked tables (type <code>I AM SURE</code>, then <code>DROP</code>)</dd>
+              <dt><kbd>B</kbd> <kbd>Esc</kbd></dt><dd>Back</dd>
+            </dl>
+            <h3>Advisor gate</h3>
+            <dl>
+              <dt><kbd>Y</kbd></dt><dd>Launch anyway, acknowledging the findings</dd>
+              <dt><kbd>N</kbd> <kbd>Esc</kbd></dt><dd>Cancel and go back to the form</dd>
+              <dt><kbd>↑</kbd><kbd>↓</kbd> <kbd>PgUp</kbd><kbd>PgDn</kbd></dt><dd>Scroll the findings</dd>
+            </dl>
+          </section>
+        </div>
+
+        <h2>The New Job form, field by field</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Field</th><th>Applies to</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Source</strong></td><td>All</td><td><code>SqlFile</code>, <code>SqlTemplate</code>, or <code>ExistingTable</code>. Changing it re-enables or disables destinations.</td></tr>
+            <tr><td><strong>Destination</strong></td><td>All</td><td><code>Table</code>, <code>Csv</code>, or <code>Table+Csv</code>. Illegal cells cannot be selected. <kbd>M</kbd> shows the matrix.</td></tr>
+            <tr><td><strong>Execution Queue</strong></td><td>All</td><td>Empty means <code>auto</code>: cycle all pools. Selecting several tries them in cycle-priority order.</td></tr>
+            <tr><td><strong>SQL File</strong></td><td>SqlFile, SqlTemplate</td><td>Pick from the picker or type a path. Relative paths resolve against the launch directory.</td></tr>
+            <tr><td><strong>Schema</strong> / <strong>Existing Table</strong></td><td>ExistingTable</td><td><code>coe_enc</code>, <code>aa_enc</code>, or a custom schema, plus the table name.</td></tr>
+            <tr><td><strong>Schema</strong></td><td>Table, Table+Csv</td><td>Destination schema. Defaults to <code>aa_enc</code>.</td></tr>
+            <tr><td><strong>Table Name</strong></td><td>Table, Table+Csv</td><td>You type the suffix; your EID prefix is applied automatically and shown inline. Default suffix <code>dispatch_result</code>.</td></tr>
+            <tr><td><strong>Start / End Date</strong></td><td>SqlTemplate</td><td><code>YYYY-MM-DD</code>. The template runs once per month across the range.</td></tr>
+            <tr><td><strong>Email</strong> / <strong>Subject</strong></td><td>All</td><td>Notification recipients (comma-separated) and subject line. Prefilled from <code>DISPATCH_EMAIL</code> when set.</td></tr>
+          </tbody>
+        </table></div>
+        <div class="callout"><strong>The form remembers the safe parts.</strong> Dispatch stores dataset-independent defaults so the wizard opens where you left it, and collapses the legal-cells matrix once you have seen it. Paths, table names, and dates are yours to set per Job.</div>
+
+        <h2>What can stop a launch</h2>
+        <p>These refusals happen before anything reaches the cluster. All of them are the tool working correctly.</p>
+        <ul>
+          <li><strong>No Kerberos ticket, or fewer than five minutes left.</strong> Press <kbd>K</kbd> to <code>kinit</code> from inside the TUI, then launch again.</li>
+          <li><strong>Two Jobs already Running or Pending.</strong> The cap is per analyst and it is hard. Cancel one or wait.</li>
+          <li><strong>An illegal Source × Destination cell.</strong> The TUI prevents it; the CLI refuses it with exit code <code>2</code>.</li>
+          <li><strong>Missing SQL file, or a bad date range.</strong> Fix the field the validation summary points at.</li>
+          <li><strong>Advisor error-severity findings.</strong> You get the gate. Read the findings, then <kbd>Y</kbd> to launch as written or <kbd>N</kbd> to fix the SQL first.</li>
+        </ul>
+        <div class="page-links">
+          <a href="#cli" data-page-link="cli"><strong>CLI Cookbook</strong>The same Jobs, scripted.</a>
+          <a href="#advisor" data-page-link="advisor"><strong>Advisor</strong>What the gate is telling you.</a>
+          <a href="#troubleshooting" data-page-link="troubleshooting"><strong>Troubleshooting</strong>When the TUI will not start.</a>
+        </div>
+      </article>
+
+      <article class="doc-page" data-page="cli" data-lang="en" hidden>
+        <p class="eyebrow">Reference · non-interactive</p>
+        <h1>CLI Cookbook</h1>
+        <div class="hero-rule"></div>
+        <p class="lede">The <code>dispatch job</code> subcommands launch and supervise Jobs without opening the TUI. They reuse the same validation, Kerberos checks, Advisor gates, capacity admission, manifest persistence, telemetry, and detached-runner handoff — they simply never instantiate a Textual screen. <code>python -m dispatch job …</code> is identical.</p>
+
+        <h2>Launch</h2>
+        <pre><button class="copy" type="button">Copy</button><code>cd /path/to/sql/files
+
+# SqlFile -> Csv
+dispatch job launch --source SqlFile --destination Csv \
+  --sql query.sql --table report --yes
+
+# SqlTemplate -> Table, one run per month across the range
+dispatch job launch --source SqlTemplate --destination Table \
+  --sql monthly.sql --schema aa_enc --table monthly_out \
+  --start-date 2026-01-01 --end-date 2026-01-31 --yes
+
+# ExistingTable -> Csv, no SELECT involved
+dispatch job launch --source ExistingTable --destination Csv \
+  --existing-table aa_enc.events_existing --yes</code></pre>
+
+        <h3>Launch flags</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Flag</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>--source</code></td><td><code>SqlFile</code>, <code>SqlTemplate</code>, or <code>ExistingTable</code>. Required.</td></tr>
+            <tr><td><code>--destination</code></td><td><code>Table</code>, <code>Csv</code>, or <code>Table+Csv</code>. Required, and must be a legal cell.</td></tr>
+            <tr><td><code>--sql</code></td><td>SQL file path. Relative paths resolve against the invocation CWD.</td></tr>
+            <tr><td><code>--existing-table</code></td><td><code>schema.table</code> for <code>ExistingTable → Csv</code>.</td></tr>
+            <tr><td><code>--schema</code></td><td>Destination schema. Default <code>aa_enc</code>.</td></tr>
+            <tr><td><code>--table</code></td><td>Destination table suffix (your EID prefix is applied) or a full <code>EID_name</code>. Default <code>dispatch_result</code>.</td></tr>
+            <tr><td><code>--start-date</code> / <code>--end-date</code></td><td><code>SqlTemplate</code> date range, <code>YYYY-MM-DD</code>.</td></tr>
+            <tr><td><code>--email</code> / <code>--subject</code></td><td>Notification recipients and subject. Default subject <code>Dispatch Job</code>.</td></tr>
+            <tr><td><code>--queue</code></td><td>Resource Pool selection: <code>auto</code> (default) or a comma-separated subset of the pools.</td></tr>
+            <tr><td><code>--yes</code></td><td><strong>Required.</strong> The non-interactive substitute for the TUI launch dialog.</td></tr>
+            <tr><td><code>--acknowledge-advisor</code></td><td>Required when the Advisor reports error-severity findings.</td></tr>
+            <tr><td><code>--json</code></td><td>One JSON document on stdout; diagnostics go to stderr.</td></tr>
+          </tbody>
+        </table></div>
+
+        <h2>Supervise</h2>
+        <pre><button class="copy" type="button">Copy</button><code>dispatch job list
+dispatch job list --state Running --json
+dispatch job show JOB_ID --json
+dispatch job logs JOB_ID --lines 100
+dispatch job logs JOB_ID --follow
+dispatch job wait JOB_ID --timeout 600 --json
+dispatch job cancel JOB_ID --yes</code></pre>
+        <p><code>list</code> reconciles stale manifests before printing, so a Job whose runner died is reported accurately rather than as perpetually Running.</p>
+
+        <h2>JSON output</h2>
+        <p>Add <code>--json</code> to any subcommand for exactly one document on stdout. Everything else — warnings, progress, diagnostics — goes to stderr, so you can pipe stdout straight into <code>jq</code>.</p>
+        <pre><button class="copy" type="button">Copy</button><code>dispatch job launch --source SqlFile --destination Csv \
+  --sql q.sql --table out --yes --json
+# {"job_id": "20260727T120000Z_abc123", "state": "Pending", "pid": null}
+
+dispatch job list --json
+# {"jobs": [{"id": "...", "state": "Running", "source": "SqlFile", ...}]}
+
+dispatch job wait JOB_ID --json
+# {"job_id": "...", "state": "Succeeded", "exit_code": 0, "timed_out": false}</code></pre>
+
+        <h2>Exit codes</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>0</code></td><td>Successful command — and, for <code>wait</code>, the Job Succeeded.</td></tr>
+            <tr><td><code>1</code></td><td><code>wait</code> only: the Job completed unsuccessfully or was Cancelled.</td></tr>
+            <tr><td><code>2</code></td><td>Invalid invocation, missing <code>--yes</code> or Advisor acknowledgement, or launch validation failure. Argparse usage errors also exit <code>2</code>.</td></tr>
+            <tr><td><code>3</code></td><td>Unknown, malformed, or unsafe Job ID.</td></tr>
+            <tr><td><code>4</code></td><td>Operational refusal or failure: Kerberos, capacity, timeout, handoff, cancel.</td></tr>
+          </tbody>
+        </table></div>
+        <div class="callout"><strong>Scripting the distinction that matters.</strong> Exit <code>2</code> means <em>you</em> asked for something invalid — the query never ran. Exit <code>4</code> means the request was valid but the environment refused it, so a retry may succeed. Exit <code>1</code> from <code>wait</code> means the query ran and failed: read the log, not the flags.</div>
+
+        <h2>A scripted end-to-end run</h2>
+        <pre><button class="copy" type="button">Copy</button><code>#!/usr/bin/env bash
+set -euo pipefail
+cd /path/to/sql/files
+
+job_id=$(dispatch job launch \
+  --source SqlFile --destination Csv \
+  --sql monthly_report.sql --table monthly_report \
+  --queue adhoc_fast,adhoc --yes --json | jq -r .job_id)
+
+echo "launched ${job_id}"
+
+if dispatch job wait "${job_id}" --timeout 3600 --json | jq -e '.state == "Succeeded"' >/dev/null; then
+  echo "done: $(ls -1 *monthly_report*.csv)"
+else
+  dispatch job logs "${job_id}" --lines 200
+  exit 1
+fi</code></pre>
+
+        <h2>Safety rules</h2>
+        <ul>
+          <li>Launches and cancellations never proceed silently: pass <code>--yes</code>.</li>
+          <li>Advisor error findings additionally require <code>--acknowledge-advisor</code>. There is no environment variable to make this automatic — that is deliberate.</li>
+          <li>Job paths that are missing, corrupt, symlink-escaped, or outside the jobs root are rejected with exit <code>3</code>.</li>
+        </ul>
+
+        <h2>Telemetry commands</h2>
+        <pre><button class="copy" type="button">Copy</button><code>dispatch telemetry who --days 30
+dispatch telemetry summary --days 30</code></pre>
+        <p>Both read local JSONL. Nothing leaves the Edge Node. Set <code>DISPATCH_TELEMETRY=0</code> to stop recording.</p>
+        <div class="page-links">
+          <a href="#tui" data-page-link="tui"><strong>TUI Guide</strong>The interactive equivalent.</a>
+          <a href="#notebook" data-page-link="notebook"><strong>Notebook API</strong>The same CLI, in Python.</a>
+          <a href="#troubleshooting" data-page-link="troubleshooting"><strong>Troubleshooting</strong>Decoding a refusal.</a>
+        </div>
+      </article>
+
+      <article class="doc-page" data-page="notebook" data-lang="en" hidden>
+        <p class="eyebrow">Reference · Python</p>
+        <h1>Notebook API</h1>
+        <div class="hero-rule"></div>
+        <p class="lede"><code>dispatch.notebook</code> runs and monitors Jobs from Jupyter — or any Python script — on the Edge Node. It wraps the <code>dispatch job</code> CLI, reached through Python objects instead of argv and exit codes. Same validation, same Kerberos check, same Advisor gate, same two-Job cap, same manifests, same detached runners.</p>
+
+        <h2>Quick start</h2>
+        <pre><button class="copy" type="button">Copy</button><code>from dispatch.notebook import Dispatch
+
+d = Dispatch(cwd="~/sql")            # where your .sql files live
+
+# SQL written here, loaded straight into a DataFrame
+df = d.sql("SELECT dt, count(*) AS c FROM aa_enc.events GROUP BY dt").to_df()
+
+# a table you already have
+d.table("aa_enc.events", limit=1000).to_df()
+
+# or a Job from one of your files, watched while it runs
+job = d.launch(source="SqlFile", destination="Csv",
+               sql="monthly_report.sql", table="report")
+job.watch()                          # live state and log tail, refreshed in place
+job.succeeded                        # True
+job.to_df()                          # the Result, as a DataFrame
+
+d.jobs(state="Running")              # supervise everything else</code></pre>
+        <div class="callout warn"><strong>Every call is a real Job.</strong> Validation, Kerberos, Advisor gate, two-Job cap, manifest, detached runner. Expect minutes, not milliseconds. There is deliberately no faster unaudited query tier, so do not write a loop that calls <code>d.sql()</code> per row.</div>
+
+        <h2>The session</h2>
+        <pre><button class="copy" type="button">Copy</button><code>d = Dispatch(cwd=None, command=None, env=None, timeout=None, workspace=None)</code></pre>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Argument</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>cwd</code></td><td>Directory the CLI runs in. Relative <code>sql</code> paths resolve here, and CSVs for Jobs you name land here. Defaults to the notebook's working directory.</td></tr>
+            <tr><td><code>command</code></td><td>CLI invocation. Defaults to <code>$DISPATCH_CLI</code> when set, else <code>python -m dispatch</code> using the kernel's interpreter.</td></tr>
+            <tr><td><code>env</code></td><td>Extra environment variables for the CLI, e.g. <code>{"DISPATCH_MOCK_SCENARIO": "slow"}</code> in development.</td></tr>
+            <tr><td><code>timeout</code></td><td>Seconds any single CLI command may take before <code>OperationalError</code>.</td></tr>
+            <tr><td><code>workspace</code></td><td>Notebook workspace for Inline SQL and Results. Defaults to <code>&lt;data_root&gt;/.dispatch/notebook</code>.</td></tr>
+          </tbody>
+        </table></div>
+        <p>If the kernel cannot import <code>dispatch</code>, point the library at the installed launcher instead:</p>
+        <pre><button class="copy" type="button">Copy</button><code>export DISPATCH_CLI=~/.local/bin/dispatch</code></pre>
+
+        <h2>Inline SQL</h2>
+        <pre><button class="copy" type="button">Copy</button><code>job = d.sql(
+    "SELECT * FROM aa_enc.events WHERE dt = '2026-07-01'",
+    destination="Csv",       # Csv (default), Table, or Table+Csv
+    table=None,              # required for Table destinations
+    queue="auto",
+    wait_for_slot=300,       # wait up to 5 min for a launch slot instead of failing
+)</code></pre>
+        <p><code>sql()</code> saves the text as <strong>Inline SQL</strong> in the Notebook workspace and launches it as an ordinary <code>SqlFile</code> Job. It submits immediately and returns the <code>Job</code>, so <code>d.sql(...)</code> alone starts work and <code>d.sql(...).to_df()</code> runs and fetches in one line. There is no lazy relation to chain onto, because Dispatch has no query planner to defer to.</p>
+        <p>The workspace exists so your working directory only ever receives files you asked for by name. Inline SQL and its Results live under Dispatch's directory, not yours.</p>
+        <pre><button class="copy" type="button">Copy</button><code># materialise a table instead of fetching rows
+d.sql("SELECT ...", destination="Table", table="weekly_agg").wait()</code></pre>
+
+        <h2>Errors</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Exception</th><th>Raised when</th></tr></thead>
+          <tbody>
+            <tr><td><code>UsageError</code></td><td>The request itself was invalid: an illegal cell, a missing file, a bad date range. Nothing ran.</td></tr>
+            <tr><td><code>UnknownJobError</code></td><td>The Job ID is unknown, malformed, or unsafe.</td></tr>
+            <tr><td><code>OperationalError</code></td><td>The environment refused or failed: Kerberos, capacity, timeout, handoff.</td></tr>
+          </tbody>
+        </table></div>
+        <p>A Job that ran and <em>failed</em> is not an exception — it is returned like any other Job, with <code>succeeded == False</code> and a log you can read. Reserve <code>try</code> for refusals, not for query failures.</p>
+        <div class="callout"><strong>pandas is optional.</strong> <code>to_df()</code> needs it; <code>rows()</code> works with the standard library alone. Reach for <code>rows()</code> in scripts that should not carry a pandas dependency.</div>
+
+        <h2>Learn it in order</h2>
+        <p><code>demos/notebook_job_api.ipynb</code> is the tutorial: the same ground as this page, in order, with runnable cells. <code>docs/notebook-api.md</code> is the complete reference. The design rationale lives in ADR-0008 through ADR-0011 — in particular ADR-0011, which explains why there is no unaudited interactive query tier.</p>
+        <div class="page-links">
+          <a href="#cli" data-page-link="cli"><strong>CLI Cookbook</strong>What this API wraps.</a>
+          <a href="#advisor" data-page-link="advisor"><strong>Advisor</strong>It gates notebook Jobs too.</a>
+          <a href="#glossary" data-page-link="glossary"><strong>Glossary</strong>Inline SQL, Result, workspace.</a>
+        </div>
+      </article>
+
+      <article class="doc-page" data-page="advisor" data-lang="en" hidden>
+        <p class="eyebrow">Reference · pre-launch analysis</p>
+        <h1>Advisor</h1>
+        <div class="hero-rule"></div>
+        <p class="lede">Before a Job launches, the Advisor parses your SQL and checks it against the Impala optimization manual. It reports <strong>Findings</strong>: a rule id, a guideline reference, a severity, what it detected, and what to do about it. It is flag-only — it never rewrites your SQL and never silently changes what runs.</p>
+
+        <h2>Severities</h2>
+        <div class="card-grid">
+          <div class="card"><h3><code>error</code></h3><p>Something likely to be expensive or wrong. Launching anyway requires an explicit acknowledgement: <kbd>Y</kbd> at the TUI gate, or <code>--acknowledge-advisor</code> on the CLI.</p></div>
+          <div class="card"><h3><code>warning</code></h3><p>Worth reading before you launch, but not gated. Usually a missing filter or a naming rule.</p></div>
+          <div class="card"><h3><code>info</code></h3><p>A pattern that is sometimes justified. Shown so you can confirm it was intentional.</p></div>
+          <div class="card"><h3>What it never does</h3><p>It does not modify your SQL, choose a different pool, or refuse a launch on its own. The only gate is the error-confirm step, and you control it.</p></div>
+        </div>
+
+        <h2>The rules</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Id</th><th>Rule</th><th>Guideline</th><th>Severity</th></tr></thead>
+          <tbody>
+            <tr><td><code>R01</code></td><td>select-star-unfiltered</td><td>§3, G#10</td><td><code>error</code></td></tr>
+            <tr><td><code>R02</code></td><td>missing-partition-filter</td><td>G#1, §8</td><td><code>warning</code></td></tr>
+            <tr><td><code>R03</code></td><td>function-on-partition-column</td><td>§8 dates</td><td><code>warning</code></td></tr>
+            <tr><td><code>R04</code></td><td>date-range-over-13-months</td><td>G#8</td><td><code>error</code></td></tr>
+            <tr><td><code>R05</code></td><td>missing-join-hint</td><td>G#3</td><td><code>info</code></td></tr>
+            <tr><td><code>R06</code></td><td>wasteful-join-hint</td><td>G#3</td><td><code>warning</code></td></tr>
+            <tr><td><code>R07</code></td><td>dangerous-broadcast-hint</td><td>G#3/#4</td><td><code>error</code></td></tr>
+            <tr><td><code>R08</code></td><td>large-table-joined-directly</td><td>G#9</td><td><code>info</code></td></tr>
+            <tr><td><code>R09</code></td><td>cartesian-product</td><td>§8 joins</td><td><code>error</code></td></tr>
+            <tr><td><code>R10</code></td><td>cast-in-join-condition</td><td>§4</td><td><code>info</code></td></tr>
+            <tr><td><code>R11</code></td><td>leading-wildcard-like</td><td>§8 strings</td><td><code>info</code></td></tr>
+            <tr><td><code>R12</code></td><td>regexp-predicate</td><td>§8 strings</td><td><code>info</code></td></tr>
+            <tr><td><code>R13</code></td><td>union-distinct</td><td>§8</td><td><code>info</code></td></tr>
+            <tr><td><code>R14</code></td><td>select-distinct</td><td>§8</td><td><code>info</code></td></tr>
+            <tr><td><code>R15</code></td><td>count-distinct-on-monitored-table</td><td>§8 aggregates</td><td><code>info</code></td></tr>
+            <tr><td><code>R16</code></td><td>destination-table-naming</td><td>G#5</td><td><code>warning</code></td></tr>
+            <tr><td><code>R17</code></td><td>ddl-missing-drop</td><td>G#6</td><td><code>warning</code></td></tr>
+            <tr><td><code>R18</code></td><td>ddl-location-outside-user-dir</td><td>G#2</td><td><code>warning</code></td></tr>
+          </tbody>
+        </table></div>
+        <p><code>R01</code>–<code>R15</code> are evaluated against the parsed SQL. <code>R16</code> is a form rule: it checks the destination table name you typed, not the query text. <code>R17</code> and <code>R18</code> apply to DDL.</p>
+
+        <h2>The four that stop you</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Finding</th><th>Why it is an error</th><th>Fix</th></tr></thead>
+          <tbody>
+            <tr><td><code>R01</code> select-star-unfiltered</td><td>An unbounded <code>SELECT *</code> reads every column of every partition. It is the fastest way to exhaust a pool.</td><td>Name the columns you need and add a partition predicate.</td></tr>
+            <tr><td><code>R04</code> date-range-over-13-months</td><td>Ranges beyond thirteen months are almost always an accident, and the cost is linear in months.</td><td>Narrow the range, or split it into several Jobs.</td></tr>
+            <tr><td><code>R07</code> dangerous-broadcast-hint</td><td>Broadcasting a large table replicates it to every node and can take the query — and the pool — down.</td><td>Remove the hint, or switch to a shuffle join.</td></tr>
+            <tr><td><code>R09</code> cartesian-product</td><td>A join with no usable condition multiplies row counts instead of matching them.</td><td>Supply the join condition. If it really is intentional, acknowledge it.</td></tr>
+          </tbody>
+        </table></div>
+        <div class="callout"><strong>Acknowledging is a decision, not a formality.</strong> <code>--acknowledge-advisor</code> and the TUI's <kbd>Y</kbd> both mean "I read this and I am launching the SQL as written." The Job's manifest records that you did. If you find yourself acknowledging the same finding every day, fix the query instead.</div>
+
+        <h2>Reading a Finding</h2>
+        <p>Each Finding gives you four things: the <strong>rule id</strong> so you can look it up, the <strong>guideline reference</strong> back into the optimization manual, a <strong>detection line</strong> saying what was found and where, and a <strong>remediation line</strong> saying what to change. In the TUI the gate scrolls with <kbd>↑</kbd><kbd>↓</kbd> and <kbd>PgUp</kbd>/<kbd>PgDn</kbd>; on the CLI they print to stderr before the refusal.</p>
+        <p>The full specification, including exactly what each rule matches, is <code>docs/query-optimization-advisor-spec.md</code>.</p>
+        <div class="page-links">
+          <a href="#tui" data-page-link="tui"><strong>TUI Guide</strong>The gate's keys.</a>
+          <a href="#cli" data-page-link="cli"><strong>CLI Cookbook</strong>Acknowledging non-interactively.</a>
+          <a href="#onboarding" data-page-link="onboarding"><strong>Onboarding</strong>Writing SQL that never trips the gate.</a>
+        </div>
+      </article>
+
+      <article class="doc-page" data-page="troubleshooting" data-lang="en" hidden>
+        <p class="eyebrow">Reference · when it goes wrong</p>
+        <h1>Troubleshooting</h1>
+        <div class="hero-rule"></div>
+        <p class="lede">Fix the first concrete error, not the symptom after it. Most first-run problems are setup or Kerberos; most later problems are the query or the cluster. The run log under <code>/ads_storage/$USER/.dispatch/jobs/</code> is the system of record — quote it when you ask for help.</p>
+
+        <h2>Setup</h2>
+        <details><summary><code>dispatch: command not found</code></summary>
+          <p>The launcher is in <code>~/.local/bin</code>, which may not be on your <code>PATH</code> yet in this shell.</p>
+          <pre><button class="copy" type="button">Copy</button><code>export PATH="$HOME/.local/bin:$PATH"
+which dispatch</code></pre>
+          <p>If <code>which</code> still prints nothing, rerun <code>/ads_storage/dispatch/onboard.sh</code> and keep the full output. Opening a new SSH session also works, because onboarding updates your shell profile.</p>
+        </details>
+        <details><summary>Onboarding says the shared runtime is missing or invalid</summary>
+          <p>Stop. Send the exact error to a Release Operator. Do not run <code>install.sh</code>, and do not run <code>pip</code> — analysts do not repair the shared runtime, and a hand-patched environment is much harder to diagnose than a missing one. Your existing jobs, configuration, and any old personal venv can stay where they are.</p>
+        </details>
+        <details><summary>The launcher behaves strangely after an upgrade</summary>
+          <p>Rerun <code>/ads_storage/dispatch/onboard.sh</code>. It replaces a stale launcher without deleting your jobs or configuration. Do not run it with <code>source</code>.</p>
+        </details>
+
+        <h2>Kerberos</h2>
+        <details><summary>Dispatch refuses to launch: no ticket, or the ticket is about to expire</summary>
+          <p>Dispatch requires a valid ticket with at least five minutes of life remaining, because a ticket that expires mid-Job fails the query after it has already consumed cluster resources.</p>
+          <pre><button class="copy" type="button">Copy</button><code>klist          # check
+kinit          # renew
+klist          # confirm</code></pre>
+          <p>Inside the TUI's New Job screen, <kbd>K</kbd> does the same thing without leaving the app.</p>
+        </details>
+        <details><summary>The Job failed with <code>AUTH_ERROR</code> or an authorization exception</summary>
+          <p>Either the ticket expired while the Job was running, or you do not have rights on the schema or table. Refresh with <code>kinit</code> and retry; if it recurs on the same table, it is a permissions question for your platform team, not a Dispatch problem.</p>
+        </details>
+
+        <h2>Launch refusals</h2>
+        <details><summary>"Two Jobs already running"</summary>
+          <p>The cap is two simultaneously Running or Pending Jobs per analyst, and it is a hard refusal — a third does not queue silently. Check what is running with <code>dispatch job list --state Running</code>, then wait or cancel one. From the notebook API, <code>wait_for_slot=</code> lets a call wait for a slot instead of failing immediately.</p>
+        </details>
+        <details><summary>The destination I want is greyed out (or exit code <code>2</code> on the CLI)</summary>
+          <p>You picked an illegal Source × Destination cell. <code>SqlTemplate</code> can only write a <code>Table</code>; <code>ExistingTable</code> can only write a <code>Csv</code>. Press <kbd>M</kbd> in the TUI to see the matrix.</p>
+        </details>
+        <details><summary>Exit code <code>2</code> with no obvious cause</summary>
+          <p>Exit <code>2</code> is always "the request was invalid" — most often a missing <code>--yes</code>, a missing <code>--acknowledge-advisor</code> when the Advisor reported errors, a SQL path that does not exist relative to the invocation directory, or a malformed date.</p>
+        </details>
+        <details><summary>Exit code <code>3</code></summary>
+          <p>The Job ID is unknown, malformed, or resolves outside the jobs root. Copy it from <code>dispatch job list</code> rather than retyping it; in the TUI, <kbd>Y</kbd> on Job Detail copies it exactly.</p>
+        </details>
+        <details><summary>Exit code <code>4</code></summary>
+          <p>An operational refusal or failure: Kerberos, capacity, a timeout, a handoff problem, or a failed cancel. The request was valid, so a retry may well succeed once the cause is cleared.</p>
+        </details>
+
+        <h2>Jobs that fail</h2>
+        <details><summary><code>SYNTAX_ERROR</code></summary>
+          <p>Impala rejected the SQL. Preview it first (<kbd>P</kbd> in New Job) — for a <code>SqlTemplate</code>, the preview shows the text after substitution, which is where placeholder mistakes become visible.</p>
+        </details>
+        <details><summary><code>TABLE_NOT_FOUND</code></summary>
+          <p>The source table or schema does not exist. Use the Impala Browser (<kbd>B</kbd>) to confirm the schema and the exact table name before relaunching.</p>
+        </details>
+        <details><summary><code>MEMORY_LIMIT_EXCEEDED</code></summary>
+          <p>The query needs more memory than the pool allows. Reduce its scope — tighter partition filter, fewer columns, aggregate earlier — or ask your platform team about the pool's limits. Retrying the same query unchanged will fail the same way.</p>
+        </details>
+        <details><summary>Rejected by the pool, or "all pools busy"</summary>
+          <p>Cluster capacity, not your Job. If you restricted the queue, widen it: leaving the selection empty (<code>auto</code>) cycles every pool until one accepts. Otherwise retry off-peak.</p>
+        </details>
+        <details><summary>The Job is stuck in <code>Running</code> but nothing is happening</summary>
+          <p>Run <code>dispatch job list</code> — it reconciles stale manifests before printing, so a Job whose runner died is corrected rather than reported as running forever. Then read the tail of the log with <code>dispatch job logs JOB_ID --lines 200</code>.</p>
+        </details>
+
+        <h2>Results</h2>
+        <details><summary>The CSV is not where I expected it</summary>
+          <p>Dispatch captures the launch-time working directory once, at startup, and resolves every CSV destination against it for the whole session. If you launched the TUI from your home directory, that is where the CSV is — not next to the SQL file. <code>cd</code> to the right directory <em>before</em> starting Dispatch.</p>
+        </details>
+        <details><summary>I asked for <code>Table + Csv</code> and only got the table</summary>
+          <p>The runner does the table first, then a separate CSV export. If the Job ended between the two, the table exists and the CSV does not. The log shows which stage failed; rerunning as <code>ExistingTable → Csv</code> exports what was already built instead of recomputing it.</p>
+        </details>
+        <details><summary>No notification email arrived</summary>
+          <p>Email is sent by the orchestrator scripts, not by the TUI. Check that you supplied a recipient — the field is prefilled from <code>DISPATCH_EMAIL</code> when that is set, and empty otherwise. Multiple recipients are comma-separated.</p>
+        </details>
+
+        <h2>Reporting a problem</h2>
+        <p>Include these four things and the diagnosis is usually immediate:</p>
+        <ul class="checks">
+          <li>The Job ID (<kbd>Y</kbd> on Job Detail copies it).</li>
+          <li>The exact command or the Source × Destination you chose.</li>
+          <li>The last 50 lines of <code>dispatch job logs JOB_ID</code>.</li>
+          <li>The exit code, if you used the CLI.</li>
+        </ul>
+        <div class="callout"><strong>Nothing is deleted.</strong> Finished Jobs leave the dashboard after seven days but stay in History, with their manifests and logs intact under <code>/ads_storage/$USER/.dispatch/jobs/</code>. You can always go back and read what actually happened.</div>
+      </article>
+
+      <article class="doc-page" data-page="glossary" data-lang="en" hidden>
+        <p class="eyebrow">Reference · vocabulary</p>
+        <h1>Glossary</h1>
+        <div class="hero-rule"></div>
+        <p class="lede">Dispatch uses these words precisely, in the interface, the logs, and this handbook. Where a common synonym is deliberately avoided, it is named — using the avoided word in a bug report usually means describing the wrong thing.</p>
+        <dl class="term-grid">
+          <dt>Job</dt><dd>One end-to-end execution: a <strong>Source</strong> and <strong>Destination</strong> pair plus the parameters needed to run it — schema, table name, recipient email, SQL path. Composed of one or more calls to <strong>Orchestrator scripts</strong>. <em>Avoid: run, execution, task.</em></dd>
+          <dt>Source</dt><dd>The kind of SQL a Job is built from: <code>SqlFile</code>, <code>SqlTemplate</code>, or <code>ExistingTable</code>. <em>Avoid: query type, mode, workflow.</em></dd>
+          <dt>Destination</dt><dd>Where a Job's result is materialised: <code>Table</code>, <code>Csv</code>, or <code>Table + Csv</code>. <em>Avoid: output, target, sink.</em></dd>
+          <dt>Job state</dt><dd>The lifecycle stage: <code>Pending</code>, <code>Running</code>, <code>Succeeded</code>, <code>Failed</code>, or <code>Cancelled</code>. <em>Avoid: status, phase.</em></dd>
+          <dt>Orchestrator script</dt><dd>One of the three production-tested scripts in <code>scr/</code>. They own the queue-cycling retry loop and the email notifications, and Dispatch treats them as a black box. <em>Avoid: backend, runner, engine.</em></dd>
+          <dt>Resource Pool</dt><dd>An Impala queue managing concurrent query resources. Orchestrators cycle through a fixed list until one accepts the query. <em>Avoid: queue, fila.</em></dd>
+          <dt>Edge Node</dt><dd>The gateway server providing access to the Hadoop cluster. It hosts the orchestrator scripts and Dispatch itself.</dd>
+          <dt>Analyst</dt><dd>Someone who runs Dispatch on an Edge Node to launch and supervise Jobs. Owns private configuration, jobs, logs, and telemetry under <code>/ads_storage/&lt;user&gt;/.dispatch/</code>; never installs dependencies or runs pip. <em>Avoid: user, end user, operator.</em></dd>
+          <dt>Release Operator</dt><dd>The person who deploys Dispatch to an Edge Node and manages the shared runtime: verified dependency bundles, <code>install.sh</code>, activation and rollback. Distinct from an Analyst, who only runs <code>onboard.sh</code>. <em>Avoid: admin, deployer, maintainer.</em></dd>
+          <dt>Advisor</dt><dd>The pre-launch static analysis that checks a Job's SQL against the Impala optimization manual and reports Findings. Flag-only: it never modifies or gates the SQL beyond the error-confirm modal. <em>Avoid: linter, optimizer, rewriter.</em></dd>
+          <dt>Finding</dt><dd>One Advisor detection: a rule id, a guideline reference, a severity (<code>error</code> / <code>warning</code> / <code>info</code>), a detection line, and a remediation line. <em>Avoid: violation, issue, error — "error" is reserved for the severity tier.</em></dd>
+          <dt>Manifest</dt><dd>The on-disk description of a Job under <code>/ads_storage/&lt;user&gt;/.dispatch/jobs/</code>. The TUI and CLI supervise Jobs by reading manifests and logs; it is the system of record.</dd>
+          <dt>Inline SQL</dt><dd>SQL authored in a notebook cell rather than a <code>.sql</code> file you keep. It produces an ordinary <code>SqlFile</code> Job; the file it runs from belongs to Dispatch, not to you. <em>Avoid: query string, ad hoc query, snippet.</em></dd>
+          <dt>Result</dt><dd>The rows a completed Job produced, read back into Python from the CSV its Destination wrote. A <code>Table</code>-only Job has no Result. <em>Avoid: output, dataset, result set.</em></dd>
+          <dt>Notebook workspace</dt><dd>The Dispatch-owned directory holding Inline SQL and Results for notebook-launched Jobs, so your working directory only ever receives files you named. <em>Avoid: scratch, temp directory, cache.</em></dd>
+          <dt>Legacy GUI</dt><dd>The original Windows tool that prepared SSH commands. Removed at v1.0. Its <code>Mode</code> field conflated Source and Destination; that is why they are now two orthogonal axes.</dd>
+        </dl>
+        <h2>Relationships worth memorising</h2>
+        <ul>
+          <li>A Job has exactly one Source and exactly one Destination.</li>
+          <li>A Job whose Destination includes <code>Csv</code> has exactly one Result; a <code>Table</code>-only Job has none.</li>
+          <li>An analyst may have at most two Jobs Running at once. A third is hard-refused; it does not queue.</li>
+          <li>A terminal Job stays in the active dashboard for seven days, then moves to History. It is never deleted.</li>
+        </ul>
+      </article>
+
+      <article class="doc-page" data-page="onboarding" data-lang="pt" hidden>
+        <p class="eyebrow">Comece aqui · fluxo do analista</p>
+        <h1>Lance Jobs no Impala e vá embora tranquilo.</h1>
+        <div class="hero-rule"></div>
+        <p class="lede">O Dispatch roda no Edge Node do Hadoop. Você faz <code>ssh</code>, vai até o diretório com seus SQLs e lança um Job. Um runner desacoplado é o dono da execução: fechar o terminal — ou cair a VPN — não mata a query. Esta página leva um analista novo do primeiro acesso ao primeiro Job verificado.</p>
+        <div class="status-row"><span class="pill">Manual offline</span><span class="pill">v1.1.0</span><span class="pill">TUI · CLI · Notebook</span><span class="pill">Sobrevive a desconexões</span></div>
+        <div class="run-path" aria-label="Caminho normal de execução">
+          <div class="run-step"><b>01</b><strong>Onboarding</strong><span>Um script, uma vez por conta.</span></div>
+          <div class="run-step"><b>02</b><strong>Descreva</strong><span>Escolha um Source e um Destination.</span></div>
+          <div class="run-step"><b>03</b><strong>Lance</strong><span>Kerberos, Advisor, capacidade e vai.</span></div>
+          <div class="run-step"><b>04</b><strong>Supervisione</strong><span>Acompanhe o log, colete o resultado.</span></div>
+        </div>
+
+        <h2>O que o Dispatch faz</h2>
+        <p>Rodar uma query longa no Impala na mão significa manter uma sessão SSH aberta, lembrar qual resource pool não estava cheio, redigitar o mesmo <code>impala-shell</code> de sempre e perder tudo quando a conexão cai. O Dispatch transforma isso em um <strong>Job</strong>: uma unidade de trabalho descrita, persistida em disco como manifesto, executada por um runner que o Dispatch desacopla do seu terminal, com um log de execução ao qual você pode voltar a qualquer momento, de qualquer sessão.</p>
+        <p>Não é um novo engine de query. Por baixo do Job estão os mesmos orchestrator scripts já testados em produção, com o laço de retry entre filas e as notificações por e-mail intactos. O Dispatch é dono da descrição, da validação, das recusas e da supervisão — nunca da execução do SQL em si.</p>
+        <div class="card-grid">
+          <div class="card"><h3>Execução desacoplada</h3><p>O runner não é filho do seu shell. Desconecte, reconecte de outra máquina e o <code>dispatch</code> mostra o mesmo Job ainda rodando.</p></div>
+          <div class="card"><h3>Um vocabulário só</h3><p>Todo Job é exatamente um <strong>Source</strong> e um <strong>Destination</strong>. Combinações ilegais são recusadas antes de qualquer coisa chegar ao cluster.</p></div>
+          <div class="card"><h3>Três interfaces, um engine</h3><p>TUI, CLI e a API de notebook compartilham a mesma validação, checagem de Kerberos, gate do Advisor, limite de capacidade e manifestos.</p></div>
+          <div class="card"><h3>Recusas são explícitas</h3><p>Sem ticket, ticket expirando, dois Jobs já rodando, célula ilegal: o Dispatch para com um motivo em vez de falhar no meio do cluster.</p></div>
+        </div>
+
+        <h2>Source × Destination</h2>
+        <p>Esses dois eixos são o modelo inteiro. Escolha o Source pelo que o seu SQL <em>é</em>; escolha o Destination pelo que você precisa <em>depois</em>.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Source</th><th>O que é</th><th>Quando usar</th></tr></thead>
+          <tbody>
+            <tr><td><code>SqlFile</code></td><td>Um único arquivo <code>.sql</code> com um <code>SELECT</code>.</td><td>O padrão. Praticamente toda extração ad-hoc.</td></tr>
+            <tr><td><code>SqlTemplate</code></td><td>Um <code>.sql</code> com os marcadores <code>{date_inicio}</code> / <code>{date_fim}</code>, executado uma vez por mês ao longo de um intervalo.</td><td>Backfills e construções mensais particionadas.</td></tr>
+            <tr><td><code>ExistingTable</code></td><td>Nenhum <code>SELECT</code> — o dado já está materializado no Impala.</td><td>Exportar uma tabela que alguém (ou um Job anterior) já construiu.</td></tr>
+          </tbody>
+        </table></div>
+        <div class="table-wrap"><table class="matrix">
+          <thead><tr><th>Source ↓ / Destination →</th><th>Table</th><th>Csv</th><th>Table + Csv</th></tr></thead>
+          <tbody>
+            <tr><td><code>SqlFile</code></td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+            <tr><td><code>SqlTemplate</code></td><td class="yes">✓</td><td class="no">—</td><td class="no">—</td></tr>
+            <tr><td><code>ExistingTable</code></td><td class="no">—</td><td class="yes">✓</td><td class="no">—</td></tr>
+          </tbody>
+        </table></div>
+        <p><code>SqlTemplate</code> é restrito a <code>Table</code> de propósito: saída mensal particionada existe para uso analítico posterior, não para exportação em massa de CSV. <code>Table + Csv</code> é decomposto pelo runner em criação da tabela e, depois, uma exportação de CSV separada — nunca usa o antigo caminho combinado de criar-e-comprimir, e o CSV que ele escreve não é comprimido.</p>
+        <div class="callout"><strong>Onde o CSV cai.</strong> O Dispatch captura o diretório de trabalho <em>uma única vez</em>, ao iniciar. Todo destino CSV daquela sessão é resolvido em relação a esse diretório — não em relação ao local do arquivo SQL, nem a onde você fizer <code>cd</code> depois. Faça <code>cd</code> para o lugar certo <em>antes</em> de lançar.</div>
+
+        <h2>1 · Primeiro acesso</h2>
+        <p>O Release Operator já implantou a árvore compartilhada e ativou o runtime. Você roda apenas o onboarding, uma vez por conta:</p>
+        <pre><button class="copy" type="button">Copy</button><code>/ads_storage/dispatch/onboard.sh
+export PATH="$HOME/.local/bin:$PATH"
+which dispatch</code></pre>
+        <p>Rode diretamente — <strong>não</strong> com <code>source</code>. O onboarding cria ou repara seu estado privado em <code>/ads_storage/$USER/.dispatch</code> (configuração, jobs, telemetria), escreve o launcher fino <code>~/.local/bin/dispatch</code> e atualiza seu perfil de shell. Ele nunca cria venv e nunca roda pip. Se imprimir a linha <code>export PATH…</code>, rode esse comando; caso contrário, abra uma nova sessão SSH.</p>
+        <p>Rodar o onboarding de novo é seguro a qualquer momento. Ele substitui um launcher desatualizado sem apagar seus jobs, sua configuração ou uma venv pessoal antiga.</p>
+        <div class="callout warn"><strong>Se o onboarding disser que o runtime compartilhado está ausente ou inválido,</strong> pare e envie a saída exata ao Release Operator. Não rode <code>install.sh</code> e não rode <code>pip</code>: analistas não reparam o runtime compartilhado, e um ambiente remendado à mão é a falha mais difícil de diagnosticar depois.</div>
+
+        <h2>2 · Fluxo diário</h2>
+        <ol>
+          <li>Faça <code>ssh</code> no Edge Node e <code>cd</code> até o diretório com seus arquivos <code>.sql</code>. É também onde os CSVs vão cair.</li>
+          <li>Garanta um ticket Kerberos: <code>klist</code> e, se preciso, <code>kinit</code>. O Dispatch recusa lançar com menos de cinco minutos de ticket restantes.</li>
+          <li>Rode <code>dispatch</code> para o cockpit interativo, ou <code>dispatch job …</code> para um lançamento roteirizado.</li>
+          <li>Lance e vá embora. Volte com <code>dispatch</code> ou <code>dispatch job logs</code> quando quiser conferir.</li>
+        </ol>
+        <div class="callout"><strong>Dois Jobs por vez.</strong> O Dispatch admite no máximo dois Jobs simultâneos em <code>Running</code> ou <code>Pending</code> por analista. O terceiro é recusado de forma dura — ele <em>não</em> entra numa fila silenciosa atrás dos outros. Cancele algo ou espere.</div>
+
+        <h2>3 · Escreva o SQL</h2>
+        <p>Um <code>SqlFile</code> contém <strong>uma instrução</strong>: um único <code>SELECT</code>. O Dispatch materializa o resultado por você, então o arquivo deve descrever linhas, não executar DDL.</p>
+        <pre><button class="copy" type="button">Copy</button><code>SELECT
+    dt,
+    card_type,
+    input_mode,
+    count(*)      AS txn_cnt,
+    sum(amount)   AS amount,
+    sum(approved) AS approved
+FROM aa_enc.events
+WHERE dt BETWEEN '2026-01-01' AND '2026-01-31'
+GROUP BY dt, card_type, input_mode</code></pre>
+        <p>Use <strong>Baixar SQL de demonstração</strong> na navegação para obter esse arquivo e aponte um Job para ele. Dois hábitos evitam a maioria dos Jobs caros:</p>
+        <ul>
+          <li><strong>Sempre filtre a coluna de partição.</strong> Um scan sem filtro em tabela particionada é a maneira mais comum de encher um resource pool e ser rejeitado. O Advisor sinaliza isso.</li>
+          <li><strong>Nunca <code>SELECT *</code> sem filtro.</strong> Isso é um finding de severidade <code>error</code>, e passar por ele exige um reconhecimento explícito.</li>
+        </ul>
+        <h3>Templates</h3>
+        <p>Um <code>SqlTemplate</code> é a mesma ideia com dois marcadores que o Dispatch substitui uma vez por mês ao longo do intervalo informado:</p>
+        <pre><button class="copy" type="button">Copy</button><code>SELECT dt, card_type, count(*) AS txn_cnt
+FROM aa_enc.events
+WHERE dt BETWEEN '{date_inicio}' AND '{date_fim}'
+GROUP BY dt, card_type</code></pre>
+        <p>As datas são <code>YYYY-MM-DD</code>. Um intervalo maior que treze meses é um finding de severidade <code>error</code>, não uma sugestão.</p>
+
+        <h2>4 · Seu primeiro Job</h2>
+        <p>Faça isto uma vez antes de encostar em trabalho real, para aprender o fluxo sem depurar sua query ao mesmo tempo.</p>
+        <div class="tabs" role="tablist" aria-label="Formas de lançar">
+          <button class="tab" id="tab-tui-pt" type="button" role="tab" aria-selected="true" aria-controls="panel-tui-pt">TUI (comece aqui)</button>
+          <button class="tab" id="tab-cli-pt" type="button" role="tab" aria-selected="false" aria-controls="panel-cli-pt">CLI</button>
+          <button class="tab" id="tab-nb-pt" type="button" role="tab" aria-selected="false" aria-controls="panel-nb-pt">Notebook</button>
+        </div>
+        <div class="tab-panel active" id="panel-tui-pt" role="tabpanel" aria-labelledby="tab-tui-pt">
+          <p>O TUI mostra cada escolha na tela e desabilita as ilegais por você — o jeito mais rápido de aprender o que os campos significam.</p>
+          <pre><button class="copy" type="button">Copy</button><code>cd /caminho/para/seus/sql
+dispatch</code></pre>
+          <ol>
+            <li>Pressione <kbd>N</kbd> para o assistente New Job.</li>
+            <li>Deixe <strong>Source</strong> em <code>SqlFile</code> e <strong>Destination</strong> em <code>Csv</code>. Destinos ilegais ficam desabilitados sozinhos.</li>
+            <li>Escolha seu arquivo no seletor de SQL (ele lista os <code>.sql</code> do diretório de lançamento) ou digite o caminho.</li>
+            <li>Deixe <strong>Execution Queue</strong> vazio — isso é <code>auto</code>, e cicla todos os pools até um aceitar.</li>
+            <li>Pressione <kbd>P</kbd> para pré-visualizar o SQL gerado. Leia. É isso que vai rodar de fato.</li>
+            <li>Pressione <kbd>L</kbd> para lançar. Se o Advisor reportar erros, aparece o gate: leia os findings e confirme, ou volte e ajuste o SQL.</li>
+            <li>Você volta para a Overview. Pressione <kbd>V</kbd> para acompanhar o log ao vivo.</li>
+          </ol>
+        </div>
+        <div class="tab-panel" id="panel-cli-pt" role="tabpanel" aria-labelledby="tab-cli-pt">
+          <p>O mesmo Job, um comando. É isto que você roteiriza depois que a configuração está definida.</p>
+          <pre><button class="copy" type="button">Copy</button><code>cd /caminho/para/seus/sql
+
+dispatch job launch --source SqlFile --destination Csv \
+  --sql dispatch_demo.sql --table demo --yes
+
+dispatch job list
+dispatch job logs JOB_ID --follow
+dispatch job wait JOB_ID --timeout 1800 --json</code></pre>
+          <p><code>--yes</code> é obrigatório: é o substituto não interativo do diálogo de lançamento do TUI. Use <code>--acknowledge-advisor</code> apenas quando o Advisor reportar findings de severidade <code>error</code> e você os tiver lido.</p>
+        </div>
+        <div class="tab-panel" id="panel-nb-pt" role="tabpanel" aria-labelledby="tab-nb-pt">
+          <p>O mesmo Job a partir do Jupyter no Edge Node. A API de notebook envolve a CLI, então nada é pulado.</p>
+          <pre><button class="copy" type="button">Copy</button><code>from dispatch.notebook import Dispatch
+
+d = Dispatch(cwd="~/sql")
+
+job = d.launch(source="SqlFile", destination="Csv",
+               sql="dispatch_demo.sql", table="demo")
+job.watch()          # estado e log ao vivo até o estado terminal
+job.succeeded        # True
+job.to_df()          # o Result, como DataFrame</code></pre>
+          <p>Toda chamada é um Job de verdade — manifesto, runner desacoplado, o limite de dois Jobs, tudo. Espere minutos, não milissegundos. Não existe uma camada mais rápida sem auditoria.</p>
+        </div>
+
+        <h2>5 · Confira se funcionou</h2>
+        <p>Tudo abaixo deve ser verdade. Se algo falhar, vá para <a href="#troubleshooting" data-page-link="troubleshooting">Solução de problemas</a>.</p>
+        <ul class="checks">
+          <li>O Job chegou ao estado <code>Succeeded</code> na Overview do TUI, ou <code>dispatch job wait</code> saiu com <code>0</code>.</li>
+          <li>O CSV existe no diretório de onde você lançou — sem compressão, com o nome da tabela que você pediu.</li>
+          <li>O log termina limpo, sem erro classificado como <code>SYNTAX_ERROR</code>, <code>TABLE_NOT_FOUND</code> ou <code>MEMORY_LIMIT_EXCEEDED</code>.</li>
+          <li>Se você pediu destino <code>Table</code>, a tabela existe no schema escolhido, sob o prefixo do seu EID.</li>
+          <li>O e-mail de notificação chegou, se você informou um destinatário.</li>
+        </ul>
+        <div class="callout good"><strong>Você está onboardado</strong> quando consegue lançar um Job, explicar qual Source e Destination ele usou, fechar o terminal sem preocupação e reencontrar o log depois.</div>
+
+        <h2>Estados de um Job</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Estado</th><th>Significado</th></tr></thead>
+          <tbody>
+            <tr><td><code>Pending</code></td><td>Janela breve entre o lançamento e o runner iniciar o orchestrator. Não aparece no dashboard.</td></tr>
+            <tr><td><code>Running</code></td><td>O processo do orchestrator está vivo. Conta para o seu limite de dois Jobs.</td></tr>
+            <tr><td><code>Succeeded</code></td><td>O orchestrator saiu com <code>0</code>.</td></tr>
+            <tr><td><code>Failed</code></td><td>Saída diferente de zero, ou erro fatal classificado como <code>SYNTAX_ERROR</code>, <code>TABLE_NOT_FOUND</code> etc.</td></tr>
+            <tr><td><code>Cancelled</code></td><td>Você matou o Job, pelo TUI ou com <code>dispatch job cancel</code>.</td></tr>
+          </tbody>
+        </table></div>
+        <p>Um Job finalizado permanece no dashboard ativo por <strong>sete dias</strong> e depois recolhe para o History (<kbd>H</kbd>). Nunca é apagado.</p>
+
+        <h2>Resource Pools</h2>
+        <p>Um Resource Pool do Impala é a fila que governa os recursos de queries concorrentes. Deixar a seleção vazia significa <code>auto</code>: ciclar todos os pools até um aceitar a query, que é o que você quer quase sempre. Restrinja apenas quando conhecer o formato da sua query.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Pool</th><th>Use para</th></tr></thead>
+          <tbody>
+            <tr><td><code>adhoc_fast</code></td><td>Queries curtas ou simples. Mais rápido para ser admitido.</td></tr>
+            <tr><td><code>adhoc_small</code></td><td>Queries leves, de footprint modesto.</td></tr>
+            <tr><td><code>acs_small</code></td><td>Cargas ACS leves.</td></tr>
+            <tr><td><code>acs_large</code></td><td>Queries pesadas ou de longa duração.</td></tr>
+            <tr><td><code>adhoc</code></td><td>Pool geral: queries longas ou intensivas em recurso.</td></tr>
+          </tbody>
+        </table></div>
+        <p>Se você selecionar vários, eles são tentados nessa ordem de prioridade de ciclo, independentemente da ordem em que você clicou.</p>
+
+        <h2>Onde ficam seus arquivos</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Caminho</th><th>Conteúdo</th></tr></thead>
+          <tbody>
+            <tr><td><code>/ads_storage/dispatch/</code></td><td>A implantação compartilhada. Somente leitura para analistas; o Release Operator é o dono.</td></tr>
+            <tr><td><code>/ads_storage/$USER/.dispatch/jobs/</code></td><td>Um manifesto por Job, mais o log de execução. É o sistema de registro.</td></tr>
+            <tr><td><code>/ads_storage/$USER/.dispatch/telemetry/</code></td><td>Eventos de uso offline, em JSONL.</td></tr>
+            <tr><td><code>/ads_storage/$USER/.dispatch/notebook/</code></td><td>Workspace de notebook: Inline SQL e Results de Jobs lançados de notebook.</td></tr>
+            <tr><td><code>~/.local/bin/dispatch</code></td><td>O launcher fino que o onboarding escreveu. Rode o onboarding de novo para repará-lo.</td></tr>
+            <tr><td>Seu diretório de lançamento</td><td>Onde os CSVs caem. Capturado uma única vez, na inicialização.</td></tr>
+          </tbody>
+        </table></div>
+        <div class="callout"><strong>Telemetria de uso.</strong> O Dispatch registra eventos offline — sessões, telas, lançamentos de Jobs, recusas — para que operadores vejam quem usa e como. Não há chamadas de rede; as escritas passam por uma fila em segundo plano limitada, de modo que latência de armazenamento nunca bloqueia o TUI nem um Job. Desative com <code>DISPATCH_TELEMETRY=0</code>. Consulte com <code>dispatch telemetry who --days 30</code> e <code>dispatch telemetry summary --days 30</code>.</div>
+
+        <h2>Aprofunde</h2>
+        <div class="page-links">
+          <a href="#tui" data-page-link="tui"><strong>Guia do TUI</strong>Cada tela e cada tecla.</a>
+          <a href="#cli" data-page-link="cli"><strong>Receitas CLI</strong>Flags, saída JSON, códigos de saída.</a>
+          <a href="#notebook" data-page-link="notebook"><strong>API de notebook</strong>Jobs e Results em Python.</a>
+          <a href="#advisor" data-page-link="advisor"><strong>Advisor</strong>O que as regras de SQL checam e por quê.</a>
+          <a href="#troubleshooting" data-page-link="troubleshooting"><strong>Solução de problemas</strong>As falhas que você vai encontrar de fato.</a>
+          <a href="#glossary" data-page-link="glossary"><strong>Glossário</strong>O vocabulário, definido uma vez.</a>
+        </div>
+        <p>Este manual é autossuficiente. A documentação do repositório continua daqui: <code>README.md</code> para a referência completa da CLI, <code>onboarding.md</code> para o fluxo curto de setup, <code>docs/notebook-api.md</code> para a referência Python, <code>docs/query-optimization-advisor-spec.md</code> para a especificação do Advisor e <code>docs/adr/</code> para o porquê de cada decisão de design.</p>
+      </article>
+
+      <article class="doc-page" data-page="tui" data-lang="pt" hidden>
+        <p class="eyebrow">Referência · cockpit interativo</p>
+        <h1>Guia do TUI</h1>
+        <div class="hero-rule"></div>
+        <p class="lede">Rodar <code>dispatch</code> sem subcomando abre o TUI em Textual. É um cockpit de supervisão: lançar Jobs, acompanhar logs ao vivo, cancelar e navegar por tabelas do Impala. Cada tela mostra suas teclas no rodapé, e <kbd>?</kbd> abre a lista completa de qualquer lugar.</p>
+
+        <h2>Telas</h2>
+        <div class="card-grid">
+          <div class="card"><h3>Overview</h3><p>O cockpit de jobs. Jobs em execução primeiro, depois tudo que terminou nos últimos sete dias. O painel de preview segue sua seleção.</p></div>
+          <div class="card"><h3>New Job</h3><p>O assistente de lançamento: Source, Destination, fila, arquivo SQL, schema e tabela, datas, e-mail de notificação. Destinos ilegais se desabilitam sozinhos.</p></div>
+          <div class="card"><h3>Job Detail</h3><p>O log completo, acompanhando ao vivo. Busque nele, salte para o topo ou o fim, copie o Job ID, clone o Job ou cancele-o.</p></div>
+          <div class="card"><h3>History</h3><p>Jobs que terminaram há mais de sete dias. Ordenável e paginado; nada é apagado.</p></div>
+          <div class="card"><h3>Impala Browser</h3><p>Lista tabelas de um schema, descreve uma e faz drop em lote das que você é dono. O drop exige digitar <code>I AM SURE</code>.</p></div>
+          <div class="card"><h3>SQL Preview</h3><p>O SQL exatamente como será submetido, após a substituição de template. Leia antes de todo lançamento não familiar.</p></div>
+        </div>
+
+        <h2>Teclas</h2>
+        <div class="keys">
+          <section>
+            <h3>Global</h3>
+            <dl>
+              <dt><kbd>Q</kbd></dt><dd>Sair do Dispatch</dd>
+              <dt><kbd>?</kbd></dt><dd>Abrir/fechar a tela de ajuda</dd>
+              <dt><kbd>Ctrl</kbd>+<kbd>P</kbd></dt><dd>Paleta de comandos (todos os destinos e kinit)</dd>
+              <dt><kbd>F2</kbd></dt><dd>Recolher ou expandir a barra lateral</dd>
+              <dt><kbd>Tab</kbd></dt><dd>Mover o foco entre os controles</dd>
+            </dl>
+            <h3>Overview</h3>
+            <dl>
+              <dt><kbd>N</kbd></dt><dd>Assistente New Job</dd>
+              <dt><kbd>V</kbd></dt><dd>Ver o log completo do Job selecionado</dd>
+              <dt><kbd>C</kbd></dt><dd>Cancelar o Job selecionado</dd>
+              <dt><kbd>/</kbd></dt><dd>Filtrar Jobs (<kbd>Esc</kbd> limpa)</dd>
+              <dt><kbd>H</kbd></dt><dd>Abrir o History</dd>
+              <dt><kbd>B</kbd></dt><dd>Abrir o Impala Browser</dd>
+              <dt><kbd>↑</kbd><kbd>↓</kbd> <kbd>J</kbd><kbd>K</kbd></dt><dd>Mover a seleção; o preview acompanha</dd>
+              <dt><kbd>Enter</kbd></dt><dd>Abrir o detalhe da linha selecionada</dd>
+            </dl>
+          </section>
+          <section>
+            <h3>New Job</h3>
+            <dl>
+              <dt><kbd>↑</kbd><kbd>↓</kbd></dt><dd>Escolher um SQL do diretório de lançamento</dd>
+              <dt><kbd>L</kbd></dt><dd>Lançar (exige Kerberos)</dd>
+              <dt><kbd>P</kbd></dt><dd>Pré-visualizar o SQL gerado</dd>
+              <dt><kbd>E</kbd></dt><dd>Editar o arquivo SQL no <code>$EDITOR</code></dd>
+              <dt><kbd>K</kbd></dt><dd>Renovar o Kerberos (<code>kinit</code>)</dd>
+              <dt><kbd>M</kbd></dt><dd>Mostrar/ocultar a matriz de células legais</dd>
+              <dt><kbd>B</kbd> <kbd>Esc</kbd></dt><dd>Voltar para a Overview</dd>
+            </dl>
+            <h3>Job Detail</h3>
+            <dl>
+              <dt><kbd>Space</kbd> <kbd>F</kbd></dt><dd>Pausar ou retomar o acompanhamento do log</dd>
+              <dt><kbd>g</kbd> <kbd>G</kbd></dt><dd>Ir ao topo / ao fim do log</dd>
+              <dt><kbd>/</kbd></dt><dd>Buscar no log</dd>
+              <dt><kbd>Y</kbd></dt><dd>Copiar o Job ID</dd>
+              <dt><kbd>R</kbd></dt><dd>Clonar um Job finalizado no New Job</dd>
+              <dt><kbd>M</kbd></dt><dd>Recuperar a identidade da query no Impala</dd>
+              <dt><kbd>C</kbd></dt><dd>Cancelar um Job em execução (com confirmação)</dd>
+            </dl>
+          </section>
+          <section>
+            <h3>History</h3>
+            <dl>
+              <dt><kbd>S</kbd></dt><dd>Ciclar ordenação: data → estado → tabela</dd>
+              <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Página anterior / próxima</dd>
+              <dt><kbd>Enter</kbd></dt><dd>Ver o log da linha selecionada</dd>
+              <dt><kbd>B</kbd> <kbd>Esc</kbd></dt><dd>Voltar</dd>
+            </dl>
+            <h3>SQL Preview</h3>
+            <dl>
+              <dt><kbd>Y</kbd></dt><dd>Copiar o SQL para a área de transferência</dd>
+              <dt><kbd>Enter</kbd> <kbd>Esc</kbd></dt><dd>Voltar ao formulário</dd>
+            </dl>
+          </section>
+          <section>
+            <h3>Impala Browser</h3>
+            <dl>
+              <dt><kbd>S</kbd></dt><dd>Carregar tabelas do schema e do filtro</dd>
+              <dt><kbd>O</kbd></dt><dd>Ciclar ordenação: nome → tamanho (clique em Size para inverter)</dd>
+              <dt><kbd>X</kbd></dt><dd>Marcar/desmarcar a tabela destacada</dd>
+              <dt><kbd>A</kbd></dt><dd>Selecionar todas as tabelas carregadas (alterna)</dd>
+              <dt><kbd>Enter</kbd></dt><dd>Descrever a tabela destacada</dd>
+              <dt><kbd>D</kbd></dt><dd>Dropar as tabelas marcadas (digite <code>I AM SURE</code> e depois <code>DROP</code>)</dd>
+              <dt><kbd>B</kbd> <kbd>Esc</kbd></dt><dd>Voltar</dd>
+            </dl>
+            <h3>Gate do Advisor</h3>
+            <dl>
+              <dt><kbd>Y</kbd></dt><dd>Lançar mesmo assim, reconhecendo os findings</dd>
+              <dt><kbd>N</kbd> <kbd>Esc</kbd></dt><dd>Cancelar e voltar ao formulário</dd>
+              <dt><kbd>↑</kbd><kbd>↓</kbd> <kbd>PgUp</kbd><kbd>PgDn</kbd></dt><dd>Rolar os findings</dd>
+            </dl>
+          </section>
+        </div>
+
+        <h2>O formulário New Job, campo a campo</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Campo</th><th>Aplica-se a</th><th>Notas</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Source</strong></td><td>Todos</td><td><code>SqlFile</code>, <code>SqlTemplate</code> ou <code>ExistingTable</code>. Mudá-lo habilita ou desabilita destinos.</td></tr>
+            <tr><td><strong>Destination</strong></td><td>Todos</td><td><code>Table</code>, <code>Csv</code> ou <code>Table+Csv</code>. Células ilegais não podem ser escolhidas. <kbd>M</kbd> mostra a matriz.</td></tr>
+            <tr><td><strong>Execution Queue</strong></td><td>Todos</td><td>Vazio significa <code>auto</code>: ciclar todos os pools. Ao escolher vários, são tentados na ordem de prioridade do ciclo.</td></tr>
+            <tr><td><strong>SQL File</strong></td><td>SqlFile, SqlTemplate</td><td>Escolha no seletor ou digite um caminho. Caminhos relativos resolvem contra o diretório de lançamento.</td></tr>
+            <tr><td><strong>Schema</strong> / <strong>Existing Table</strong></td><td>ExistingTable</td><td><code>coe_enc</code>, <code>aa_enc</code> ou um schema personalizado, mais o nome da tabela.</td></tr>
+            <tr><td><strong>Schema</strong></td><td>Table, Table+Csv</td><td>Schema de destino. Padrão <code>aa_enc</code>.</td></tr>
+            <tr><td><strong>Table Name</strong></td><td>Table, Table+Csv</td><td>Você digita o sufixo; o prefixo do seu EID é aplicado automaticamente e mostrado ao lado. Sufixo padrão <code>dispatch_result</code>.</td></tr>
+            <tr><td><strong>Start / End Date</strong></td><td>SqlTemplate</td><td><code>YYYY-MM-DD</code>. O template roda uma vez por mês no intervalo.</td></tr>
+            <tr><td><strong>Email</strong> / <strong>Subject</strong></td><td>Todos</td><td>Destinatários (separados por vírgula) e assunto. Pré-preenchido a partir de <code>DISPATCH_EMAIL</code> quando definido.</td></tr>
+          </tbody>
+        </table></div>
+        <div class="callout"><strong>O formulário lembra as partes seguras.</strong> O Dispatch guarda padrões independentes de dataset para o assistente abrir onde você parou, e recolhe a matriz de células legais depois que você a viu. Caminhos, nomes de tabela e datas são seus para definir a cada Job.</div>
+
+        <h2>O que pode barrar um lançamento</h2>
+        <p>Estas recusas acontecem antes de qualquer coisa chegar ao cluster. Todas são a ferramenta funcionando corretamente.</p>
+        <ul>
+          <li><strong>Sem ticket Kerberos, ou menos de cinco minutos restantes.</strong> Pressione <kbd>K</kbd> para rodar <code>kinit</code> de dentro do TUI e lance de novo.</li>
+          <li><strong>Dois Jobs já em <code>Running</code> ou <code>Pending</code>.</strong> O limite é por analista e é rígido. Cancele um ou espere.</li>
+          <li><strong>Célula Source × Destination ilegal.</strong> O TUI impede; a CLI recusa com código <code>2</code>.</li>
+          <li><strong>Arquivo SQL ausente ou intervalo de datas inválido.</strong> Corrija o campo que o resumo de validação aponta.</li>
+          <li><strong>Findings de severidade <code>error</code> do Advisor.</strong> Aparece o gate. Leia e use <kbd>Y</kbd> para lançar como está ou <kbd>N</kbd> para corrigir o SQL antes.</li>
+        </ul>
+        <div class="page-links">
+          <a href="#cli" data-page-link="cli"><strong>Receitas CLI</strong>Os mesmos Jobs, roteirizados.</a>
+          <a href="#advisor" data-page-link="advisor"><strong>Advisor</strong>O que o gate está dizendo.</a>
+          <a href="#troubleshooting" data-page-link="troubleshooting"><strong>Solução de problemas</strong>Quando o TUI não abre.</a>
+        </div>
+      </article>
+
+      <article class="doc-page" data-page="cli" data-lang="pt" hidden>
+        <p class="eyebrow">Referência · não interativo</p>
+        <h1>Receitas CLI</h1>
+        <div class="hero-rule"></div>
+        <p class="lede">Os subcomandos <code>dispatch job</code> lançam e supervisionam Jobs sem abrir o TUI. Reutilizam a mesma validação, checagens de Kerberos, gates do Advisor, admissão de capacidade, persistência de manifesto, telemetria e handoff para o runner desacoplado — apenas nunca instanciam uma tela Textual. <code>python -m dispatch job …</code> é idêntico.</p>
+
+        <h2>Lançar</h2>
+        <pre><button class="copy" type="button">Copy</button><code>cd /caminho/para/seus/sql
+
+# SqlFile -> Csv
+dispatch job launch --source SqlFile --destination Csv \
+  --sql query.sql --table report --yes
+
+# SqlTemplate -> Table, uma execução por mês no intervalo
+dispatch job launch --source SqlTemplate --destination Table \
+  --sql monthly.sql --schema aa_enc --table monthly_out \
+  --start-date 2026-01-01 --end-date 2026-01-31 --yes
+
+# ExistingTable -> Csv, sem SELECT nenhum
+dispatch job launch --source ExistingTable --destination Csv \
+  --existing-table aa_enc.events_existing --yes</code></pre>
+
+        <h3>Flags de lançamento</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Flag</th><th>Significado</th></tr></thead>
+          <tbody>
+            <tr><td><code>--source</code></td><td><code>SqlFile</code>, <code>SqlTemplate</code> ou <code>ExistingTable</code>. Obrigatória.</td></tr>
+            <tr><td><code>--destination</code></td><td><code>Table</code>, <code>Csv</code> ou <code>Table+Csv</code>. Obrigatória, e precisa ser uma célula legal.</td></tr>
+            <tr><td><code>--sql</code></td><td>Caminho do arquivo SQL. Caminhos relativos resolvem contra o CWD da invocação.</td></tr>
+            <tr><td><code>--existing-table</code></td><td><code>schema.tabela</code> para <code>ExistingTable → Csv</code>.</td></tr>
+            <tr><td><code>--schema</code></td><td>Schema de destino. Padrão <code>aa_enc</code>.</td></tr>
+            <tr><td><code>--table</code></td><td>Sufixo da tabela de destino (o prefixo do seu EID é aplicado) ou um <code>EID_nome</code> completo. Padrão <code>dispatch_result</code>.</td></tr>
+            <tr><td><code>--start-date</code> / <code>--end-date</code></td><td>Intervalo do <code>SqlTemplate</code>, <code>YYYY-MM-DD</code>.</td></tr>
+            <tr><td><code>--email</code> / <code>--subject</code></td><td>Destinatários e assunto da notificação. Assunto padrão <code>Dispatch Job</code>.</td></tr>
+            <tr><td><code>--queue</code></td><td>Seleção de Resource Pool: <code>auto</code> (padrão) ou um subconjunto separado por vírgulas.</td></tr>
+            <tr><td><code>--yes</code></td><td><strong>Obrigatória.</strong> O substituto não interativo do diálogo de lançamento do TUI.</td></tr>
+            <tr><td><code>--acknowledge-advisor</code></td><td>Necessária quando o Advisor reporta findings de severidade <code>error</code>.</td></tr>
+            <tr><td><code>--json</code></td><td>Um documento JSON no stdout; diagnósticos vão para o stderr.</td></tr>
+          </tbody>
+        </table></div>
+
+        <h2>Supervisionar</h2>
+        <pre><button class="copy" type="button">Copy</button><code>dispatch job list
+dispatch job list --state Running --json
+dispatch job show JOB_ID --json
+dispatch job logs JOB_ID --lines 100
+dispatch job logs JOB_ID --follow
+dispatch job wait JOB_ID --timeout 600 --json
+dispatch job cancel JOB_ID --yes</code></pre>
+        <p><code>list</code> reconcilia manifestos desatualizados antes de imprimir, então um Job cujo runner morreu é reportado corretamente em vez de ficar eternamente como <code>Running</code>.</p>
+
+        <h2>Saída JSON</h2>
+        <p>Adicione <code>--json</code> a qualquer subcomando para exatamente um documento no stdout. Todo o resto — avisos, progresso, diagnósticos — vai para o stderr, então você pode canalizar o stdout direto para o <code>jq</code>.</p>
+        <pre><button class="copy" type="button">Copy</button><code>dispatch job launch --source SqlFile --destination Csv \
+  --sql q.sql --table out --yes --json
+# {"job_id": "20260727T120000Z_abc123", "state": "Pending", "pid": null}
+
+dispatch job list --json
+# {"jobs": [{"id": "...", "state": "Running", "source": "SqlFile", ...}]}
+
+dispatch job wait JOB_ID --json
+# {"job_id": "...", "state": "Succeeded", "exit_code": 0, "timed_out": false}</code></pre>
+
+        <h2>Códigos de saída</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Código</th><th>Significado</th></tr></thead>
+          <tbody>
+            <tr><td><code>0</code></td><td>Comando bem-sucedido — e, no <code>wait</code>, o Job terminou em <code>Succeeded</code>.</td></tr>
+            <tr><td><code>1</code></td><td>Só no <code>wait</code>: o Job terminou sem sucesso ou foi cancelado.</td></tr>
+            <tr><td><code>2</code></td><td>Invocação inválida, falta de <code>--yes</code> ou do reconhecimento do Advisor, ou falha de validação. Erros de uso do argparse também saem <code>2</code>.</td></tr>
+            <tr><td><code>3</code></td><td>Job ID desconhecido, malformado ou inseguro.</td></tr>
+            <tr><td><code>4</code></td><td>Recusa ou falha operacional: Kerberos, capacidade, timeout, handoff, cancelamento.</td></tr>
+          </tbody>
+        </table></div>
+        <div class="callout"><strong>A distinção que importa em scripts.</strong> Saída <code>2</code> significa que <em>você</em> pediu algo inválido — a query nunca rodou. Saída <code>4</code> significa que o pedido era válido, mas o ambiente recusou, então uma nova tentativa pode funcionar. Saída <code>1</code> do <code>wait</code> significa que a query rodou e falhou: leia o log, não as flags.</div>
+
+        <h2>Uma execução completa em script</h2>
+        <pre><button class="copy" type="button">Copy</button><code>#!/usr/bin/env bash
+set -euo pipefail
+cd /caminho/para/seus/sql
+
+job_id=$(dispatch job launch \
+  --source SqlFile --destination Csv \
+  --sql monthly_report.sql --table monthly_report \
+  --queue adhoc_fast,adhoc --yes --json | jq -r .job_id)
+
+echo "lancado ${job_id}"
+
+if dispatch job wait "${job_id}" --timeout 3600 --json | jq -e '.state == "Succeeded"' >/dev/null; then
+  echo "pronto: $(ls -1 *monthly_report*.csv)"
+else
+  dispatch job logs "${job_id}" --lines 200
+  exit 1
+fi</code></pre>
+
+        <h2>Regras de segurança</h2>
+        <ul>
+          <li>Lançamentos e cancelamentos nunca acontecem em silêncio: passe <code>--yes</code>.</li>
+          <li>Findings de severidade <code>error</code> exigem, além disso, <code>--acknowledge-advisor</code>. Não existe variável de ambiente para automatizar isso — é deliberado.</li>
+          <li>Caminhos de Job ausentes, corrompidos, com escape por symlink ou fora da raiz de jobs são rejeitados com saída <code>3</code>.</li>
+        </ul>
+
+        <h2>Comandos de telemetria</h2>
+        <pre><button class="copy" type="button">Copy</button><code>dispatch telemetry who --days 30
+dispatch telemetry summary --days 30</code></pre>
+        <p>Ambos leem JSONL local. Nada sai do Edge Node. Defina <code>DISPATCH_TELEMETRY=0</code> para parar o registro.</p>
+        <div class="page-links">
+          <a href="#tui" data-page-link="tui"><strong>Guia do TUI</strong>O equivalente interativo.</a>
+          <a href="#notebook" data-page-link="notebook"><strong>API de notebook</strong>A mesma CLI, em Python.</a>
+          <a href="#troubleshooting" data-page-link="troubleshooting"><strong>Solução de problemas</strong>Decodificando uma recusa.</a>
+        </div>
+      </article>
+
+      <article class="doc-page" data-page="notebook" data-lang="pt" hidden>
+        <p class="eyebrow">Referência · Python</p>
+        <h1>API de notebook</h1>
+        <div class="hero-rule"></div>
+        <p class="lede"><code>dispatch.notebook</code> roda e monitora Jobs a partir do Jupyter — ou de qualquer script Python — no Edge Node. Ele envolve a CLI <code>dispatch job</code>, acessada por objetos Python em vez de argv e códigos de saída. Mesma validação, mesma checagem de Kerberos, mesmo gate do Advisor, mesmo limite de dois Jobs, mesmos manifestos, mesmos runners desacoplados.</p>
+
+        <h2>Início rápido</h2>
+        <pre><button class="copy" type="button">Copy</button><code>from dispatch.notebook import Dispatch
+
+d = Dispatch(cwd="~/sql")            # onde ficam seus arquivos .sql
+
+# SQL escrito aqui, carregado direto em um DataFrame
+df = d.sql("SELECT dt, count(*) AS c FROM aa_enc.events GROUP BY dt").to_df()
+
+# uma tabela que você já tem
+d.table("aa_enc.events", limit=1000).to_df()
+
+# ou um Job a partir de um dos seus arquivos, acompanhado enquanto roda
+job = d.launch(source="SqlFile", destination="Csv",
+               sql="monthly_report.sql", table="report")
+job.watch()                          # estado e log ao vivo, atualizados no lugar
+job.succeeded                        # True
+job.to_df()                          # o Result, como DataFrame
+
+d.jobs(state="Running")              # supervisione o resto</code></pre>
+        <div class="callout warn"><strong>Toda chamada é um Job de verdade.</strong> Validação, Kerberos, gate do Advisor, limite de dois Jobs, manifesto, runner desacoplado. Espere minutos, não milissegundos. Não existe, de propósito, uma camada de query interativa sem auditoria — então não escreva um laço que chama <code>d.sql()</code> por linha.</div>
+
+        <h2>A sessão</h2>
+        <pre><button class="copy" type="button">Copy</button><code>d = Dispatch(cwd=None, command=None, env=None, timeout=None, workspace=None)</code></pre>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Argumento</th><th>Significado</th></tr></thead>
+          <tbody>
+            <tr><td><code>cwd</code></td><td>Diretório onde a CLI roda. Caminhos <code>sql</code> relativos resolvem aqui, e os CSVs dos Jobs que você nomeia caem aqui. Padrão: o diretório de trabalho do notebook.</td></tr>
+            <tr><td><code>command</code></td><td>Invocação da CLI. Padrão: <code>$DISPATCH_CLI</code> quando definido, senão <code>python -m dispatch</code> com o interpretador do kernel.</td></tr>
+            <tr><td><code>env</code></td><td>Variáveis de ambiente extras para a CLI, p.ex. <code>{"DISPATCH_MOCK_SCENARIO": "slow"}</code> em desenvolvimento.</td></tr>
+            <tr><td><code>timeout</code></td><td>Segundos que um comando da CLI pode levar antes de <code>OperationalError</code>.</td></tr>
+            <tr><td><code>workspace</code></td><td>Workspace de notebook para Inline SQL e Results. Padrão: <code>&lt;data_root&gt;/.dispatch/notebook</code>.</td></tr>
+          </tbody>
+        </table></div>
+        <p>Se o kernel não conseguir importar <code>dispatch</code>, aponte a biblioteca para o launcher instalado:</p>
+        <pre><button class="copy" type="button">Copy</button><code>export DISPATCH_CLI=~/.local/bin/dispatch</code></pre>
+
+        <h2>Inline SQL</h2>
+        <pre><button class="copy" type="button">Copy</button><code>job = d.sql(
+    "SELECT * FROM aa_enc.events WHERE dt = '2026-07-01'",
+    destination="Csv",       # Csv (padrão), Table ou Table+Csv
+    table=None,              # obrigatório para destinos Table
+    queue="auto",
+    wait_for_slot=300,       # espera até 5 min por uma vaga em vez de falhar
+)</code></pre>
+        <p><code>sql()</code> salva o texto como <strong>Inline SQL</strong> no workspace de notebook e o lança como um Job <code>SqlFile</code> comum. Ele submete imediatamente e retorna o <code>Job</code>, então <code>d.sql(...)</code> sozinho já começa o trabalho e <code>d.sql(...).to_df()</code> roda e busca em uma linha. Não há relação preguiçosa para encadear, porque o Dispatch não tem um planejador de query para adiar nada.</p>
+        <p>O workspace existe para que seu diretório de trabalho só receba arquivos que você pediu pelo nome. Inline SQL e seus Results ficam sob o diretório do Dispatch, não o seu.</p>
+        <pre><button class="copy" type="button">Copy</button><code># materializar uma tabela em vez de buscar linhas
+d.sql("SELECT ...", destination="Table", table="weekly_agg").wait()</code></pre>
+
+        <h2>Erros</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Exceção</th><th>Levantada quando</th></tr></thead>
+          <tbody>
+            <tr><td><code>UsageError</code></td><td>O pedido em si era inválido: célula ilegal, arquivo ausente, intervalo de datas ruim. Nada rodou.</td></tr>
+            <tr><td><code>UnknownJobError</code></td><td>O Job ID é desconhecido, malformado ou inseguro.</td></tr>
+            <tr><td><code>OperationalError</code></td><td>O ambiente recusou ou falhou: Kerberos, capacidade, timeout, handoff.</td></tr>
+          </tbody>
+        </table></div>
+        <p>Um Job que rodou e <em>falhou</em> não é exceção — é retornado como qualquer outro, com <code>succeeded == False</code> e um log para ler. Reserve o <code>try</code> para recusas, não para falhas de query.</p>
+        <div class="callout"><strong>pandas é opcional.</strong> <code>to_df()</code> precisa dele; <code>rows()</code> funciona só com a biblioteca padrão. Use <code>rows()</code> em scripts que não devem carregar a dependência de pandas.</div>
+
+        <h2>Aprenda na ordem</h2>
+        <p><code>demos/notebook_job_api.ipynb</code> é o tutorial: o mesmo conteúdo desta página, em ordem, com células executáveis. <code>docs/notebook-api.md</code> é a referência completa. A justificativa de design está nos ADR-0008 a ADR-0011 — em especial o ADR-0011, que explica por que não existe uma camada de query interativa sem auditoria.</p>
+        <div class="page-links">
+          <a href="#cli" data-page-link="cli"><strong>Receitas CLI</strong>O que esta API envolve.</a>
+          <a href="#advisor" data-page-link="advisor"><strong>Advisor</strong>Ele também barra Jobs de notebook.</a>
+          <a href="#glossary" data-page-link="glossary"><strong>Glossário</strong>Inline SQL, Result, workspace.</a>
+        </div>
+      </article>
+
+      <article class="doc-page" data-page="advisor" data-lang="pt" hidden>
+        <p class="eyebrow">Referência · análise pré-lançamento</p>
+        <h1>Advisor</h1>
+        <div class="hero-rule"></div>
+        <p class="lede">Antes de um Job ser lançado, o Advisor faz o parse do seu SQL e o confronta com o manual de otimização do Impala. Ele reporta <strong>Findings</strong>: um id de regra, uma referência de diretriz, uma severidade, o que detectou e o que fazer a respeito. É apenas sinalização — nunca reescreve seu SQL e nunca altera silenciosamente o que roda.</p>
+
+        <h2>Severidades</h2>
+        <div class="card-grid">
+          <div class="card"><h3><code>error</code></h3><p>Algo provavelmente caro ou errado. Lançar mesmo assim exige reconhecimento explícito: <kbd>Y</kbd> no gate do TUI, ou <code>--acknowledge-advisor</code> na CLI.</p></div>
+          <div class="card"><h3><code>warning</code></h3><p>Vale ler antes de lançar, mas não barra. Normalmente um filtro faltando ou uma regra de nomenclatura.</p></div>
+          <div class="card"><h3><code>info</code></h3><p>Um padrão às vezes justificado. Mostrado para você confirmar que foi intencional.</p></div>
+          <div class="card"><h3>O que ele nunca faz</h3><p>Não modifica seu SQL, não escolhe outro pool e não recusa um lançamento por conta própria. O único gate é a confirmação de erro, e ela é sua.</p></div>
+        </div>
+
+        <h2>As regras</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Id</th><th>Regra</th><th>Diretriz</th><th>Severidade</th></tr></thead>
+          <tbody>
+            <tr><td><code>R01</code></td><td>select-star-unfiltered</td><td>§3, G#10</td><td><code>error</code></td></tr>
+            <tr><td><code>R02</code></td><td>missing-partition-filter</td><td>G#1, §8</td><td><code>warning</code></td></tr>
+            <tr><td><code>R03</code></td><td>function-on-partition-column</td><td>§8 datas</td><td><code>warning</code></td></tr>
+            <tr><td><code>R04</code></td><td>date-range-over-13-months</td><td>G#8</td><td><code>error</code></td></tr>
+            <tr><td><code>R05</code></td><td>missing-join-hint</td><td>G#3</td><td><code>info</code></td></tr>
+            <tr><td><code>R06</code></td><td>wasteful-join-hint</td><td>G#3</td><td><code>warning</code></td></tr>
+            <tr><td><code>R07</code></td><td>dangerous-broadcast-hint</td><td>G#3/#4</td><td><code>error</code></td></tr>
+            <tr><td><code>R08</code></td><td>large-table-joined-directly</td><td>G#9</td><td><code>info</code></td></tr>
+            <tr><td><code>R09</code></td><td>cartesian-product</td><td>§8 joins</td><td><code>error</code></td></tr>
+            <tr><td><code>R10</code></td><td>cast-in-join-condition</td><td>§4</td><td><code>info</code></td></tr>
+            <tr><td><code>R11</code></td><td>leading-wildcard-like</td><td>§8 strings</td><td><code>info</code></td></tr>
+            <tr><td><code>R12</code></td><td>regexp-predicate</td><td>§8 strings</td><td><code>info</code></td></tr>
+            <tr><td><code>R13</code></td><td>union-distinct</td><td>§8</td><td><code>info</code></td></tr>
+            <tr><td><code>R14</code></td><td>select-distinct</td><td>§8</td><td><code>info</code></td></tr>
+            <tr><td><code>R15</code></td><td>count-distinct-on-monitored-table</td><td>§8 agregações</td><td><code>info</code></td></tr>
+            <tr><td><code>R16</code></td><td>destination-table-naming</td><td>G#5</td><td><code>warning</code></td></tr>
+            <tr><td><code>R17</code></td><td>ddl-missing-drop</td><td>G#6</td><td><code>warning</code></td></tr>
+            <tr><td><code>R18</code></td><td>ddl-location-outside-user-dir</td><td>G#2</td><td><code>warning</code></td></tr>
+          </tbody>
+        </table></div>
+        <p><code>R01</code>–<code>R15</code> são avaliadas sobre o SQL parseado. <code>R16</code> é uma regra de formulário: checa o nome da tabela de destino que você digitou, não o texto da query. <code>R17</code> e <code>R18</code> se aplicam a DDL.</p>
+
+        <h2>As quatro que te barram</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Finding</th><th>Por que é erro</th><th>Correção</th></tr></thead>
+          <tbody>
+            <tr><td><code>R01</code> select-star-unfiltered</td><td>Um <code>SELECT *</code> sem limite lê todas as colunas de todas as partições. É o jeito mais rápido de esgotar um pool.</td><td>Nomeie as colunas necessárias e adicione um predicado de partição.</td></tr>
+            <tr><td><code>R04</code> date-range-over-13-months</td><td>Intervalos além de treze meses quase sempre são acidente, e o custo é linear em meses.</td><td>Estreite o intervalo ou divida em vários Jobs.</td></tr>
+            <tr><td><code>R07</code> dangerous-broadcast-hint</td><td>Fazer broadcast de uma tabela grande replica-a para todos os nós e pode derrubar a query — e o pool.</td><td>Remova a hint ou troque por um shuffle join.</td></tr>
+            <tr><td><code>R09</code> cartesian-product</td><td>Um join sem condição utilizável multiplica as linhas em vez de casá-las.</td><td>Forneça a condição de join. Se for mesmo intencional, reconheça.</td></tr>
+          </tbody>
+        </table></div>
+        <div class="callout"><strong>Reconhecer é uma decisão, não formalidade.</strong> <code>--acknowledge-advisor</code> e o <kbd>Y</kbd> do TUI significam "eu li isto e vou lançar o SQL como está". O manifesto do Job registra que você fez isso. Se você se pegar reconhecendo o mesmo finding todo dia, corrija a query.</div>
+
+        <h2>Lendo um Finding</h2>
+        <p>Cada Finding entrega quatro coisas: o <strong>id da regra</strong>, para consulta; a <strong>referência de diretriz</strong> de volta ao manual de otimização; uma <strong>linha de detecção</strong> dizendo o que foi encontrado e onde; e uma <strong>linha de remediação</strong> dizendo o que mudar. No TUI, o gate rola com <kbd>↑</kbd><kbd>↓</kbd> e <kbd>PgUp</kbd>/<kbd>PgDn</kbd>; na CLI, eles são impressos no stderr antes da recusa.</p>
+        <p>A especificação completa, incluindo exatamente o que cada regra casa, está em <code>docs/query-optimization-advisor-spec.md</code>.</p>
+        <div class="page-links">
+          <a href="#tui" data-page-link="tui"><strong>Guia do TUI</strong>As teclas do gate.</a>
+          <a href="#cli" data-page-link="cli"><strong>Receitas CLI</strong>Reconhecendo sem interatividade.</a>
+          <a href="#onboarding" data-page-link="onboarding"><strong>Onboarding</strong>Escrevendo SQL que nunca aciona o gate.</a>
+        </div>
+      </article>
+
+      <article class="doc-page" data-page="troubleshooting" data-lang="pt" hidden>
+        <p class="eyebrow">Referência · quando dá errado</p>
+        <h1>Solução de problemas</h1>
+        <div class="hero-rule"></div>
+        <p class="lede">Corrija o primeiro erro concreto, não o sintoma seguinte. A maioria dos problemas de primeira execução é setup ou Kerberos; a maioria dos problemas posteriores é a query ou o cluster. O log em <code>/ads_storage/$USER/.dispatch/jobs/</code> é o sistema de registro — cite-o ao pedir ajuda.</p>
+
+        <h2>Setup</h2>
+        <details><summary><code>dispatch: command not found</code></summary>
+          <p>O launcher está em <code>~/.local/bin</code>, que pode ainda não estar no seu <code>PATH</code> neste shell.</p>
+          <pre><button class="copy" type="button">Copy</button><code>export PATH="$HOME/.local/bin:$PATH"
+which dispatch</code></pre>
+          <p>Se o <code>which</code> continuar sem imprimir nada, rode <code>/ads_storage/dispatch/onboard.sh</code> de novo e guarde a saída completa. Abrir uma nova sessão SSH também resolve, porque o onboarding atualiza seu perfil de shell.</p>
+        </details>
+        <details><summary>O onboarding diz que o runtime compartilhado está ausente ou inválido</summary>
+          <p>Pare. Envie o erro exato ao Release Operator. Não rode <code>install.sh</code> e não rode <code>pip</code> — analistas não reparam o runtime compartilhado, e um ambiente remendado à mão é bem mais difícil de diagnosticar do que um ausente. Seus jobs, sua configuração e qualquer venv pessoal antiga podem ficar onde estão.</p>
+        </details>
+        <details><summary>O launcher se comporta de forma estranha depois de uma atualização</summary>
+          <p>Rode <code>/ads_storage/dispatch/onboard.sh</code> novamente. Ele substitui um launcher desatualizado sem apagar seus jobs ou sua configuração. Não rode com <code>source</code>.</p>
+        </details>
+
+        <h2>Kerberos</h2>
+        <details><summary>O Dispatch recusa lançar: sem ticket, ou ticket prestes a expirar</summary>
+          <p>O Dispatch exige um ticket válido com pelo menos cinco minutos restantes, porque um ticket que expira no meio do Job falha a query depois que ela já consumiu recursos do cluster.</p>
+          <pre><button class="copy" type="button">Copy</button><code>klist          # conferir
+kinit          # renovar
+klist          # confirmar</code></pre>
+          <p>Dentro da tela New Job do TUI, <kbd>K</kbd> faz o mesmo sem sair do aplicativo.</p>
+        </details>
+        <details><summary>O Job falhou com <code>AUTH_ERROR</code> ou uma exceção de autorização</summary>
+          <p>Ou o ticket expirou durante a execução, ou você não tem permissão no schema ou na tabela. Renove com <code>kinit</code> e tente de novo; se repetir na mesma tabela, é uma questão de permissões para a equipe de plataforma, não um problema do Dispatch.</p>
+        </details>
+
+        <h2>Recusas de lançamento</h2>
+        <details><summary>"Dois Jobs já em execução"</summary>
+          <p>O limite é de dois Jobs simultâneos em <code>Running</code> ou <code>Pending</code> por analista, e a recusa é dura — o terceiro não entra numa fila silenciosa. Veja o que está rodando com <code>dispatch job list --state Running</code> e espere ou cancele um. Na API de notebook, <code>wait_for_slot=</code> faz a chamada esperar por uma vaga em vez de falhar de imediato.</p>
+        </details>
+        <details><summary>O destino que eu quero está desabilitado (ou código <code>2</code> na CLI)</summary>
+          <p>Você escolheu uma célula Source × Destination ilegal. <code>SqlTemplate</code> só escreve <code>Table</code>; <code>ExistingTable</code> só escreve <code>Csv</code>. Pressione <kbd>M</kbd> no TUI para ver a matriz.</p>
+        </details>
+        <details><summary>Código <code>2</code> sem causa óbvia</summary>
+          <p>Saída <code>2</code> é sempre "o pedido era inválido" — na maioria das vezes falta de <code>--yes</code>, falta de <code>--acknowledge-advisor</code> quando o Advisor reportou erros, um caminho de SQL que não existe em relação ao diretório de invocação, ou uma data malformada.</p>
+        </details>
+        <details><summary>Código <code>3</code></summary>
+          <p>O Job ID é desconhecido, malformado ou resolve fora da raiz de jobs. Copie-o de <code>dispatch job list</code> em vez de redigitar; no TUI, <kbd>Y</kbd> no Job Detail copia exatamente.</p>
+        </details>
+        <details><summary>Código <code>4</code></summary>
+          <p>Recusa ou falha operacional: Kerberos, capacidade, timeout, problema de handoff ou cancelamento falho. O pedido era válido, então uma nova tentativa pode funcionar depois que a causa for resolvida.</p>
+        </details>
+
+        <h2>Jobs que falham</h2>
+        <details><summary><code>SYNTAX_ERROR</code></summary>
+          <p>O Impala rejeitou o SQL. Pré-visualize antes (<kbd>P</kbd> no New Job) — para um <code>SqlTemplate</code>, o preview mostra o texto após a substituição, que é onde erros de marcador ficam visíveis.</p>
+        </details>
+        <details><summary><code>TABLE_NOT_FOUND</code></summary>
+          <p>A tabela ou o schema de origem não existe. Use o Impala Browser (<kbd>B</kbd>) para confirmar o schema e o nome exato antes de relançar.</p>
+        </details>
+        <details><summary><code>MEMORY_LIMIT_EXCEEDED</code></summary>
+          <p>A query precisa de mais memória do que o pool permite. Reduza o escopo — filtro de partição mais estreito, menos colunas, agregar antes — ou pergunte à equipe de plataforma sobre os limites do pool. Repetir a mesma query sem mudanças vai falhar igual.</p>
+        </details>
+        <details><summary>Rejeitado pelo pool, ou "todos os pools ocupados"</summary>
+          <p>É capacidade do cluster, não o seu Job. Se você restringiu a fila, amplie: deixar a seleção vazia (<code>auto</code>) cicla todos os pools até um aceitar. Caso contrário, tente fora do horário de pico.</p>
+        </details>
+        <details><summary>O Job está preso em <code>Running</code> mas nada acontece</summary>
+          <p>Rode <code>dispatch job list</code> — ele reconcilia manifestos desatualizados antes de imprimir, então um Job cujo runner morreu é corrigido em vez de aparecer rodando para sempre. Depois leia o fim do log com <code>dispatch job logs JOB_ID --lines 200</code>.</p>
+        </details>
+
+        <h2>Resultados</h2>
+        <details><summary>O CSV não está onde eu esperava</summary>
+          <p>O Dispatch captura o diretório de trabalho uma única vez, na inicialização, e resolve todo destino CSV contra ele pela sessão inteira. Se você abriu o TUI a partir do seu diretório home, é lá que o CSV está — não ao lado do arquivo SQL. Faça <code>cd</code> para o diretório certo <em>antes</em> de iniciar o Dispatch.</p>
+        </details>
+        <details><summary>Pedi <code>Table + Csv</code> e só recebi a tabela</summary>
+          <p>O runner faz a tabela primeiro e depois uma exportação de CSV separada. Se o Job terminou entre as duas etapas, a tabela existe e o CSV não. O log mostra qual etapa falhou; relançar como <code>ExistingTable → Csv</code> exporta o que já foi construído em vez de recalcular.</p>
+        </details>
+        <details><summary>O e-mail de notificação não chegou</summary>
+          <p>O e-mail é enviado pelos orchestrator scripts, não pelo TUI. Confira se você informou um destinatário — o campo é pré-preenchido a partir de <code>DISPATCH_EMAIL</code> quando definido, e fica vazio caso contrário. Vários destinatários são separados por vírgula.</p>
+        </details>
+
+        <h2>Reportando um problema</h2>
+        <p>Inclua estas quatro coisas e o diagnóstico costuma ser imediato:</p>
+        <ul class="checks">
+          <li>O Job ID (<kbd>Y</kbd> no Job Detail copia).</li>
+          <li>O comando exato ou o Source × Destination escolhido.</li>
+          <li>As últimas 50 linhas de <code>dispatch job logs JOB_ID</code>.</li>
+          <li>O código de saída, se você usou a CLI.</li>
+        </ul>
+        <div class="callout"><strong>Nada é apagado.</strong> Jobs finalizados saem do dashboard após sete dias, mas permanecem no History, com manifestos e logs intactos em <code>/ads_storage/$USER/.dispatch/jobs/</code>. Você sempre pode voltar e ler o que realmente aconteceu.</div>
+      </article>
+
+      <article class="doc-page" data-page="glossary" data-lang="pt" hidden>
+        <p class="eyebrow">Referência · vocabulário</p>
+        <h1>Glossário</h1>
+        <div class="hero-rule"></div>
+        <p class="lede">O Dispatch usa estas palavras com precisão — na interface, nos logs e neste manual. Onde um sinônimo comum é deliberadamente evitado, ele é citado: usar a palavra evitada em um relato de bug geralmente significa descrever a coisa errada.</p>
+        <dl class="term-grid">
+          <dt>Job</dt><dd>Uma execução ponta a ponta: um par <strong>Source</strong> e <strong>Destination</strong> mais os parâmetros necessários — schema, nome da tabela, e-mail, caminho do SQL. Composto por uma ou mais chamadas a <strong>Orchestrator scripts</strong>. <em>Evite: run, execução, tarefa.</em></dd>
+          <dt>Source</dt><dd>O tipo de SQL do qual um Job é construído: <code>SqlFile</code>, <code>SqlTemplate</code> ou <code>ExistingTable</code>. <em>Evite: tipo de query, modo, workflow.</em></dd>
+          <dt>Destination</dt><dd>Onde o resultado de um Job é materializado: <code>Table</code>, <code>Csv</code> ou <code>Table + Csv</code>. <em>Evite: saída, alvo, sink.</em></dd>
+          <dt>Estado do Job</dt><dd>A etapa do ciclo de vida: <code>Pending</code>, <code>Running</code>, <code>Succeeded</code>, <code>Failed</code> ou <code>Cancelled</code>. <em>Evite: status, fase.</em></dd>
+          <dt>Orchestrator script</dt><dd>Um dos três scripts testados em produção em <code>scr/</code>. São donos do laço de retry entre filas e das notificações por e-mail; o Dispatch os trata como caixa-preta. <em>Evite: backend, runner, engine.</em></dd>
+          <dt>Resource Pool</dt><dd>Uma fila do Impala que gerencia recursos de queries concorrentes. Os orchestrators ciclam por uma lista fixa até uma aceitar a query. <em>Evite: queue, fila.</em></dd>
+          <dt>Edge Node</dt><dd>O servidor de acesso ao cluster Hadoop. Hospeda os orchestrator scripts e o próprio Dispatch.</dd>
+          <dt>Analista</dt><dd>Quem roda o Dispatch em um Edge Node para lançar e supervisionar Jobs. Dono da configuração, jobs, logs e telemetria privados em <code>/ads_storage/&lt;user&gt;/.dispatch/</code>; nunca instala dependências nem roda pip. <em>Evite: usuário, end user, operador.</em></dd>
+          <dt>Release Operator</dt><dd>Quem implanta o Dispatch em um Edge Node e gerencia o runtime compartilhado: bundles verificados de dependências, <code>install.sh</code>, ativação e rollback. Distinto do Analista, que só roda <code>onboard.sh</code>. <em>Evite: admin, deployer, mantenedor.</em></dd>
+          <dt>Advisor</dt><dd>A análise estática pré-lançamento que confronta o SQL de um Job com o manual de otimização do Impala e reporta Findings. Apenas sinaliza: nunca modifica nem barra o SQL além do modal de confirmação de erro. <em>Evite: linter, otimizador, rewriter.</em></dd>
+          <dt>Finding</dt><dd>Uma detecção do Advisor: id da regra, referência de diretriz, severidade (<code>error</code> / <code>warning</code> / <code>info</code>), linha de detecção e linha de remediação. <em>Evite: violação, issue, erro — "erro" é reservado para a severidade.</em></dd>
+          <dt>Manifesto</dt><dd>A descrição em disco de um Job, em <code>/ads_storage/&lt;user&gt;/.dispatch/jobs/</code>. O TUI e a CLI supervisionam Jobs lendo manifestos e logs; é o sistema de registro.</dd>
+          <dt>Inline SQL</dt><dd>SQL escrito em uma célula de notebook em vez de um arquivo <code>.sql</code> que você mantém. Produz um Job <code>SqlFile</code> comum; o arquivo do qual ele roda pertence ao Dispatch, não a você. <em>Evite: string de query, query ad hoc, snippet.</em></dd>
+          <dt>Result</dt><dd>As linhas que um Job concluído produziu, lidas de volta para Python a partir do CSV que seu Destination escreveu. Um Job só de <code>Table</code> não tem Result. <em>Evite: saída, dataset, result set.</em></dd>
+          <dt>Workspace de notebook</dt><dd>O diretório do Dispatch que guarda Inline SQL e Results de Jobs lançados de notebook, para que seu diretório de trabalho só receba arquivos que você nomeou. <em>Evite: scratch, diretório temporário, cache.</em></dd>
+          <dt>GUI legada</dt><dd>A ferramenta Windows original que preparava comandos SSH. Removida na v1.0. Seu campo <code>Mode</code> confundia Source e Destination; por isso hoje são dois eixos ortogonais.</dd>
+        </dl>
+        <h2>Relações que vale memorizar</h2>
+        <ul>
+          <li>Um Job tem exatamente um Source e exatamente um Destination.</li>
+          <li>Um Job cujo Destination inclui <code>Csv</code> tem exatamente um Result; um Job só de <code>Table</code> não tem nenhum.</li>
+          <li>Um analista pode ter no máximo dois Jobs em execução ao mesmo tempo. O terceiro é recusado; não entra em fila.</li>
+          <li>Um Job em estado terminal fica no dashboard ativo por sete dias e depois vai para o History. Nunca é apagado.</li>
+        </ul>
+      </article>
+
+
+      <p class="metadata" data-copy-en="Dispatch v1.1.0 · offline handbook · no network calls, no tracking · open it from a file share or copy it anywhere." data-copy-pt="Dispatch v1.1.0 · manual offline · sem chamadas de rede, sem rastreamento · abra de um compartilhamento ou copie para onde quiser.">Dispatch v1.1.0 · offline handbook · no network calls, no tracking · open it from a file share or copy it anywhere.</p>
+    </main>
+  </div>
+
+  <script>
+    (() => {
+      const root = document.documentElement;
+      const pages = new Set([...document.querySelectorAll('[data-page]')].map(node => node.dataset.page));
+      // Initial theme and language were resolved by the pre-paint script in <head>.
+      let language = root.dataset.language;
+      let theme = root.dataset.theme;
+      let page = (() => {
+        const candidate = location.hash.slice(1);
+        return pages.has(candidate) ? candidate : 'onboarding';
+      })();
+      const save = (key, value) => { try { localStorage.setItem(key, value); } catch { /* storage may be blocked; toggles still work for this session */ } };
+      const languageButton = document.getElementById('language-toggle');
+      const themeButton = document.getElementById('theme-toggle');
+
+      function applyState({ focus = false } = {}) {
+        root.lang = language === 'pt' ? 'pt-BR' : 'en';
+        root.dataset.theme = theme;
+        root.dataset.language = language;
+        document.querySelectorAll('.doc-page').forEach(article => {
+          article.hidden = article.dataset.page !== page || article.dataset.lang !== language;
+        });
+        document.querySelectorAll('[data-page-link]').forEach(link => {
+          const active = link.dataset.pageLink === page;
+          if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
+          if (link.dataset.labelEn) link.textContent = language === 'pt' ? link.dataset.labelPt : link.dataset.labelEn;
+        });
+        document.querySelectorAll('[data-copy-en]').forEach(node => {
+          node.textContent = language === 'pt' ? node.dataset.copyPt : node.dataset.copyEn;
+        });
+        languageButton.textContent = language === 'pt' ? 'EN' : 'PT';
+        languageButton.setAttribute('aria-label', language === 'pt' ? 'Switch to English' : 'Mudar para português');
+        const dark = theme === 'dark';
+        themeButton.textContent = language === 'pt'
+          ? (dark ? '☀ Modo claro' : '☾ Modo escuro')
+          : (dark ? '☀ Light mode' : '☾ Dark mode');
+        themeButton.setAttribute('aria-pressed', String(dark));
+        themeButton.setAttribute('aria-label', language === 'pt'
+          ? (dark ? 'Mudar para modo claro' : 'Mudar para modo escuro')
+          : (dark ? 'Switch to light mode' : 'Switch to dark mode'));
+        document.getElementById('documentation-navigation').setAttribute(
+          'aria-label', language === 'pt' ? 'Páginas da documentação' : 'Documentation pages'
+        );
+        document.title = `Dispatch · ${language === 'pt' ? 'Manual do analista' : 'Analyst handbook'}`;
+        if (focus) {
+          const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+          window.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
+          document.getElementById('main-content').focus({ preventScroll: true });
+        }
+      }
+
+      languageButton.addEventListener('click', () => {
+        language = language === 'en' ? 'pt' : 'en';
+        save('dispatch-doc-language', language);
+        applyState();
+      });
+      themeButton.addEventListener('click', () => {
+        theme = theme === 'dark' ? 'light' : 'dark';
+        save('dispatch-doc-theme', theme);
+        applyState();
+      });
+      document.querySelectorAll('[data-page-link]').forEach(link => {
+        link.addEventListener('click', event => {
+          event.preventDefault();
+          const candidate = link.dataset.pageLink;
+          if (!pages.has(candidate)) return;
+          page = candidate;
+          applyState({ focus: true });
+        });
+      });
+      document.querySelector('.skip-link').addEventListener('click', event => {
+        event.preventDefault();
+        document.getElementById('main-content').focus({ preventScroll: false });
+      });
+
+      function copyToClipboard(text) {
+        if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text).then(() => true, () => legacyCopy(text));
+        return Promise.resolve(legacyCopy(text));
+      }
+      // The handbook is often opened from file shares or plain http, where the async clipboard API is unavailable.
+      function legacyCopy(text) {
+        const helper = document.createElement('textarea');
+        helper.value = text;
+        helper.setAttribute('readonly', '');
+        helper.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+        document.body.append(helper);
+        helper.select();
+        let copied = false;
+        try { copied = document.execCommand('copy'); } catch { copied = false; }
+        helper.remove();
+        return copied;
+      }
+      document.querySelectorAll('.copy').forEach(button => {
+        const idleLabel = button.textContent;
+        let resetTimer = 0;
+        button.addEventListener('click', async () => {
+          const text = button.parentElement.querySelector('code').innerText;
+          const copied = await copyToClipboard(text);
+          button.textContent = copied
+            ? (language === 'pt' ? 'Copiado' : 'Copied')
+            : (language === 'pt' ? 'Falhou' : 'Failed');
+          clearTimeout(resetTimer);
+          resetTimer = setTimeout(() => { button.textContent = idleLabel; }, 1200);
+        });
+      });
+      document.querySelectorAll('[role="tablist"]').forEach(tablist => {
+        const tabs = [...tablist.querySelectorAll('[role="tab"]')];
+        const panels = tabs.map(tab => document.getElementById(tab.getAttribute('aria-controls')));
+        const activate = tab => {
+          tabs.forEach(item => item.setAttribute('aria-selected', String(item === tab)));
+          panels.forEach(panel => panel.classList.toggle('active', panel.id === tab.getAttribute('aria-controls')));
+        };
+        tabs.forEach((tab, index) => {
+          tab.addEventListener('click', () => activate(tab));
+          tab.addEventListener('keydown', event => {
+            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+            event.preventDefault();
+            const next = tabs[(index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
+            next.focus();
+            activate(next);
+          });
+        });
+      });
+      applyState();
+    })();
+  </script>
+</body>
+</html>
