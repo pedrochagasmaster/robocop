@@ -64,10 +64,15 @@ for path in sorted((bundle / 'wheels').iterdir()):
     content = path.read_bytes()
     files.append({'path': f'wheels/{path.name}', 'sha256': hashlib.sha256(content).hexdigest(), 'size': len(content), 'kind': 'wheel'})
 identity = {
-    'schema': 'edge-deploy/dependency-bundle/1',
+    'schema': 'edge-deploy/dependency-bundle/2',
     'tool': 'robocop',
     'source_sha': subprocess.run(['git', 'rev-parse', 'HEAD'], check=True, capture_output=True, text=True).stdout.strip(),
-    'target': {'python': '3.10', 'implementation': 'cp', 'abi': 'cp310', 'platform': 'manylinux2014_x86_64'},
+    'target': {
+        'python': '3.10',
+        'implementation': 'cp',
+        'abi': 'cp310',
+        'compatible_platform_tags': ['manylinux_2_24_x86_64', 'manylinux2014_x86_64'],
+    },
     'files': sorted(files, key=lambda item: item['path']),
 }
 canonical = (json.dumps(identity, sort_keys=True, separators=(',', ':')) + '\n').encode()
