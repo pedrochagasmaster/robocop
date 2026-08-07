@@ -39,14 +39,17 @@ def make_bundle(
     (bundle / "requirements").mkdir(exist_ok=True)
     (bundle / "wheels").mkdir(exist_ok=True)
     identity = {
-        "schema": "edge-deploy/dependency-bundle/1",
+        "schema": "edge-deploy/dependency-bundle/2",
         "tool": "robocop",
         "source_sha": "a" * 40,
         "target": {
             "python": target_python,
             "implementation": "cp",
             "abi": "cp310",
-            "platform": "manylinux2014_x86_64",
+            "compatible_platform_tags": [
+                "manylinux_2_24_x86_64",
+                "manylinux2014_x86_64",
+            ],
         },
         "files": manifest_files,
     }

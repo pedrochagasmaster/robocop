@@ -47,7 +47,7 @@ def _load_manifest(bundle_dir: Path) -> tuple[dict[str, object], str]:
         raise RuntimeInstallError(f"Invalid dependency bundle manifest: {exc}") from exc
     if not isinstance(manifest, dict):
         raise RuntimeInstallError("Dependency bundle manifest must be a JSON object")
-    if manifest.get("schema") != "edge-deploy/dependency-bundle/1":
+    if manifest.get("schema") != "edge-deploy/dependency-bundle/2":
         raise RuntimeInstallError("Dependency bundle manifest has an unsupported schema")
     if manifest.get("tool") != "robocop":
         raise RuntimeInstallError("Dependency bundle manifest is for a different tool")
