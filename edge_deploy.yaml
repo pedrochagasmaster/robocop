@@ -15,7 +15,10 @@ dependency_bundle:
   python_version: "3.10"
   implementation: cp
   abi: cp310
-  platform: manylinux2014_x86_64
+  # One Linux x86_64 node target with glibc 2.24 or newer.
+  compatible_platform_tags:
+    - manylinux_2_24_x86_64
+    - manylinux2014_x86_64
 smoke:
   standard: ["/ads_storage/dispatch/bin/dispatch --help"]
   deep: ["<controlled Impala job>"]    # needs Kerberos
