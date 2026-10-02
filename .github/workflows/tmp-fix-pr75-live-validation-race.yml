@@ -56,22 +56,22 @@ jobs:
               '        self.query_one("#validation-summary", Static).update("[dim]Checking\\u2026[/]")\n',
               "        self._paint_validation_pending_summary()\n",
           )
-          replace_one(
-              "    def _refresh_kerberos(self) -> None:\n",
-              '''    def _paint_validation_pending_summary(self) -> None:
-              summary = self.query_one("#validation-summary", Static)
-              if self.kerberos_ttl is None:
-                  summary.update("[red]\\u2717 1 issue(s): Kerberos ticket missing \\u2014 press K to kinit[/]")
-              elif self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS:
-                  summary.update(
-                      "[red]\\u2717 1 issue(s): Kerberos ticket TTL is under 5 minutes \\u2014 press K to renew[/]"
-                  )
-              else:
-                  summary.update("[dim]Checking\\u2026[/]")
 
-              def _refresh_kerberos(self) -> None:
-              '''.replace("              ", "    "),
+          pending_summary = (
+              "    def _paint_validation_pending_summary(self) -> None:\n"
+              "        summary = self.query_one(\"#validation-summary\", Static)\n"
+              "        if self.kerberos_ttl is None:\n"
+              "            summary.update(\"[red]\\u2717 1 issue(s): Kerberos ticket missing \\u2014 press K to kinit[/]\")\n"
+              "        elif self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS:\n"
+              "            summary.update(\n"
+              "                \"[red]\\u2717 1 issue(s): Kerberos ticket TTL is under 5 minutes \\u2014 press K to renew[/]\"\n"
+              "            )\n"
+              "        else:\n"
+              "            summary.update(\"[dim]Checking\\u2026[/]\")\n"
+              "\n"
+              "    def _refresh_kerberos(self) -> None:\n"
           )
+          replace_one("    def _refresh_kerberos(self) -> None:\n", pending_summary)
           replace_one(
               "        self._schedule_validation_summary()\n\n    def _on_kerberos_change",
               "        self._paint_validation_pending_summary()\n        self._schedule_validation_summary()\n\n    def _on_kerberos_change",
