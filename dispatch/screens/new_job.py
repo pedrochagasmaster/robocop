@@ -120,6 +120,7 @@ class NewJobScreen(Screen[None]):
         self._sql_analysis_cache: tuple[tuple[str, str, str], AnalysisResult] | None = None
         self._validation_summary_timer: Timer | None = None
         self._live_validation_generation = 0
+        self._live_feedback_suppressed = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -294,7 +295,7 @@ class NewJobScreen(Screen[None]):
             self.watch(self.app, "kerberos_ttl", self._on_kerberos_change, init=True)
         self._update_field_visibility()
         self._inline_validate()
-        self.query_one("#validation-summary", Static).update("[dim]Checking\u2026[/]")
+        self._paint_validation_pending_summary()
         self._schedule_validation_summary(delay=0.0)
         self.query_one("#source", RadioSet).focus()
         self.run_worker(self._populate_sql_picker(), name="sql-picker", exclusive=True)
@@ -461,6 +462,7 @@ class NewJobScreen(Screen[None]):
             hint.update("Tried in order: " + " \u2192 ".join(queues))
 
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        self._live_feedback_suppressed = False
         self._update_field_visibility()
         self._inline_validate()
         self._schedule_validation_summary()
@@ -470,6 +472,7 @@ class NewJobScreen(Screen[None]):
             self._update_queue_hint()
 
     def on_input_changed(self, event: Input.Changed) -> None:
+        self._live_feedback_suppressed = False
         if event.input.id == "table-name-suffix":
             normalized = self._normalize_table_name_suffix(event.value)
             if normalized != event.value:
@@ -497,6 +500,8 @@ class NewJobScreen(Screen[None]):
 
     def _inline_validate(self) -> None:
         """Paint cheap validation only; filesystem checks arrive asynchronously."""
+        if self._live_feedback_suppressed:
+            return
         source = self._selected_source()
         msgs = []
         if source in ("SqlFile", "SqlTemplate"):
@@ -805,10 +810,24 @@ class NewJobScreen(Screen[None]):
         else:
             hint.update("")
 
+    def _paint_validation_pending_summary(self) -> None:
+        summary = self.query_one("#validation-summary", Static)
+        if self.kerberos_ttl is None:
+            summary.update(
+                "[red]\u2717 1 issue(s): Kerberos ticket missing \u2014 press K to kinit[/]"
+            )
+        elif self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS:
+            summary.update(
+                "[red]\u2717 1 issue(s): Kerberos ticket TTL is under 5 minutes \u2014 press K to renew[/]"
+            )
+        else:
+            summary.update("[dim]Checking\u2026[/]")
+
     def _refresh_kerberos(self) -> None:
         self.query_one("#launch", Button).disabled = (
             self.kerberos_ttl is None or self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS
         )
+        self._paint_validation_pending_summary()
         self._schedule_validation_summary()
 
     def _on_kerberos_change(self, value: int | None) -> None:
@@ -826,6 +845,7 @@ class NewJobScreen(Screen[None]):
 
     def _show_message(self, text: str, severity: str = "info") -> None:
         self._invalidate_live_validation()
+        self._live_feedback_suppressed = True
         widget = self.query_one("#warning-text", Static)
         color = {"error": "red", "warning": "yellow", "success": "green", "info": "dim"}.get(
             severity, "dim"
