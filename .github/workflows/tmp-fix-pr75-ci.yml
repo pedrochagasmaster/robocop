@@ -22,13 +22,18 @@ jobs:
           version: "0.12.0"
       - name: Install dev dependencies
         run: uv sync --locked --extra dev --python 3.12
-      - name: Repair debounce contract and worker teardown
+      - name: Repair debounce contract, worker teardown, and test isolation
         shell: python
         run: |
           from pathlib import Path
 
           path = Path("dispatch/screens/new_job.py")
           text = path.read_text(encoding="utf-8")
+
+          old = "from datetime import date, datetime\nfrom pathlib import Path\n"
+          new = "from datetime import date, datetime\nfrom functools import partial\nfrom pathlib import Path\n"
+          assert text.count(old) == 1, text.count(old)
+          text = text.replace(old, new)
 
           old = "    def _update_validation_summary(self) -> None:\n        self._apply_validation_summary(self._validation_issues(), self._current_analysis())\n"
           new = "    def _update_validation_summary(self) -> None:\n        self._start_validation_worker()\n"
@@ -40,14 +45,38 @@ jobs:
           assert text.count(old) == 1, text.count(old)
           text = text.replace(old, new)
 
-          old = "        self.run_worker(\n            self._refresh_validation_async(\n"
-          new = "        self.run_worker(\n            lambda: self._refresh_validation_async(\n"
+          old = "        self.run_worker(\n            self._refresh_validation_async(\n                generation,\n                inputs,\n                custom_schema_choice,\n                custom_schema,\n                ttl,\n                sql_cache_key,\n                cached_sql,\n            ),\n            name=\"new-job-live-validation\",\n"
+          new = "        self.run_worker(\n            partial(\n                self._refresh_validation_async,\n                generation,\n                inputs,\n                custom_schema_choice,\n                custom_schema,\n                ttl,\n                sql_cache_key,\n                cached_sql,\n            ),\n            name=\"new-job-live-validation\",\n"
           assert text.count(old) == 1, text.count(old)
           text = text.replace(old, new)
-
           path.write_text(text, encoding="utf-8")
+
+          test_path = Path("tests/test_tui_performance.py")
+          test_text = test_path.read_text(encoding="utf-8")
+          old = '''            monkeypatch.setattr(Path, "exists", forbidden_exists)
+              screen._inline_validate()
+              screen._refresh_path_hint()
+              warning = str(screen.query_one("#warning-text").render())
+              hint = str(screen.query_one("#path-hint").render())
+              assert "checking" in warning
+              assert sql_path.name in hint
+          '''
+          old = old.replace("              ", "            ")
+          new = '''            with monkeypatch.context() as scoped:
+                  scoped.setattr(Path, "exists", forbidden_exists)
+                  screen._inline_validate()
+                  screen._refresh_path_hint()
+                  warning = str(screen.query_one("#warning-text").render())
+                  hint = str(screen.query_one("#path-hint").render())
+              assert "checking" in warning
+              assert sql_path.name in hint
+          '''
+          new = new.replace("              ", "            ")
+          assert test_text.count(old) == 1, test_text.count(old)
+          test_text = test_text.replace(old, new)
+          test_path.write_text(test_text, encoding="utf-8")
       - name: Format
-        run: uv run --locked --no-sync ruff format dispatch/screens/new_job.py
+        run: uv run --locked --no-sync ruff format dispatch/screens/new_job.py tests/test_tui_performance.py
       - name: Focused regression checks
         run: >-
           uv run --locked --no-sync python -m pytest
@@ -58,12 +87,12 @@ jobs:
       - name: Commit repair
         shell: bash
         run: |
-          if git diff --quiet -- dispatch/screens/new_job.py; then
+          if git diff --quiet -- dispatch/screens/new_job.py tests/test_tui_performance.py; then
             echo "No repair diff produced"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add dispatch/screens/new_job.py
+          git add dispatch/screens/new_job.py tests/test_tui_performance.py
           git commit -m "fix(tui): preserve debounce contract without blocking validation"
           git push origin HEAD:perf/ssh-interaction-latency
