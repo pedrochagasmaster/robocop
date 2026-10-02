@@ -30,40 +30,57 @@ jobs:
           path = Path("dispatch/screens/new_job.py")
           text = path.read_text(encoding="utf-8")
 
-          replacements = [
-              (
-                  "        self._live_validation_generation = 0\n",
-                  "        self._live_validation_generation = 0\n        self._live_feedback_suppressed = False\n",
-              ),
-              (
-                  '''    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:\n        self._update_field_visibility()\n        self._inline_validate()\n        self._schedule_validation_summary()\n''',
-                  '''    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:\n        self._live_feedback_suppressed = False\n        self._update_field_visibility()\n        self._inline_validate()\n        self._schedule_validation_summary()\n''',
-              ),
-              (
-                  '''    def on_input_changed(self, event: Input.Changed) -> None:\n        if event.input.id == "table-name-suffix":\n''',
-                  '''    def on_input_changed(self, event: Input.Changed) -> None:\n        self._live_feedback_suppressed = False\n        if event.input.id == "table-name-suffix":\n''',
-              ),
-              (
-                  '''    def _inline_validate(self) -> None:\n        """Paint cheap validation only; filesystem checks arrive asynchronously."""\n        source = self._selected_source()\n''',
-                  '''    def _inline_validate(self) -> None:\n        """Paint cheap validation only; filesystem checks arrive asynchronously."""\n        if self._live_feedback_suppressed:\n            return\n        source = self._selected_source()\n''',
-              ),
-              (
-                  '''        self._update_field_visibility()\n        self._inline_validate()\n        self.query_one("#validation-summary", Static).update("[dim]Checking…[/]")\n        self._schedule_validation_summary(delay=0.0)\n''',
-                  '''        self._update_field_visibility()\n        self._inline_validate()\n        self._paint_validation_pending_summary()\n        self._schedule_validation_summary(delay=0.0)\n''',
-              ),
-              (
-                  '''    def _refresh_kerberos(self) -> None:\n        self.query_one("#launch", Button).disabled = (\n            self.kerberos_ttl is None or self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS\n        )\n        self._schedule_validation_summary()\n''',
-                  '''    def _paint_validation_pending_summary(self) -> None:\n        summary = self.query_one("#validation-summary", Static)\n        if self.kerberos_ttl is None:\n            summary.update("[red]✗ 1 issue(s): Kerberos ticket missing — press K to kinit[/]")\n        elif self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS:\n            summary.update(\n                "[red]✗ 1 issue(s): Kerberos ticket TTL is under 5 minutes — press K to renew[/]"\n            )\n        else:\n            summary.update("[dim]Checking…[/]")\n\n    def _refresh_kerberos(self) -> None:\n        self.query_one("#launch", Button).disabled = (\n            self.kerberos_ttl is None or self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS\n        )\n        self._paint_validation_pending_summary()\n        self._schedule_validation_summary()\n''',
-              ),
-              (
-                  '''    def _show_message(self, text: str, severity: str = "info") -> None:\n        self._invalidate_live_validation()\n        widget = self.query_one("#warning-text", Static)\n''',
-                  '''    def _show_message(self, text: str, severity: str = "info") -> None:\n        self._invalidate_live_validation()\n        self._live_feedback_suppressed = True\n        widget = self.query_one("#warning-text", Static)\n''',
-              ),
-          ]
-          for old, new in replacements:
+          def replace_one(old: str, new: str) -> None:
+              global text
               count = text.count(old)
-              assert count == 1, (old[:100], count)
-              text = text.replace(old, new)
+              assert count == 1, (old[:120], count)
+              text = text.replace(old, new, 1)
+
+          replace_one(
+              "        self._live_validation_generation = 0\n",
+              "        self._live_validation_generation = 0\n        self._live_feedback_suppressed = False\n",
+          )
+          replace_one(
+              "    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:\n",
+              "    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:\n        self._live_feedback_suppressed = False\n",
+          )
+          replace_one(
+              "    def on_input_changed(self, event: Input.Changed) -> None:\n",
+              "    def on_input_changed(self, event: Input.Changed) -> None:\n        self._live_feedback_suppressed = False\n",
+          )
+          replace_one(
+              '        """Paint cheap validation only; filesystem checks arrive asynchronously."""\n        source = self._selected_source()\n',
+              '        """Paint cheap validation only; filesystem checks arrive asynchronously."""\n        if self._live_feedback_suppressed:\n            return\n        source = self._selected_source()\n',
+          )
+          replace_one(
+              '        self.query_one("#validation-summary", Static).update("[dim]Checking…[/]")\n',
+              "        self._paint_validation_pending_summary()\n",
+          )
+          replace_one(
+              "    def _refresh_kerberos(self) -> None:\n",
+              '''    def _paint_validation_pending_summary(self) -> None:
+              summary = self.query_one("#validation-summary", Static)
+              if self.kerberos_ttl is None:
+                  summary.update("[red]✗ 1 issue(s): Kerberos ticket missing — press K to kinit[/]")
+              elif self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS:
+                  summary.update(
+                      "[red]✗ 1 issue(s): Kerberos ticket TTL is under 5 minutes — press K to renew[/]"
+                  )
+              else:
+                  summary.update("[dim]Checking…[/]")
+
+              def _refresh_kerberos(self) -> None:
+              '''.replace("              ", "    "),
+          )
+          replace_one(
+              "        self._schedule_validation_summary()\n\n    def _on_kerberos_change",
+              "        self._paint_validation_pending_summary()\n        self._schedule_validation_summary()\n\n    def _on_kerberos_change",
+          )
+          replace_one(
+              "        self._invalidate_live_validation()\n        widget = self.query_one(\"#warning-text\", Static)\n",
+              "        self._invalidate_live_validation()\n        self._live_feedback_suppressed = True\n        widget = self.query_one(\"#warning-text\", Static)\n",
+          )
+
           path.write_text(text, encoding="utf-8")
       - name: Format and lint
         run: |
