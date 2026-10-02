@@ -30,36 +30,18 @@ jobs:
           path = Path("dispatch/screens/new_job.py")
           text = path.read_text(encoding="utf-8")
 
-          old = '''    def _update_validation_summary(self) -> None:
-              self._apply_validation_summary(self._validation_issues(), self._current_analysis())
-          '''
-          new = '''    def _update_validation_summary(self) -> None:
-              self._start_validation_worker()
-          '''
+          old = "    def _update_validation_summary(self) -> None:\n        self._apply_validation_summary(self._validation_issues(), self._current_analysis())\n"
+          new = "    def _update_validation_summary(self) -> None:\n        self._start_validation_worker()\n"
           assert text.count(old) == 1, text.count(old)
           text = text.replace(old, new)
 
-          old = '''    def _schedule_validation_summary(self, *, delay: float = 0.15) -> None:
-              self._live_validation_generation += 1
-              if self._validation_summary_timer is not None:
-                  self._validation_summary_timer.stop()
-              self._validation_summary_timer = self.set_timer(delay, self._start_validation_worker)
-          '''
-          new = '''    def _schedule_validation_summary(self, *, delay: float = 0.2) -> None:
-              self._live_validation_generation += 1
-              if self._validation_summary_timer is not None:
-                  self._validation_summary_timer.stop()
-              self._validation_summary_timer = self.set_timer(delay, self._update_validation_summary)
-          '''
+          old = "    def _schedule_validation_summary(self, *, delay: float = 0.15) -> None:\n        self._live_validation_generation += 1\n        if self._validation_summary_timer is not None:\n            self._validation_summary_timer.stop()\n        self._validation_summary_timer = self.set_timer(delay, self._start_validation_worker)\n"
+          new = "    def _schedule_validation_summary(self, *, delay: float = 0.2) -> None:\n        self._live_validation_generation += 1\n        if self._validation_summary_timer is not None:\n            self._validation_summary_timer.stop()\n        self._validation_summary_timer = self.set_timer(delay, self._update_validation_summary)\n"
           assert text.count(old) == 1, text.count(old)
           text = text.replace(old, new)
 
-          old = '''        self.run_worker(
-              self._refresh_validation_async(
-          '''
-          new = '''        self.run_worker(
-              lambda: self._refresh_validation_async(
-          '''
+          old = "        self.run_worker(\n            self._refresh_validation_async(\n"
+          new = "        self.run_worker(\n            lambda: self._refresh_validation_async(\n"
           assert text.count(old) == 1, text.count(old)
           text = text.replace(old, new)
 
