@@ -142,18 +142,44 @@ class NewJobScreen(Screen[None]):
                         with Vertical(classes="radio-group"):
                             yield Static("Source", classes="field-label")
                             with RadioSet(id="source"):
-                                yield RadioButton("SqlFile", value=self._prefill_source == "SqlFile", id="src-sqlfile")
-                                yield RadioButton(manifest.source_display_label("SqlTemplate"), value=self._prefill_source == "SqlTemplate", id="src-sqltemplate")
-                                yield RadioButton("ExistingTable", value=self._prefill_source == "ExistingTable", id="src-existingtable")
+                                yield RadioButton(
+                                    "SqlFile",
+                                    value=self._prefill_source == "SqlFile",
+                                    id="src-sqlfile",
+                                )
+                                yield RadioButton(
+                                    manifest.source_display_label("SqlTemplate"),
+                                    value=self._prefill_source == "SqlTemplate",
+                                    id="src-sqltemplate",
+                                )
+                                yield RadioButton(
+                                    "ExistingTable",
+                                    value=self._prefill_source == "ExistingTable",
+                                    id="src-existingtable",
+                                )
                         with Vertical(classes="radio-group"):
                             yield Static("Destination", classes="field-label")
                             with RadioSet(id="destination"):
-                                yield RadioButton("Table", value=self._prefill_destination == "Table", id="dst-table")
-                                yield RadioButton("Csv", value=self._prefill_destination == "Csv", id="dst-csv")
-                                yield RadioButton("Table+Csv", value=self._prefill_destination == "Table+Csv", id="dst-table-csv")
+                                yield RadioButton(
+                                    "Table",
+                                    value=self._prefill_destination == "Table",
+                                    id="dst-table",
+                                )
+                                yield RadioButton(
+                                    "Csv", value=self._prefill_destination == "Csv", id="dst-csv"
+                                )
+                                yield RadioButton(
+                                    "Table+Csv",
+                                    value=self._prefill_destination == "Table+Csv",
+                                    id="dst-table-csv",
+                                )
                     yield Static("", id="dest-hint")
                 with Vertical(id="queue-panel"):
-                    yield Static("Execution Queue (select one or more)", classes="field-label", id="lbl-queue")
+                    yield Static(
+                        "Execution Queue (select one or more)",
+                        classes="field-label",
+                        id="lbl-queue",
+                    )
                     yield SelectionList[str](*_QUEUE_CHOICES, id="queue")
                     yield Static(_QUEUE_AUTO_HINT, id="queue-hint", classes="input-caption")
                 yield Static("", id="picker-caption", classes="input-caption")
@@ -161,39 +187,76 @@ class NewJobScreen(Screen[None]):
                 with Vertical(id="form-grid"):
                     with Horizontal(classes="form-row", id="row-sql-file"):
                         yield Static("SQL File", classes="field-label", id="lbl-sql-file")
-                        yield Input(value=self._default_sql_file(), placeholder="SQL File", id="sql-file")
+                        yield Input(
+                            value=self._default_sql_file(), placeholder="SQL File", id="sql-file"
+                        )
                     yield Static("", classes="path-hint", id="path-hint")
                     with Horizontal(classes="form-row", id="row-existing-schema"):
                         yield Static("Schema", classes="field-label", id="lbl-existing-schema")
                         with RadioSet(id="existing-schema"):
-                            yield RadioButton("coe_enc", value=self._prefill_existing_schema == "coe_enc", id="esc-coe-enc")
-                            yield RadioButton("aa_enc", value=self._prefill_existing_schema == "aa_enc", id="esc-aa-enc")
-                            yield RadioButton("other", value=self._prefill_existing_schema not in _KNOWN_EXISTING_SCHEMAS, id="esc-other")
+                            yield RadioButton(
+                                "coe_enc",
+                                value=self._prefill_existing_schema == "coe_enc",
+                                id="esc-coe-enc",
+                            )
+                            yield RadioButton(
+                                "aa_enc",
+                                value=self._prefill_existing_schema == "aa_enc",
+                                id="esc-aa-enc",
+                            )
+                            yield RadioButton(
+                                "other",
+                                value=self._prefill_existing_schema not in _KNOWN_EXISTING_SCHEMAS,
+                                id="esc-other",
+                            )
                     with Horizontal(classes="form-row", id="row-existing-schema-custom"):
-                        yield Static("Custom Schema", classes="field-label", id="lbl-existing-schema-custom")
+                        yield Static(
+                            "Custom Schema", classes="field-label", id="lbl-existing-schema-custom"
+                        )
                         yield Input(value="", placeholder="Schema", id="existing-schema-custom")
                     with Horizontal(classes="form-row", id="row-existing-table"):
-                        yield Static("Existing Table", classes="field-label", id="lbl-existing-table")
-                        yield Input(value="", placeholder="e.g. events_existing", id="existing-table")
+                        yield Static(
+                            "Existing Table", classes="field-label", id="lbl-existing-table"
+                        )
+                        yield Input(
+                            value="", placeholder="e.g. events_existing", id="existing-table"
+                        )
                     with Horizontal(classes="form-row", id="row-schema"):
                         yield Static("Schema", classes="field-label", id="lbl-schema")
                         yield Input(value="aa_enc", placeholder="Schema", id="schema")
                     with Horizontal(classes="form-row", id="row-table-name"):
                         yield Static("Table Name", classes="field-label", id="lbl-table-name")
                         with Horizontal(classes="eid-table-name-field"):
-                            yield Static(sql.eid_table_prefix(self._eid), id="table-name-prefix", classes="input-prefix")
-                            yield Input(value="dispatch_result", placeholder="suffix", id="table-name-suffix")
+                            yield Static(
+                                sql.eid_table_prefix(self._eid),
+                                id="table-name-prefix",
+                                classes="input-prefix",
+                            )
+                            yield Input(
+                                value="dispatch_result",
+                                placeholder="suffix",
+                                id="table-name-suffix",
+                            )
                     with Horizontal(classes="form-row", id="row-start-date"):
                         yield Static("Start Date", classes="field-label", id="lbl-start-date")
-                        yield Input(value=self._default_start_date(), placeholder="YYYY-MM-DD", id="start-date")
+                        yield Input(
+                            value=self._default_start_date(),
+                            placeholder="YYYY-MM-DD",
+                            id="start-date",
+                        )
                     with Horizontal(classes="form-row", id="row-end-date"):
                         yield Static("End Date", classes="field-label", id="lbl-end-date")
-                        yield Input(value=self._default_end_date(), placeholder="YYYY-MM-DD", id="end-date")
+                        yield Input(
+                            value=self._default_end_date(), placeholder="YYYY-MM-DD", id="end-date"
+                        )
                     with Horizontal(classes="form-row", id="row-email"):
                         yield Static("Email (notifications)", classes="field-label", id="lbl-email")
                         yield Input(
                             value=os.environ.get("DISPATCH_EMAIL", ""),
-                            placeholder=os.environ.get("DISPATCH_EMAIL", "name.surname@mastercard.com,name2.surname2@mastercard.com"),
+                            placeholder=os.environ.get(
+                                "DISPATCH_EMAIL",
+                                "name.surname@mastercard.com,name2.surname2@mastercard.com",
+                            ),
                             id="email",
                         )
                     with Horizontal(classes="form-row", id="row-subject"):
@@ -210,7 +273,12 @@ class NewJobScreen(Screen[None]):
         matrix = self.query_one("#matrix-table", DataTable)
         matrix.add_columns("SOURCE \\ DEST", "TABLE", "CSV", "TABLE+CSV")
         matrix.add_row("SqlFile", "[green]\u2713[/]", "[green]\u2713[/]", "[green]\u2713[/]")
-        matrix.add_row(manifest.source_display_label("SqlTemplate"), "[green]\u2713[/]", "[dim]\u2014[/]", "[dim]\u2014[/]")
+        matrix.add_row(
+            manifest.source_display_label("SqlTemplate"),
+            "[green]\u2713[/]",
+            "[dim]\u2014[/]",
+            "[dim]\u2014[/]",
+        )
         matrix.add_row("ExistingTable", "[dim]\u2014[/]", "[green]\u2713[/]", "[dim]\u2014[/]")
         matrix.show_cursor = False
         picker = self.query_one("#sql-file-picker", DataTable)
@@ -237,7 +305,14 @@ class NewJobScreen(Screen[None]):
                 mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
             except OSError:
                 continue
-            results.append({"path": str(path), "name": path.name, "detected": sql.detect_source(text), "mtime": mtime})
+            results.append(
+                {
+                    "path": str(path),
+                    "name": path.name,
+                    "detected": sql.detect_source(text),
+                    "mtime": mtime,
+                }
+            )
         return results
 
     async def _populate_sql_picker(self) -> None:
@@ -246,9 +321,17 @@ class NewJobScreen(Screen[None]):
         picker.clear()
         for entry in self._cwd_sql_files:
             detected = entry["detected"]
-            detected_markup = f"[cyan]{manifest.source_display_label(detected)}[/]" if detected == "SqlTemplate" else detected
-            picker.add_row(entry["name"], detected_markup, f"[dim]{entry['mtime']}[/]", key=entry["path"])
-        self.query_one("#picker-caption", Static).update(f"[dim]SQL files in {self.launch_cwd} \u00b7 pick one to fill the form[/]")
+            detected_markup = (
+                f"[cyan]{manifest.source_display_label(detected)}[/]"
+                if detected == "SqlTemplate"
+                else detected
+            )
+            picker.add_row(
+                entry["name"], detected_markup, f"[dim]{entry['mtime']}[/]", key=entry["path"]
+            )
+        self.query_one("#picker-caption", Static).update(
+            f"[dim]SQL files in {self.launch_cwd} \u00b7 pick one to fill the form[/]"
+        )
         current = self._input_value("sql-file")
         for index, entry in enumerate(self._cwd_sql_files):
             if entry["path"] == current:
@@ -258,7 +341,11 @@ class NewJobScreen(Screen[None]):
         self._update_field_visibility()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        if event.data_table.id != "sql-file-picker" or not self._picker_ready or not event.data_table.has_focus:
+        if (
+            event.data_table.id != "sql-file-picker"
+            or not self._picker_ready
+            or not event.data_table.has_focus
+        ):
             return
         self._apply_picker_path(str(event.row_key.value) if event.row_key else "")
 
@@ -338,7 +425,11 @@ class NewJobScreen(Screen[None]):
 
     def _existing_table_schema(self) -> str:
         choice = self._selected_existing_schema_choice()
-        return choice if choice in _KNOWN_EXISTING_SCHEMAS else self._input_value("existing-schema-custom")
+        return (
+            choice
+            if choice in _KNOWN_EXISTING_SCHEMAS
+            else self._input_value("existing-schema-custom")
+        )
 
     def _existing_full_table(self) -> str:
         schema = self._existing_table_schema()
@@ -420,7 +511,11 @@ class NewJobScreen(Screen[None]):
                 msgs.append("[dim]\u2026 SQL file checking[/]")
         email = self._input_value("email")
         if email:
-            msgs.append("[green]\u2713[/] Email" if "@" in email and "." in email.split("@")[-1] else "[red]\u2717[/] Invalid email format")
+            msgs.append(
+                "[green]\u2713[/] Email"
+                if "@" in email and "." in email.split("@")[-1]
+                else "[red]\u2717[/] Invalid email format"
+            )
         if self.kerberos_ttl is None:
             msgs.append("[red]\u2717[/] Kerberos missing")
         elif self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS:
@@ -448,11 +543,18 @@ class NewJobScreen(Screen[None]):
 
     def _validation_issues(self, *, deep: bool = False) -> list[str]:
         issues: list[str] = []
-        if self._selected_source() == "ExistingTable" and self._selected_existing_schema_choice() == "other":
-            schema_error = sql.validate_identifier(self._input_value("existing-schema-custom"), "Schema")
+        if (
+            self._selected_source() == "ExistingTable"
+            and self._selected_existing_schema_choice() == "other"
+        ):
+            schema_error = sql.validate_identifier(
+                self._input_value("existing-schema-custom"), "Schema"
+            )
             if schema_error:
                 issues.append(schema_error)
-        shared = job_ops.validation_issues(self._launch_inputs(), kerberos_ttl=self.kerberos_ttl, deep=deep)
+        shared = job_ops.validation_issues(
+            self._launch_inputs(), kerberos_ttl=self.kerberos_ttl, deep=deep
+        )
         for issue in shared:
             if issue == job_ops.MSG_KERBEROS_MISSING:
                 issues.append("Kerberos ticket missing \u2014 press K to kinit")
@@ -471,11 +573,18 @@ class NewJobScreen(Screen[None]):
         table = self._table_name_value()
         user_id = config.current_user()
         sql_path = "" if source_type == "ExistingTable" else self._input_value("sql-file")
-        form_result = analyze_form(source_type=source_type, destination_type=destination_type, destination_table=table, user_id=user_id)
+        form_result = analyze_form(
+            source_type=source_type,
+            destination_type=destination_type,
+            destination_table=table,
+            user_id=user_id,
+        )
         sql_result = self._current_sql_analysis(source_type, user_id, sql_path)
         return combine_analysis(sql_result, form_result)
 
-    def _current_sql_analysis(self, source_type: str, user_id: str, sql_path: str) -> AnalysisResult:
+    def _current_sql_analysis(
+        self, source_type: str, user_id: str, sql_path: str
+    ) -> AnalysisResult:
         cache_key = (source_type, user_id, sql_path)
         if self._sql_analysis_cache is not None and self._sql_analysis_cache[0] == cache_key:
             return self._sql_analysis_cache[1]
@@ -483,7 +592,9 @@ class NewJobScreen(Screen[None]):
         self._sql_analysis_cache = (cache_key, result)
         return result
 
-    def _compute_sql_analysis(self, source_type: str, user_id: str, sql_path: str) -> AnalysisResult:
+    def _compute_sql_analysis(
+        self, source_type: str, user_id: str, sql_path: str
+    ) -> AnalysisResult:
         if source_type == "ExistingTable":
             return analyze_sql("", source_type=source_type, user_id=user_id)
         if not sql_path or not self._sql_file_exists():
@@ -512,7 +623,15 @@ class NewJobScreen(Screen[None]):
         if self._sql_analysis_cache is not None and self._sql_analysis_cache[0] == sql_cache_key:
             cached_sql = self._sql_analysis_cache[1]
         self.run_worker(
-            self._refresh_validation_async(generation, inputs, custom_schema_choice, custom_schema, ttl, sql_cache_key, cached_sql),
+            self._refresh_validation_async(
+                generation,
+                inputs,
+                custom_schema_choice,
+                custom_schema,
+                ttl,
+                sql_cache_key,
+                cached_sql,
+            ),
             name="new-job-live-validation",
             group="new-job-validation",
             exclusive=True,
@@ -558,7 +677,9 @@ class NewJobScreen(Screen[None]):
                     sql_result = AnalysisResult(available=True, findings=())
                 else:
                     detected_source = sql.detect_source(sql_text)
-                    sql_result = analyze_sql(sql_text, source_type=inputs.source_type, user_id=inputs.user)
+                    sql_result = analyze_sql(
+                        sql_text, source_type=inputs.source_type, user_id=inputs.user
+                    )
             else:
                 sql_result = AnalysisResult(available=True, findings=())
             form_result = analyze_form(
@@ -567,16 +688,27 @@ class NewJobScreen(Screen[None]):
                 destination_table=inputs.table_name,
                 user_id=inputs.user,
             )
-            return issues, combine_analysis(sql_result, form_result), file_exists, sql_result, detected_source
+            return (
+                issues,
+                combine_analysis(sql_result, form_result),
+                file_exists,
+                sql_result,
+                detected_source,
+            )
 
-        issues, analysis, file_exists, sql_result, detected_source = await asyncio.to_thread(compute)
+        issues, analysis, file_exists, sql_result, detected_source = await asyncio.to_thread(
+            compute
+        )
         if generation != self._live_validation_generation or not self.is_mounted:
             return
         if self._launch_inputs() != inputs or self.kerberos_ttl != ttl:
             return
         if file_exists is not None:
             self._sql_exists_cache = (inputs.sql_path, file_exists)
-        if detected_source in {"SqlTemplate", "ExistingTable"} and detected_source != inputs.source_type:
+        if (
+            detected_source in {"SqlTemplate", "ExistingTable"}
+            and detected_source != inputs.source_type
+        ):
             self._apply_detected_source(detected_source)
             return
         self._sql_analysis_cache = (sql_cache_key, sql_result)
@@ -592,7 +724,9 @@ class NewJobScreen(Screen[None]):
         if issues:
             first = issues[0]
             extra = f" (+{len(issues) - 1} more)" if len(issues) > 1 else ""
-            summary.update(f"[red]\u2717 {len(issues)} issue(s): {first}{extra}[/]  \u00b7  {badge}")
+            summary.update(
+                f"[red]\u2717 {len(issues)} issue(s): {first}{extra}[/]  \u00b7  {badge}"
+            )
         else:
             summary.update(f"[green]\u2713 Ready to launch[/]  \u00b7  {badge}")
 
@@ -628,7 +762,9 @@ class NewJobScreen(Screen[None]):
             self._refresh_path_hint()
         dest_hint = self.query_one("#dest-hint", Static)
         if source == "SqlTemplate":
-            dest_hint.update(f"[dim]{manifest.source_display_label('SqlTemplate')} supports Table only[/]")
+            dest_hint.update(
+                f"[dim]{manifest.source_display_label('SqlTemplate')} supports Table only[/]"
+            )
             dest_hint.display = True
         elif source == "ExistingTable":
             dest_hint.update("[dim]ExistingTable supports Csv only[/]")
@@ -660,7 +796,9 @@ class NewJobScreen(Screen[None]):
             hint.update("")
 
     def _refresh_kerberos(self) -> None:
-        self.query_one("#launch", Button).disabled = self.kerberos_ttl is None or self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS
+        self.query_one("#launch", Button).disabled = (
+            self.kerberos_ttl is None or self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS
+        )
         self._schedule_validation_summary()
 
     def _on_kerberos_change(self, value: int | None) -> None:
@@ -678,12 +816,16 @@ class NewJobScreen(Screen[None]):
 
     def _show_message(self, text: str, severity: str = "info") -> None:
         widget = self.query_one("#warning-text", Static)
-        color = {"error": "red", "warning": "yellow", "success": "green", "info": "dim"}.get(severity, "dim")
+        color = {"error": "red", "warning": "yellow", "success": "green", "info": "dim"}.get(
+            severity, "dim"
+        )
         widget.update(f"[{color}]{text}[/]")
 
     def _apply_detected_source(self, detected: str) -> None:
         info = self.query_one("#info-detected", Static)
-        info.update(f"Detected source: [b]{manifest.source_display_label(detected)}[/] \u00b7 illegal destinations are disabled automatically")
+        info.update(
+            f"Detected source: [b]{manifest.source_display_label(detected)}[/] \u00b7 illegal destinations are disabled automatically"
+        )
         if detected == "SqlTemplate":
             self.query_one("#src-sqltemplate", RadioButton).value = True
         elif detected == "ExistingTable":
@@ -711,17 +853,41 @@ class NewJobScreen(Screen[None]):
         if sql_text is None:
             return
         if source_type == "SqlTemplate":
-            date_error = sql.validate_date_range(self._input_value("start-date"), self._input_value("end-date"))
+            date_error = sql.validate_date_range(
+                self._input_value("start-date"), self._input_value("end-date")
+            )
             if date_error:
                 self._show_message(date_error, "error")
                 return
-            preview = sql.monthly_preview(sql_text, schema, table, self._input_value("start-date"), self._input_value("end-date"))
+            preview = sql.monthly_preview(
+                sql_text,
+                schema,
+                table,
+                self._input_value("start-date"),
+                self._input_value("end-date"),
+            )
         elif destination_type in ("Table", "Table+Csv") and not sql.is_self_contained_ddl(sql_text):
             preview = sql.table_wrapper(sql_text, schema, table, config.current_user())
         else:
             preview = sql_text
-        analysis = analyze(sql_text, source_type=source_type, destination_type=destination_type, destination_table=table, user_id=config.current_user())
-        self.app.push_screen(PreviewScreen("SQL Preview", preview, schema=schema, table=table, source_type=source_type, dest_type=self._selected_destination(), analysis=analysis))
+        analysis = analyze(
+            sql_text,
+            source_type=source_type,
+            destination_type=destination_type,
+            destination_table=table,
+            user_id=config.current_user(),
+        )
+        self.app.push_screen(
+            PreviewScreen(
+                "SQL Preview",
+                preview,
+                schema=schema,
+                table=table,
+                source_type=source_type,
+                dest_type=self._selected_destination(),
+                analysis=analysis,
+            )
+        )
 
     def action_launch(self) -> Worker[None]:
         return self.run_worker(self._launch_flow(), name="launch-flow", exclusive=True)
@@ -749,7 +915,9 @@ class NewJobScreen(Screen[None]):
         if hasattr(self.app, "refresh_kerberos"):
             await self.app.refresh_kerberos()
         error = None
-        issues = job_ops.validation_issues(self._launch_inputs(), kerberos_ttl=self.kerberos_ttl, deep=False)
+        issues = job_ops.validation_issues(
+            self._launch_inputs(), kerberos_ttl=self.kerberos_ttl, deep=False
+        )
         if issues:
             issue = issues[0]
             if issue == job_ops.MSG_KERBEROS_MISSING:
@@ -797,11 +965,27 @@ class NewJobScreen(Screen[None]):
             f"Email: {self._input_value('email') or '--'}"
         )
 
-    async def _confirm_advisor_gate(self, errors: tuple, source: manifest.Source, destination: manifest.Destination) -> bool:
-        return bool(await self.app.push_screen_wait(AdvisorLaunchGate(errors, job_summary=self._launch_summary(source, destination))))
+    async def _confirm_advisor_gate(
+        self, errors: tuple, source: manifest.Source, destination: manifest.Destination
+    ) -> bool:
+        return bool(
+            await self.app.push_screen_wait(
+                AdvisorLaunchGate(errors, job_summary=self._launch_summary(source, destination))
+            )
+        )
 
-    async def _confirm_launch(self, source: manifest.Source, destination: manifest.Destination) -> bool:
-        result = await self.app.push_screen_wait(ConfirmScreen("Launch Job", self._launch_summary(source, destination), danger=True, confirm_label="Launch", cancel_label="Review"))
+    async def _confirm_launch(
+        self, source: manifest.Source, destination: manifest.Destination
+    ) -> bool:
+        result = await self.app.push_screen_wait(
+            ConfirmScreen(
+                "Launch Job",
+                self._launch_summary(source, destination),
+                danger=True,
+                confirm_label="Launch",
+                cancel_label="Review",
+            )
+        )
         return bool(result)
 
     def action_edit_sql(self) -> None:
@@ -829,7 +1013,14 @@ class NewJobScreen(Screen[None]):
             self.query_one("#matrix-collapsible", Collapsible).collapsed = True
         except Exception:
             pass
-        mapping = {"sql_file": "sql-file", "schema": "schema", "email": "email", "subject": "subject", "start_date": "start-date", "end_date": "end-date"}
+        mapping = {
+            "sql_file": "sql-file",
+            "schema": "schema",
+            "email": "email",
+            "subject": "subject",
+            "start_date": "start-date",
+            "end_date": "end-date",
+        }
         for key, widget_id in mapping.items():
             value = self.prefill.get(key, "")
             if value:
@@ -841,8 +1032,14 @@ class NewJobScreen(Screen[None]):
         if existing_table:
             self._apply_existing_table_prefill(str(existing_table))
         self._apply_queue_value(self.prefill.get("queue", ""))
-        source_btn = {"SqlFile": "src-sqlfile", "SqlTemplate": "src-sqltemplate", "ExistingTable": "src-existingtable"}.get(self._prefill_source)
-        dest_btn = {"Table": "dst-table", "Csv": "dst-csv", "Table+Csv": "dst-table-csv"}.get(self._prefill_destination)
+        source_btn = {
+            "SqlFile": "src-sqlfile",
+            "SqlTemplate": "src-sqltemplate",
+            "ExistingTable": "src-existingtable",
+        }.get(self._prefill_source)
+        dest_btn = {"Table": "dst-table", "Csv": "dst-csv", "Table+Csv": "dst-table-csv"}.get(
+            self._prefill_destination
+        )
         if source_btn:
             self._schedule_force_radio("#source", source_btn)
         if dest_btn:
@@ -856,7 +1053,9 @@ class NewJobScreen(Screen[None]):
         schema_part, table_part = existing_table.split(".", 1)
         self.query_one("#existing-table", Input).value = table_part
         if schema_part in _KNOWN_EXISTING_SCHEMAS:
-            self._schedule_force_radio("#existing-schema", {"coe_enc": "esc-coe-enc", "aa_enc": "esc-aa-enc"}[schema_part])
+            self._schedule_force_radio(
+                "#existing-schema", {"coe_enc": "esc-coe-enc", "aa_enc": "esc-aa-enc"}[schema_part]
+            )
             return
         self._schedule_force_radio("#existing-schema", "esc-other")
         self.query_one("#existing-schema-custom", Input).value = schema_part
@@ -879,7 +1078,12 @@ class NewJobScreen(Screen[None]):
         nodes = list(radio_set._nodes)
         if target in nodes:
             radio_set._selected = nodes.index(target)
-        logger.info("prefill applied %s -> %s (pressed=%s)", radio_set_id, button_id, radio_set.pressed_button.id if radio_set.pressed_button else None)
+        logger.info(
+            "prefill applied %s -> %s (pressed=%s)",
+            radio_set_id,
+            button_id,
+            radio_set.pressed_button.id if radio_set.pressed_button else None,
+        )
         self._update_field_visibility()
         self._inline_validate()
         self._schedule_validation_summary()
@@ -899,7 +1103,9 @@ class NewJobScreen(Screen[None]):
             selection = self.query_one("#queue", SelectionList)
         except Exception:
             return
-        queues = [token.strip() for token in str(value).split(",") if token.strip() in _QUEUE_VALUES]
+        queues = [
+            token.strip() for token in str(value).split(",") if token.strip() in _QUEUE_VALUES
+        ]
         with selection.prevent(SelectionList.SelectedChanged):
             selection.deselect_all()
             for queue in queues:
