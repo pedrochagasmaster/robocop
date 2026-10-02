@@ -1,0 +1,35 @@
+name: Temporary SSH perf formatter
+
+on:
+  push:
+    branches: [perf/ssh-interaction-latency]
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: perf/ssh-interaction-latency
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: "0.12.0"
+      - name: Install dev dependencies
+        run: uv sync --locked --extra dev --python 3.12
+      - name: Format CI-scoped Python
+        run: uv run --locked --no-sync ruff format dispatch tests
+      - name: Commit formatter output
+        run: |
+          git add dispatch tests
+          if git diff --cached --quiet; then
+            echo "No formatter changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "style: format TUI performance changes"
+          git push origin HEAD:perf/ssh-interaction-latency
