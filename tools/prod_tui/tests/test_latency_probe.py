@@ -45,11 +45,13 @@ def test_top_level_latency_command_dispatches(monkeypatch) -> None:
     assert calls == [["--config", "config.yaml", "--samples", "3"]]
 
 
-def test_latency_readme_documents_ab_comparison() -> None:
-    readme = Path("tools/prod_tui/README.md").read_text(encoding="utf-8")
-    assert "python -m tools.prod_tui latency --config tools/prod_tui/config.yaml" in readme
-    assert "--baseline-report" in readme
-    assert "never launches/cancels a Job or drops a" in readme
+def test_latency_guide_documents_ab_comparison_and_safety() -> None:
+    guide = Path("tools/prod_tui/LATENCY.md").read_text(encoding="utf-8")
+    assert "python -m tools.prod_tui latency" in guide
+    assert "--baseline-report" in guide
+    assert "does not launch or cancel Jobs" in guide
+    assert "does not DROP tables" in guide
+    assert "capture_overhead_ms" in guide
 
 
 def test_latency_main_writes_report_and_comparison(tmp_path: Path, monkeypatch) -> None:
