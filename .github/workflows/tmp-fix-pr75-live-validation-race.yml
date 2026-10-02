@@ -53,7 +53,7 @@ jobs:
               '        """Paint cheap validation only; filesystem checks arrive asynchronously."""\n        if self._live_feedback_suppressed:\n            return\n        source = self._selected_source()\n',
           )
           replace_one(
-              '        self.query_one("#validation-summary", Static).update("[dim]Checking…[/]")\n',
+              '        self.query_one("#validation-summary", Static).update("[dim]Checking\\u2026[/]")\n',
               "        self._paint_validation_pending_summary()\n",
           )
           replace_one(
@@ -61,13 +61,13 @@ jobs:
               '''    def _paint_validation_pending_summary(self) -> None:
               summary = self.query_one("#validation-summary", Static)
               if self.kerberos_ttl is None:
-                  summary.update("[red]✗ 1 issue(s): Kerberos ticket missing — press K to kinit[/]")
+                  summary.update("[red]\\u2717 1 issue(s): Kerberos ticket missing \\u2014 press K to kinit[/]")
               elif self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS:
                   summary.update(
-                      "[red]✗ 1 issue(s): Kerberos ticket TTL is under 5 minutes — press K to renew[/]"
+                      "[red]\\u2717 1 issue(s): Kerberos ticket TTL is under 5 minutes \\u2014 press K to renew[/]"
                   )
               else:
-                  summary.update("[dim]Checking…[/]")
+                  summary.update("[dim]Checking\\u2026[/]")
 
               def _refresh_kerberos(self) -> None:
               '''.replace("              ", "    "),
