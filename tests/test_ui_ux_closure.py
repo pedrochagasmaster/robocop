@@ -196,6 +196,9 @@ def test_history_pagination_keys_move_between_pages(mock_env_with_config) -> Non
             app.push_screen(screen)
             await pilot.pause()
 
+            # History now loads manifests in a worker after mounting its shell.
+            await app.workers.wait_for_complete()
+            await pilot.pause()
             page_info = screen.query_one("#page-info")
             page_controls = screen.query_one("#page-controls")
             assert "Showing 1-17 of 20" in str(page_info.render())
