@@ -123,8 +123,15 @@ def test_new_job_inline_feedback_never_stats_uncached_path(
 
 
 def test_new_job_validation_worker_ignores_stale_result(
-    mock_env_with_config, tmp_path: Path
+    mock_env_with_config, tmp_path: Path, monkeypatch
 ) -> None:
+    original_set_timer = NewJobScreen.set_timer
+
+    def positive_set_timer(self, delay, *args, **kwargs):
+        assert delay > 0, "Textual timers must have a positive interval"
+        return original_set_timer(self, delay, *args, **kwargs)
+
+    monkeypatch.setattr(NewJobScreen, "set_timer", positive_set_timer)
     first = tmp_path / "first.sql"
     second = tmp_path / "second.sql"
     first.write_text("SELECT 1;\n", encoding="utf-8")
@@ -141,8 +148,10 @@ def test_new_job_validation_worker_ignores_stale_result(
             screen._schedule_validation_summary(delay=0.0)
             sql_input.value = str(second)
             screen._schedule_validation_summary(delay=0.0)
-            await asyncio.sleep(0.25)
-            await pilot.pause()
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if screen._sql_exists_cache == (str(second), True):
+                    break
             assert screen._sql_exists_cache == (str(second), True)
 
     asyncio.run(run())

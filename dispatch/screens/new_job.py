@@ -614,7 +614,17 @@ class NewJobScreen(Screen[None]):
         self._live_validation_generation += 1
         if self._validation_summary_timer is not None:
             self._validation_summary_timer.stop()
-        self._validation_summary_timer = self.set_timer(delay, self._update_validation_summary)
+            self._validation_summary_timer = None
+        if delay <= 0:
+            # Zero-interval Textual timers can divide by zero. Queue immediate
+            # work on the message loop and discard superseded callbacks.
+            self.call_later(self._run_scheduled_validation, self._live_validation_generation)
+        else:
+            self._validation_summary_timer = self.set_timer(delay, self._update_validation_summary)
+
+    def _run_scheduled_validation(self, generation: int) -> None:
+        if generation == self._live_validation_generation and self.is_mounted:
+            self._update_validation_summary()
 
     def _invalidate_live_validation(self) -> None:
         self._live_validation_generation += 1
