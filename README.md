@@ -199,6 +199,33 @@ dispatch telemetry who --days 30
 dispatch telemetry summary --days 30
 ```
 
+The CLI's 30 days is a default, not a limit; `--days 365` reads a longer
+cumulative lookback. For a historical dataset with non-overlapping intervals,
+run the standalone Python 3.10+ script on the Edge Node:
+
+```bash
+python dispatch_telemetry_history.py
+python dispatch_telemetry_history.py --bucket-days 30 --max-days 365
+python dispatch_telemetry_history.py --bucket-days 7 --max-days 365
+```
+
+It reads the shared rollup (or `DISPATCH_TELEMETRY_DIR`) and writes
+`interval_summary.csv`, `interval_users.csv`, `interval_screens.csv`,
+`interval_launches.csv`, and `interval_refusals.csv` under
+`dispatch-telemetry-history/`. Use `--dir` to select a shared root, a `users`
+directory, or a private `events.jsonl` file; use `--output-dir` to select the
+output directory. Existing report files are overwritten. It never combines
+private and shared copies of the same log.
+
+Intervals are anchored to the current UTC time, include their start, and exclude
+their end. For reproducible exports, set `--as-of 2026-10-01T00:00:00Z`.
+Without `--max-days`, intervals extend through the oldest available event;
+with it, the oldest interval is clipped to the requested horizon. Summary rows
+include empty intervals. Sessions count distinct session IDs from
+`session_start` events per user in each interval. Malformed records are skipped
+with a count on stderr; missing inputs and unreadable files fail explicitly.
+Only history still present in the selected logs can be exported.
+
 ## Jobs
 
 A Job combines exactly one Source and one Destination.
