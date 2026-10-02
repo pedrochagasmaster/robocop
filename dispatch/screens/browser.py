@@ -107,6 +107,7 @@ class BrowserScreen(Screen[None]):
         self._describe_text: str = ""
         self._sizes_loading = False
         self._size_worker_generation = 0
+        self._sel_column_key: ColumnKey | None = None
         self._size_column_key: ColumnKey | None = None
 
     def compose(self) -> ComposeResult:
@@ -162,10 +163,10 @@ class BrowserScreen(Screen[None]):
                 yield Button("Drop [D]", id="drop", variant="error")
         yield Footer()
 
-    async def on_mount(self) -> None:
+    def on_mount(self) -> None:
         table = self.query_one("#browser-table", BrowserTable)
         # Name then Size: analysts scan names first; Size stays immediately to the right.
-        table.add_column("Sel", width=_SEL_COLUMN_WIDTH)
+        self._sel_column_key = table.add_column("Sel", width=_SEL_COLUMN_WIDTH)
         table.add_column("Name", width=_NAME_COLUMN_MIN_WIDTH)
         self._size_column_key = table.add_column("Size", width=_SIZE_COLUMN_WIDTH)
         table.add_column("Type", width=_TYPE_COLUMN_WIDTH)
@@ -178,7 +179,14 @@ class BrowserScreen(Screen[None]):
         self._show_detail_placeholder()
         self._update_action_state()
         if self._auto_load:
-            await self.action_show_tables()
+            # SHOW TABLES / DESCRIBE can take hundreds of milliseconds on the
+            # Edge Node. Paint the interactive shell first and load in a worker.
+            self.run_worker(
+                self.action_show_tables(),
+                name="browser-initial-load",
+                group="browser-load",
+                exclusive=True,
+            )
 
     def on_resize(self) -> None:
         """Keep column budget correct when the split pane or terminal changes."""
@@ -436,6 +444,26 @@ class BrowserScreen(Screen[None]):
         except CellDoesNotExist:
             pass
 
+    def _update_check_cell(self, name: str) -> None:
+        """Patch one selection marker without repainting the whole table."""
+        table = self.query_one("#browser-table", DataTable)
+        if self._sel_column_key is None:
+            return
+        try:
+            table.update_cell(
+                name,
+                self._sel_column_key,
+                self._check_marker(name),
+                update_width=False,
+            )
+        except CellDoesNotExist:
+            pass
+
+    def _update_all_check_cells(self) -> None:
+        """Patch selection markers in place, preserving cursor and scroll."""
+        for name in self._tables:
+            self._update_check_cell(name)
+
     def _sorted_rows(self) -> list[_TableRow]:
         rows = list(self._table_rows)
         rows.sort(key=self._sort_key, reverse=self._sort_reverse)
@@ -605,7 +633,7 @@ class BrowserScreen(Screen[None]):
             self._checked.remove(name)
         else:
             self._checked.add(name)
-        self._render_table_list(selected_before=name)
+        self._update_check_cell(name)
         self._update_action_state()
 
     def action_toggle_check(self) -> None:
@@ -619,8 +647,7 @@ class BrowserScreen(Screen[None]):
             self._checked.clear()
         else:
             self._checked = set(self._tables)
-        cursor_name = self._selected_table()
-        self._render_table_list(selected_before=cursor_name if cursor_name in self._tables else "")
+        self._update_all_check_cells()
         self._update_action_state()
 
     def action_drop(self) -> Worker[None]:

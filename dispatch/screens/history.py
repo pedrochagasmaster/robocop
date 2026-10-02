@@ -39,6 +39,7 @@ class HistoryScreen(Screen[None]):
     def __init__(self) -> None:
         super().__init__()
         self._page = 0
+        self._all_jobs: list[dict] = []
         self._filtered: list[dict] = []
         self._sort_mode = "date"
         self._sort_reverse = True
@@ -79,18 +80,30 @@ class HistoryScreen(Screen[None]):
                 yield Button("View Logs [Enter]", id="view-logs", variant="primary")
         yield Footer()
 
-    async def on_mount(self) -> None:
+    def on_mount(self) -> None:
         table = self.query_one("#history-table", DataTable)
         table.add_columns("ID", "Table/Target", "State", "Finished At")
         table.cursor_type = "row"
         self.query_one("#history-empty").display = False
-        self._all_jobs = await asyncio.to_thread(jobs.history_jobs)
-        self._filtered = self._all_jobs
+        self.query_one("#history-status", Static).update("Loading history\u2026")
+        # Paint the shell before touching older manifests on the Edge filesystem.
+        self.run_worker(
+            self._load_history_async(),
+            name="history-initial-load",
+            group="history-load",
+            exclusive=True,
+        )
+        self.query_one("#search", Input).focus()
+
+    async def _load_history_async(self) -> None:
+        items = await asyncio.to_thread(jobs.history_jobs)
+        if not self.is_mounted or self.app.screen is not self:
+            return
+        self._all_jobs = items
+        self._filtered = items
         self._render_history()
         if self._filtered:
-            table.focus()
-        else:
-            self.query_one("#search", Input).focus()
+            self.query_one("#history-table", DataTable).focus()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "search":

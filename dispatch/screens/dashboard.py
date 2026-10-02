@@ -118,7 +118,7 @@ class DashboardScreen(Screen[None]):
                 yield Button("Cancel [C]", id="cancel", variant="error")
         yield Footer()
 
-    async def on_mount(self) -> None:
+    def on_mount(self) -> None:
         table = self.query_one("#jobs-table", DataTable)
         column_keys = table.add_columns("ID", "Source", "Destination", "State", "Elapsed")
         self._elapsed_col_key = column_keys[-1]
@@ -132,7 +132,14 @@ class DashboardScreen(Screen[None]):
         # subprocess on every dashboard refresh tick.
         if hasattr(type(self.app), "kerberos_ttl"):
             self.watch(self.app, "kerberos_ttl", self._on_kerberos_change, init=True)
-        await self._refresh_jobs_async()
+        # Paint/focus the shell immediately. Manifest scans, error classification,
+        # monitoring sync and the detail tail all stay off the Textual event loop.
+        self.run_worker(
+            self._refresh_jobs_async(),
+            name="dashboard-initial-refresh",
+            group="dashboard-refresh",
+            exclusive=True,
+        )
         self.set_interval(2.0, self._refresh_jobs_async)
         table.focus()
 
@@ -202,6 +209,8 @@ class DashboardScreen(Screen[None]):
                 if detail_target and self._detail_visible
                 else None
             )
+            if self.app.screen is not self:
+                return
             self._apply_jobs_snapshot(
                 {
                     "active": active,

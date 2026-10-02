@@ -40,6 +40,10 @@ LOG_VIEW_LINES = 200
 # by carrying the offset forward. Bounds memory and RichLog write bursts.
 LOG_READ_CHUNK_BYTES = 65536
 
+# Search text itself paints immediately, but recoloring the complete 200-line
+# RichLog window is coalesced so a burst of SSH keystrokes causes one repaint.
+LOG_SEARCH_DEBOUNCE_SECONDS = 0.15
+
 # Most recent shell/query attempts shown in the compact history line; older
 # attempts are summarized by count rather than dropped silently.
 MONITOR_HISTORY_LIMIT = 5
@@ -108,6 +112,7 @@ class JobDetailScreen(Screen[None]):
         self._monitor_generation = 0
         self._detail_timer: Timer | None = None
         self._monitor_timer: Timer | None = None
+        self._search_rebuild_timer: Timer | None = None
         self._compact_layout = False
         self._recovery_call_id: str | None = None
         self._recovery_checked_call_id: str | None = None
@@ -179,7 +184,7 @@ class JobDetailScreen(Screen[None]):
                 yield Button("Cancel Job [C]", id="cancel", variant="error")
         yield Footer()
 
-    async def on_mount(self) -> None:
+    def on_mount(self) -> None:
         self._monitor_generation += 1
         self.query_one("#log-search-input").display = False
         self.query_one("#truncation-hint").display = False
@@ -189,7 +194,13 @@ class JobDetailScreen(Screen[None]):
         self._update_layout_mode()
         if self.cancel_on_mount:
             self.action_cancel()
-        await self._refresh_detail_async()
+        # The screen should become interactive before manifest/log I/O finishes.
+        self.run_worker(
+            self._refresh_detail_async(),
+            name=f"detail-initial-{self.job_id}",
+            group="detail-initial",
+            exclusive=True,
+        )
         self._detail_timer = self.set_interval(1.0, self._refresh_detail_async)
         self.app.run_worker(
             self._start_monitoring_async(),
@@ -209,11 +220,12 @@ class JobDetailScreen(Screen[None]):
 
     def on_unmount(self) -> None:
         self._monitor_generation += 1
-        for timer in (self._detail_timer, self._monitor_timer):
+        for timer in (self._detail_timer, self._monitor_timer, self._search_rebuild_timer):
             if timer is not None:
                 timer.stop()
         self._detail_timer = None
         self._monitor_timer = None
+        self._search_rebuild_timer = None
         # Screen is popped, not suspended-in-place (see app.py navigation);
         # dropping the subscription here returns this job's pollers to the
         # background cadence for every other consumer.
@@ -390,7 +402,8 @@ class JobDetailScreen(Screen[None]):
 
         try:
             snapshot = await asyncio.to_thread(_read)
-            self._apply_detail_snapshot(snapshot)
+            if self.is_mounted and self.app.screen is self:
+                self._apply_detail_snapshot(snapshot)
         finally:
             self._refresh_in_flight = False
 
@@ -757,15 +770,31 @@ class JobDetailScreen(Screen[None]):
         if search.display:
             search.focus()
         else:
+            if self._search_rebuild_timer is not None:
+                self._search_rebuild_timer.stop()
+                self._search_rebuild_timer = None
             self._search_query = ""
-            search.value = ""
+            with self.prevent(Input.Changed):
+                search.value = ""
             self._rebuild_log()
             self.query_one("#log-display", RichLog).focus()
+
+    def _schedule_log_rebuild(self) -> None:
+        if self._search_rebuild_timer is not None:
+            self._search_rebuild_timer.stop()
+        self._search_rebuild_timer = self.set_timer(
+            LOG_SEARCH_DEBOUNCE_SECONDS,
+            self._run_scheduled_log_rebuild,
+        )
+
+    def _run_scheduled_log_rebuild(self) -> None:
+        self._search_rebuild_timer = None
+        self._rebuild_log()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "log-search-input":
             self._search_query = event.value.strip()
-            self._rebuild_log()
+            self._schedule_log_rebuild()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "log-search-input":
