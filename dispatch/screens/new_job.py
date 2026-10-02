@@ -7,6 +7,7 @@ import calendar
 import logging
 import os
 from datetime import date, datetime
+from functools import partial
 from pathlib import Path
 
 from textual.app import ComposeResult
@@ -565,7 +566,7 @@ class NewJobScreen(Screen[None]):
         return issues
 
     def _update_validation_summary(self) -> None:
-        self._apply_validation_summary(self._validation_issues(), self._current_analysis())
+        self._start_validation_worker()
 
     def _current_analysis(self) -> AnalysisResult:
         source_type = self._selected_source()
@@ -605,11 +606,11 @@ class NewJobScreen(Screen[None]):
             return AnalysisResult(available=True, findings=())
         return analyze_sql(sql_text, source_type=source_type, user_id=user_id)
 
-    def _schedule_validation_summary(self, *, delay: float = 0.15) -> None:
+    def _schedule_validation_summary(self, *, delay: float = 0.2) -> None:
         self._live_validation_generation += 1
         if self._validation_summary_timer is not None:
             self._validation_summary_timer.stop()
-        self._validation_summary_timer = self.set_timer(delay, self._start_validation_worker)
+        self._validation_summary_timer = self.set_timer(delay, self._update_validation_summary)
 
     def _start_validation_worker(self) -> None:
         self._validation_summary_timer = None
@@ -623,7 +624,8 @@ class NewJobScreen(Screen[None]):
         if self._sql_analysis_cache is not None and self._sql_analysis_cache[0] == sql_cache_key:
             cached_sql = self._sql_analysis_cache[1]
         self.run_worker(
-            self._refresh_validation_async(
+            partial(
+                self._refresh_validation_async,
                 generation,
                 inputs,
                 custom_schema_choice,
