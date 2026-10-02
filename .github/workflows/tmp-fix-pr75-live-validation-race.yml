@@ -22,7 +22,7 @@ jobs:
           version: "0.12.0"
       - name: Install dev dependencies
         run: uv sync --locked --extra dev --python 3.12
-      - name: Repair explicit-message and teardown races
+      - name: Make action messages authoritative and Kerberos blockers immediate
         shell: python
         run: |
           from pathlib import Path
@@ -32,24 +32,32 @@ jobs:
 
           replacements = [
               (
-                  "from textual.containers import Horizontal, Vertical\nfrom textual.screen import Screen\n",
-                  "from textual.containers import Horizontal, Vertical\nfrom textual.css.query import NoMatches\nfrom textual.screen import Screen\n",
+                  "        self._live_validation_generation = 0\n",
+                  "        self._live_validation_generation = 0\n        self._live_feedback_suppressed = False\n",
               ),
               (
-                  '''    def on_unmount(self) -> None:\n        if self._validation_summary_timer is not None:\n            self._validation_summary_timer.stop()\n            self._validation_summary_timer = None\n''',
-                  '''    def on_unmount(self) -> None:\n        self._invalidate_live_validation()\n''',
+                  '''    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:\n        self._update_field_visibility()\n        self._inline_validate()\n        self._schedule_validation_summary()\n''',
+                  '''    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:\n        self._live_feedback_suppressed = False\n        self._update_field_visibility()\n        self._inline_validate()\n        self._schedule_validation_summary()\n''',
               ),
               (
-                  '''    def _schedule_validation_summary(self, *, delay: float = 0.2) -> None:\n        self._live_validation_generation += 1\n        if self._validation_summary_timer is not None:\n            self._validation_summary_timer.stop()\n        self._validation_summary_timer = self.set_timer(delay, self._update_validation_summary)\n\n    def _start_validation_worker(self) -> None:\n''',
-                  '''    def _schedule_validation_summary(self, *, delay: float = 0.2) -> None:\n        self._live_validation_generation += 1\n        if self._validation_summary_timer is not None:\n            self._validation_summary_timer.stop()\n        self._validation_summary_timer = self.set_timer(delay, self._update_validation_summary)\n\n    def _invalidate_live_validation(self) -> None:\n        self._live_validation_generation += 1\n        if self._validation_summary_timer is not None:\n            self._validation_summary_timer.stop()\n            self._validation_summary_timer = None\n\n    def _start_validation_worker(self) -> None:\n''',
+                  '''    def on_input_changed(self, event: Input.Changed) -> None:\n        if event.input.id == "table-name-suffix":\n''',
+                  '''    def on_input_changed(self, event: Input.Changed) -> None:\n        self._live_feedback_suppressed = False\n        if event.input.id == "table-name-suffix":\n''',
               ),
               (
-                  '''        if generation != self._live_validation_generation or not self.is_mounted:\n            return\n        if self._launch_inputs() != inputs or self.kerberos_ttl != ttl:\n            return\n        if file_exists is not None:\n            self._sql_exists_cache = (inputs.sql_path, file_exists)\n        if (\n            detected_source in {"SqlTemplate", "ExistingTable"}\n            and detected_source != inputs.source_type\n        ):\n            self._apply_detected_source(detected_source)\n            return\n        self._sql_analysis_cache = (sql_cache_key, sql_result)\n        if detected_source is not None:\n            self._apply_detected_source(detected_source)\n        self._inline_validate()\n        self._refresh_path_hint()\n        self._apply_validation_summary(issues, analysis)\n''',
-                  '''        if generation != self._live_validation_generation or not self.is_mounted:\n            return\n        if self.kerberos_ttl != ttl:\n            return\n        try:\n            if file_exists is not None:\n                self._sql_exists_cache = (inputs.sql_path, file_exists)\n            if (\n                detected_source in {"SqlTemplate", "ExistingTable"}\n                and detected_source != inputs.source_type\n            ):\n                self._apply_detected_source(detected_source)\n                return\n            self._sql_analysis_cache = (sql_cache_key, sql_result)\n            if detected_source is not None:\n                self._apply_detected_source(detected_source)\n            self._inline_validate()\n            self._refresh_path_hint()\n            self._apply_validation_summary(issues, analysis)\n        except NoMatches:\n            return\n''',
+                  '''    def _inline_validate(self) -> None:\n        """Paint cheap validation only; filesystem checks arrive asynchronously."""\n        source = self._selected_source()\n''',
+                  '''    def _inline_validate(self) -> None:\n        """Paint cheap validation only; filesystem checks arrive asynchronously."""\n        if self._live_feedback_suppressed:\n            return\n        source = self._selected_source()\n''',
               ),
               (
-                  '''    def _show_message(self, text: str, severity: str = "info") -> None:\n        widget = self.query_one("#warning-text", Static)\n''',
+                  '''        self._update_field_visibility()\n        self._inline_validate()\n        self.query_one("#validation-summary", Static).update("[dim]Checking…[/]")\n        self._schedule_validation_summary(delay=0.0)\n''',
+                  '''        self._update_field_visibility()\n        self._inline_validate()\n        self._paint_validation_pending_summary()\n        self._schedule_validation_summary(delay=0.0)\n''',
+              ),
+              (
+                  '''    def _refresh_kerberos(self) -> None:\n        self.query_one("#launch", Button).disabled = (\n            self.kerberos_ttl is None or self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS\n        )\n        self._schedule_validation_summary()\n''',
+                  '''    def _paint_validation_pending_summary(self) -> None:\n        summary = self.query_one("#validation-summary", Static)\n        if self.kerberos_ttl is None:\n            summary.update("[red]✗ 1 issue(s): Kerberos ticket missing — press K to kinit[/]")\n        elif self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS:\n            summary.update(\n                "[red]✗ 1 issue(s): Kerberos ticket TTL is under 5 minutes — press K to renew[/]"\n            )\n        else:\n            summary.update("[dim]Checking…[/]")\n\n    def _refresh_kerberos(self) -> None:\n        self.query_one("#launch", Button).disabled = (\n            self.kerberos_ttl is None or self.kerberos_ttl < kerberos.MIN_LAUNCH_TTL_SECONDS\n        )\n        self._paint_validation_pending_summary()\n        self._schedule_validation_summary()\n''',
+              ),
+              (
                   '''    def _show_message(self, text: str, severity: str = "info") -> None:\n        self._invalidate_live_validation()\n        widget = self.query_one("#warning-text", Static)\n''',
+                  '''    def _show_message(self, text: str, severity: str = "info") -> None:\n        self._invalidate_live_validation()\n        self._live_feedback_suppressed = True\n        widget = self.query_one("#warning-text", Static)\n''',
               ),
           ]
           for old, new in replacements:
@@ -64,6 +72,8 @@ jobs:
       - name: Focused regression checks
         run: >-
           uv run --locked --no-sync python -m pytest
+          tests/test_new_features.py::TestNewJobKerberosGating::test_low_kerberos_ttl_disables_launch_and_explains_issue
+          tests/test_phase1_safety.py::test_new_job_rechecks_preflight_after_confirm_before_manifest
           tests/test_phase1_safety.py::test_sql_preview_missing_file_shows_actionable_error
           tests/test_qa_fixes.py::test_launch_blocks_invalid_email
           tests/test_qa_fixes.py::test_preview_bad_template_dates_does_not_crash
@@ -78,5 +88,32 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add dispatch/screens/new_job.py
-          git commit -m "fix(tui): keep live validation from overwriting actions"
+          git commit -m "fix(tui): preserve explicit New Job status messages"
           git push origin HEAD:perf/ssh-interaction-latency
+
+  verify-windows:
+    needs: repair
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: perf/ssh-interaction-latency
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: "0.12.0"
+      - name: Install dev dependencies
+        run: uv sync --locked --extra dev --python 3.12
+      - name: Focused Windows regressions
+        run: >-
+          uv run --locked --no-sync python -m pytest
+          tests/test_new_features.py::TestNewJobKerberosGating::test_low_kerberos_ttl_disables_launch_and_explains_issue
+          tests/test_phase1_safety.py::test_new_job_rechecks_preflight_after_confirm_before_manifest
+          tests/test_phase1_safety.py::test_sql_preview_missing_file_shows_actionable_error
+          tests/test_qa_fixes.py::test_launch_blocks_invalid_email
+          tests/test_qa_fixes.py::test_preview_bad_template_dates_does_not_crash
+          tests/test_new_features.py::TestNewJobInlineValidation::test_validation_summary_is_debounced_during_typing
+          tests/test_tui_performance.py
+          -q -W error::RuntimeWarning
