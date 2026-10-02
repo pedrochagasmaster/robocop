@@ -12,6 +12,7 @@ from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import (
@@ -479,9 +480,7 @@ class NewJobScreen(Screen[None]):
             self._refresh_path_hint()
 
     def on_unmount(self) -> None:
-        if self._validation_summary_timer is not None:
-            self._validation_summary_timer.stop()
-            self._validation_summary_timer = None
+        self._invalidate_live_validation()
 
     def action_toggle_matrix(self) -> None:
         collapsible = self.query_one("#matrix-collapsible", Collapsible)
@@ -612,6 +611,12 @@ class NewJobScreen(Screen[None]):
             self._validation_summary_timer.stop()
         self._validation_summary_timer = self.set_timer(delay, self._update_validation_summary)
 
+    def _invalidate_live_validation(self) -> None:
+        self._live_validation_generation += 1
+        if self._validation_summary_timer is not None:
+            self._validation_summary_timer.stop()
+            self._validation_summary_timer = None
+
     def _start_validation_worker(self) -> None:
         self._validation_summary_timer = None
         generation = self._live_validation_generation
@@ -703,22 +708,25 @@ class NewJobScreen(Screen[None]):
         )
         if generation != self._live_validation_generation or not self.is_mounted:
             return
-        if self._launch_inputs() != inputs or self.kerberos_ttl != ttl:
+        if self.kerberos_ttl != ttl:
             return
-        if file_exists is not None:
-            self._sql_exists_cache = (inputs.sql_path, file_exists)
-        if (
-            detected_source in {"SqlTemplate", "ExistingTable"}
-            and detected_source != inputs.source_type
-        ):
-            self._apply_detected_source(detected_source)
+        try:
+            if file_exists is not None:
+                self._sql_exists_cache = (inputs.sql_path, file_exists)
+            if (
+                detected_source in {"SqlTemplate", "ExistingTable"}
+                and detected_source != inputs.source_type
+            ):
+                self._apply_detected_source(detected_source)
+                return
+            self._sql_analysis_cache = (sql_cache_key, sql_result)
+            if detected_source is not None:
+                self._apply_detected_source(detected_source)
+            self._inline_validate()
+            self._refresh_path_hint()
+            self._apply_validation_summary(issues, analysis)
+        except NoMatches:
             return
-        self._sql_analysis_cache = (sql_cache_key, sql_result)
-        if detected_source is not None:
-            self._apply_detected_source(detected_source)
-        self._inline_validate()
-        self._refresh_path_hint()
-        self._apply_validation_summary(issues, analysis)
 
     def _apply_validation_summary(self, issues: list[str], analysis: AnalysisResult) -> None:
         summary = self.query_one("#validation-summary", Static)
@@ -817,6 +825,7 @@ class NewJobScreen(Screen[None]):
             return None
 
     def _show_message(self, text: str, severity: str = "info") -> None:
+        self._invalidate_live_validation()
         widget = self.query_one("#warning-text", Static)
         color = {"error": "red", "warning": "yellow", "success": "green", "info": "dim"}.get(
             severity, "dim"
