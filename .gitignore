@@ -14,6 +14,7 @@ robocop_handoff.md
 *.pyc
 __pycache__/
 .pytest_cache/
+dispatch-telemetry-history/
 .local-check-tmp/
 .local-check-pytest/
 .pylint.d/
